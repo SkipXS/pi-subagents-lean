@@ -10,12 +10,14 @@ import { SettingsListWrapper } from "../../../../src/ui/menu/wrappers/settings-l
 
 const theme = {
   fg: (_color: string, text: string) => text,
+  bg: (_color: string, text: string) => text,
   bold: (text: string) => text,
 };
 
 function makeSettingsList(items: any[]) {
   return {
     items,
+    filteredItems: items,
     onChange: vi.fn(),
     onCancel: vi.fn(),
     selectedIndex: 0,
@@ -33,6 +35,7 @@ function makeSelectList(items: any[]) {
     selectedIndex: 0,
     render: () => [] as string[],
     handleInput: () => {},
+    invalidate: () => {},
   };
 }
 

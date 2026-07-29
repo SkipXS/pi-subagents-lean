@@ -21,16 +21,16 @@ export const mockModules = {
   mockSessionShowCost: undefined as boolean | undefined,
   mockManager: {
     setConcurrency: vi.fn(),
-    listAgents: vi.fn(() => []),
+    listAgents: vi.fn<() => any[]>(() => []),
     getRecord: vi.fn(),
     abort: vi.fn(),
     steer: vi.fn(),
-    spawn: vi.fn(() => "agent-id-123"),
+    spawn: vi.fn<(...args: any[]) => string>(() => "agent-id-123"),
   },
   mockSessionCtx: {
     modelRegistry: {
       find: vi.fn((provider: string, modelId: string) => {
-        const known: Record<string, { provider: string; id: string }> = {
+        const known: Record<string, { provider: string; id: string; reasoning: boolean }> = {
           "openai/gpt-4o": { provider: "openai", id: "gpt-4o", reasoning: true },
           "anthropic/claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", reasoning: true },
         };
@@ -41,7 +41,7 @@ export const mockModules = {
         { provider: "openai", id: "gpt-4o", reasoning: true },
       ]),
     },
-    model: { provider: "test", id: "parent-model", reasoning: true },
+    model: { provider: "test", id: "parent-model", reasoning: true } as { provider: string; id: string; reasoning: boolean } | undefined,
     cwd: "/test",
   },
   mockPiExec: vi.fn(),

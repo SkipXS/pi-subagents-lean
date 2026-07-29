@@ -23,7 +23,7 @@ import { validateNumeric } from "../helpers.js";
  */
 export function createNumericSubmenu(
   ctx: ExtensionCommandContext,
-  optionsOrCallback?: { min?: number; required?: boolean; default?: number } | ((parsed: number) => void),
+  optionsOrCallback?: { min?: number; required?: boolean; default?: number; onValid?: (parsed: number) => void } | ((parsed: number) => void),
   onValid?: (parsed: number) => void,
   onEmpty?: () => void,
 ): (initialValue: string, done: (selectedValue?: string) => void) => Component {

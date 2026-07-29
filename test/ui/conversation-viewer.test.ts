@@ -21,7 +21,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mocks
 // ---------------------------------------------------------------------------
 
-const mockSubscribe = vi.fn(() => () => {});
+const mockSubscribe = vi.fn<(callback: (event?: unknown) => void) => () => void>(() => () => {});
 const mockRequestRender = vi.fn();
 
 vi.mock("@earendil-works/pi-tui", () => ({

@@ -45,7 +45,7 @@ describe("createNumericSubmenu", () => {
   });
 
   it("returns a function that creates an Input component", () => {
-    const factory = createNumericSubmenu(mockCtx(), vi.fn());
+    const factory = createNumericSubmenu(mockCtx(), vi.fn<(parsed: number) => void>());
     expect(typeof factory).toBe("function");
 
     factory("5", vi.fn());
@@ -54,7 +54,7 @@ describe("createNumericSubmenu", () => {
   });
 
   it("calls onValid and done with parsed value on valid submit", () => {
-    const onValid = vi.fn();
+    const onValid = vi.fn<(parsed: number) => void>();
     const done = vi.fn();
     createNumericSubmenu(mockCtx(), onValid)("5", done);
     inputInstances[0].onSubmit!("10");
@@ -64,7 +64,7 @@ describe("createNumericSubmenu", () => {
 
   it("calls onError and does NOT call done on invalid submit", () => {
     const ctx = mockCtx();
-    const onValid = vi.fn();
+    const onValid = vi.fn<(parsed: number) => void>();
     const done = vi.fn();
     createNumericSubmenu(ctx, { onValid })("5", done);
     inputInstances[0].onSubmit!("0");
@@ -83,7 +83,7 @@ describe("createNumericSubmenu", () => {
   });
 
   it("accepts value at exact minimum", () => {
-    const onValid = vi.fn();
+    const onValid = vi.fn<(parsed: number) => void>();
     const done = vi.fn();
     createNumericSubmenu(mockCtx(), { min: 5, onValid })("5", done);
     inputInstances[0].onSubmit!("5");

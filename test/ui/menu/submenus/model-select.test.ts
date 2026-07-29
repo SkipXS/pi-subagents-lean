@@ -66,6 +66,7 @@ describe("createModelSelectSubmenu", () => {
 
   const mockTheme = {
     fg: (_c: string, t: string) => t,
+    bg: (_color: string, text: string) => text,
     bold: (t: string) => t,
     italic: (t: string) => t,
   };

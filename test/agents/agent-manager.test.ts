@@ -39,7 +39,14 @@ function mockAgentSession(): any {
   return { subscribe: vi.fn(), messages: [], dispose: vi.fn() };
 }
 
-function mockRunResult(overrides?: Partial<ReturnType<typeof mockRunResult>>) {
+type MockRunResult = {
+  responseText: string;
+  session: ReturnType<typeof mockAgentSession>;
+  aborted: boolean;
+  turnLimited: boolean;
+};
+
+function mockRunResult(overrides?: Partial<MockRunResult>): MockRunResult {
   return {
     responseText: "done",
     session: mockAgentSession(),
@@ -50,16 +57,16 @@ function mockRunResult(overrides?: Partial<ReturnType<typeof mockRunResult>>) {
 }
 
 import { AgentManager } from "../../src/agents/agent-manager.js";
-import type { ConcurrencyConfig } from "../../src/agents/agent-manager.js";
+import type { ConcurrencyConfig, OnAgentComplete } from "../../src/agents/agent-manager.js";
 
 describe("AgentManager", () => {
   let manager: AgentManager;
-  let onComplete: ReturnType<typeof vi.fn>;
+  let onComplete: ReturnType<typeof vi.fn<OnAgentComplete>>;
 
   beforeEach(() => {
     mockModules.resetUuidCounter();
     mockModules.mockRunAgent.mockReset();
-    onComplete = vi.fn();
+    onComplete = vi.fn<OnAgentComplete>();
   });
 
   afterEach(() => {

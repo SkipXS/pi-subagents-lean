@@ -258,6 +258,9 @@ export function setupEventListeners(pi: ExtensionAPI): void {
 
   // session_shutdown — abort all, dispose manager
   pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
+    unregisterTerminalInput?.();
+    unregisterTerminalInput = undefined;
+
     // Warn if agents were killed
     const currentManager = getManager();
     if (currentManager) {

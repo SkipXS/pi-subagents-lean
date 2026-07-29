@@ -213,7 +213,7 @@ function usageFromTypedUsage(usage: Usage): AgentUsage {
  * used by runAgent. Returns an unsubscribe function.
  */
 export function subscribeToSessionEvents(
-  session: AgentSession,
+  session: Pick<AgentSession, "subscribe">,
   options: Pick<RunOptions, "onToolActivity" | "onAssistantUsage" | "onSupplementalUsage" | "onCompaction">,
 ): () => void {
   if (!options.onToolActivity && !options.onAssistantUsage && !options.onSupplementalUsage && !options.onCompaction) {

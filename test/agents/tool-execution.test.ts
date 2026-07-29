@@ -40,7 +40,7 @@ const {
     type,
     config: { maxTurns: 25, thinkingLevel: undefined },
   })),
-  mockResolveAgentCatalog: vi.fn(async () => new Map([["general-purpose", { maxTurns: 25, thinkingLevel: undefined }]])),
+  mockResolveAgentCatalog: vi.fn(async () => new Map<string, any>([["general-purpose", { maxTurns: 25, thinkingLevel: undefined }]])),
   mockModelFor: vi.fn((_: string, parentModelId: string, agentConfig?: any) => agentConfig?.model ?? parentModelId),
   mockModelSettingFor: vi.fn((_: string, parentModelId: string, agentConfig?: any, explicitModel?: string) => ({
     value: explicitModel ?? agentConfig?.model ?? parentModelId,

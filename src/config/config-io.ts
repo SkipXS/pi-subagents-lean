@@ -93,6 +93,11 @@ export function saveConfigAtomic(config: SubagentsConfig): void {
     fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), "utf-8");
     fs.renameSync(tmpPath, CONFIG_PATH);
   } catch (err) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // The temporary file may not exist when mkdir/write failed.
+    }
     console.error(`[pi-subagents-lean] Failed to save config: ${err}`);
   }
 }

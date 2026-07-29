@@ -287,7 +287,7 @@ describe("tool_call listener — guards", () => {
     const event = {
       toolName: "bash",
       toolCallId: "call_123",
-      input: { command: "echo hello" },
+      input: { command: "echo hello" } as Record<string, unknown>,
     };
     const result = await toolCallHandler()!(event, {});
 
@@ -311,7 +311,7 @@ describe("tool_call listener — guards", () => {
         prompt: "do something",
         description: "test",
         agent: "Explore",
-      },
+      } as Record<string, unknown>,
     };
 
     const result = await toolCallHandler()!(event, ctx);

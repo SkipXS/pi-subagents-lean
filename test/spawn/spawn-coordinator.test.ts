@@ -39,14 +39,18 @@ vi.mock("../../src/config/config-io.js", () => ({
 }));
 
 // Hoist mock pi so shell mock can return it
-const { mockPi, mockGetPiInstance } = vi.hoisted(() => ({
-  mockPi: { sendMessage: vi.fn(), sendUserMessage: vi.fn(), exec: vi.fn(), registerTool: vi.fn(), registerCommand: vi.fn(), on: vi.fn() } as unknown as ExtensionAPI,
-  mockGetPiInstance: vi.fn(() => null as unknown as ExtensionAPI),
+const { mockPi, mockGetPiInstance, mockIsIdle } = vi.hoisted(() => ({
+  mockPi: { sendMessage: vi.fn(), sendUserMessage: vi.fn(), exec: vi.fn(), registerTool: vi.fn(), registerCommand: vi.fn(), on: vi.fn() } as unknown as ExtensionAPI & {
+    sendMessage: ReturnType<typeof vi.fn>;
+    sendUserMessage: ReturnType<typeof vi.fn>;
+  },
+  mockGetPiInstance: vi.fn<() => ExtensionAPI | null>(() => null),
+  mockIsIdle: vi.fn(() => true),
 }));
 
 vi.mock("../../src/shell.js", () => ({
   getPiInstance: () => mockGetPiInstance(),
-  getSessionCtx: () => ({ isIdle: () => true }),
+  getSessionCtx: () => ({ isIdle: mockIsIdle }),
   getWidget: () => null,
 }));
 
@@ -103,6 +107,7 @@ describe("SpawnCoordinator", () => {
     mockPi.sendMessage.mockClear();
     mockAgentConfig.mockReset().mockReturnValue(undefined);
     mockGetPiInstance.mockReturnValue(mockPi);
+    mockIsIdle.mockReturnValue(true);
     const mod = await import("../../src/spawn/spawn-coordinator.js");
     SpawnCoordinator = mod.SpawnCoordinator;
   });
@@ -364,12 +369,32 @@ describe("SpawnCoordinator", () => {
       // Simulate completion
       coordinator.onAgentComplete({ id: result.agentId } as AgentRecord);
 
-      // Nudge should be scheduled
+      // Nudge should be scheduled with Pi's custom-message contract.
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
+      expect(mockPi.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ customType: "subagent-result", display: true }),
+        { deliverAs: "followUp", triggerTurn: true },
+      );
 
       // Should be removed from background set
       expect(coordinator.isBackground(result.agentId)).toBe(false);
+    });
+
+    it("uses steer delivery while the parent session is busy", async () => {
+      mockIsIdle.mockReturnValue(false);
+      const coordinator = new SpawnCoordinator(manager as any);
+      const result = await coordinator.spawn(mockPi, ctx, {
+        type: "builder", prompt: "task", description: "Test", graceTurns: 6, runInBackground: true,
+      });
+
+      coordinator.onAgentComplete({ id: result.agentId } as AgentRecord);
+      vi.advanceTimersByTime(200);
+
+      expect(mockPi.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ customType: "subagent-result" }),
+        { deliverAs: "steer", triggerTurn: true },
+      );
     });
 
     it("does not schedule nudge for foreground agents", () => {

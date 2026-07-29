@@ -100,6 +100,7 @@ export interface RegisteredTool {
   promptSnippet?: string;
   promptGuidelines?: string;
   parameters: any; // TypeBox TSchema
+  constrainedSampling?: unknown;
   execute?: (...args: any[]) => any;
 }
 

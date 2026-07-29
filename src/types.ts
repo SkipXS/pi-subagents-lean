@@ -7,6 +7,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentOutputLog } from "./agents/output-file.js";
 import type { LifetimeUsage, AgentUsage } from "./agents/usage.js";
 import type { SubagentType, AgentInvocation, AgentConfig } from "./agents/types.js";
+export type { AgentConfig } from "./agents/types.js";
 
 /** Thinking level for agent models (sourced from @earendil-works/pi-ai). */
 export type ThinkingLevel = ModelThinkingLevel;

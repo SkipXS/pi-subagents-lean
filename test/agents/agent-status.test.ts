@@ -42,7 +42,6 @@ describe("AgentStatus tool execute behavior", () => {
       {},
       undefined,
       undefined,
-      undefined,
       {} as any,
     );
 
@@ -61,7 +60,6 @@ describe("AgentStatus tool execute behavior", () => {
     const result = await executeAgentStatusTool(
       "call_2",
       {},
-      undefined,
       undefined,
       undefined,
       {} as any,
@@ -84,7 +82,6 @@ describe("AgentStatus tool execute behavior", () => {
     const result = await executeAgentStatusTool(
       "call_3",
       {},
-      undefined,
       undefined,
       undefined,
       {} as any,
@@ -110,7 +107,6 @@ describe("AgentStatus tool execute behavior", () => {
     const result = await executeAgentStatusTool(
       "call_4",
       {},
-      undefined,
       undefined,
       undefined,
       {} as any,
@@ -152,7 +148,6 @@ describe("AgentStatus tool execute behavior", () => {
     const result = await executeAgentStatusTool(
       "call_6",
       {},
-      undefined,
       undefined,
       undefined,
       {} as any,

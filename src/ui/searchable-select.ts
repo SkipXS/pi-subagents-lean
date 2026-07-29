@@ -62,6 +62,7 @@ export class SearchableSelectDialog extends Container implements Focusable {
   private currentValue: string | null;
   private callbacks: SelectDialogCallbacks;
   private theme: Theme;
+  private settled = false;
 
   // Focusable implementation — propagate to searchInput for IME cursor
   private _focused = false;
@@ -99,9 +100,8 @@ export class SearchableSelectDialog extends Container implements Focusable {
 
     this.searchInput = new Input();
     this.searchInput.onSubmit = () => {
-      if (this.filteredItems[this.selectedIndex]) {
-        this.callbacks.onSelect(this.filteredItems[this.selectedIndex].value);
-      }
+      const selected = this.filteredItems[this.selectedIndex];
+      if (selected) this.select(selected.value);
     };
     this.addChild(this.searchInput);
     this.addChild(new Spacer(1));
@@ -171,15 +171,13 @@ export class SearchableSelectDialog extends Container implements Focusable {
     // Enter — confirm selection
     if (kb.matches(keyData, "tui.select.confirm")) {
       const selected = this.filteredItems[this.selectedIndex];
-      if (selected) {
-        this.callbacks.onSelect(selected.value);
-      }
+      if (selected) this.select(selected.value);
       return;
     }
 
     // Escape / Ctrl+C — cancel
     if (kb.matches(keyData, "tui.select.cancel")) {
-      this.callbacks.onCancel();
+      this.cancel();
       return;
     }
 
@@ -195,6 +193,18 @@ export class SearchableSelectDialog extends Container implements Focusable {
   /* ------------------------------------------------------------------ */
   /*  Private helpers                                                    */
   /* ------------------------------------------------------------------ */
+
+  private select(value: string): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.callbacks.onSelect(value);
+  }
+
+  private cancel(): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.callbacks.onCancel();
+  }
 
   private filterItems(): void {
     const query = this.searchInput.getValue();

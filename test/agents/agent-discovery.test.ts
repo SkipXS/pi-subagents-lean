@@ -192,7 +192,7 @@ body
   ] as const)("parses inline YAML array for %s", (field, value, expected) => {
     const content = `---\nname: agent\n${field}: ${value}\n---\nbody\n`;
     const result = parseAgentFile(content, "user");
-    expect((result as Record<string, unknown>)[field]).toEqual(expected);
+    expect((result as unknown as Record<string, unknown>)[field]).toEqual(expected);
   });
 
   it("parses extensions as boolean true", () => {

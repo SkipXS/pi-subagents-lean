@@ -12,6 +12,7 @@ import { buildInvocationTags, buildStatsCells, buildStatsLayout, buildStatsParts
 
 const mockTheme = {
   fg: (_color: string, text: string) => text,
+  bg: (_color: string, text: string) => text,
   bold: (text: string) => text,
 };
 
@@ -101,6 +102,7 @@ describe("buildStatsParts — visible flag: showContext", () => {
 describe("buildStatsParts — Pi context colors", () => {
   const markerTheme = {
     fg: (color: string, text: string) => `[${color}:${text}]`,
+    bg: (_color: string, text: string) => text,
     bold: (text: string) => text,
   };
 
@@ -181,6 +183,7 @@ describe("structured stats rows", () => {
   it("reserves optional Pi metric slots and measures ANSI styling by visible width", () => {
     const ansiTheme = {
       fg: (color: string, text: string) => color === "error" ? `\u001b[31m${text}\u001b[39m` : text,
+      bg: (_color: string, text: string) => text,
       bold: (text: string) => text,
     };
     const rows = [
@@ -263,7 +266,7 @@ describe("buildStatsParts — cost behavior",  () => {
   it("does not include cost when not provided", () => {
     const parts = buildStatsParts({
       toolUses: 5, turnCount: 3, maxTurns: 30, input: 1000, output: 500,
-      contextPercent: 50, compactions: 2, durationMs: 65000,
+      contextPercent: 50, durationMs: 65000,
     }, mockTheme);
     expect(parts.some(p => p.includes("$"))).toBe(false);
   });

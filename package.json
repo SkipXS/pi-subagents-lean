@@ -46,7 +46,10 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "pack:check": "bun pm pack --dry-run",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest"
   },
   "pi": {
@@ -55,6 +58,10 @@
     ]
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.82.0",
+    "@earendil-works/pi-coding-agent": "^0.82.0",
+    "@earendil-works/pi-tui": "^0.82.0",
+    "@vitest/coverage-v8": "4.1.9",
     "typescript": "^6.0.3",
     "vitest": "^4.1.7"
   }

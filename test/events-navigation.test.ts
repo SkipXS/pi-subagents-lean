@@ -26,8 +26,8 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 /*  Mock setup                                                        */
 /* ------------------------------------------------------------------ */
 
-const mockMatchesKey = vi.fn();
-const mockIsKeyRelease = vi.fn(() => false);
+const mockMatchesKey = vi.fn<(...args: any[]) => unknown>();
+const mockIsKeyRelease = vi.fn<(...args: any[]) => boolean>(() => false);
 
 vi.mock("@earendil-works/pi-tui", () => ({
   matchesKey: (...args: any[]) => mockMatchesKey(...args),
@@ -62,7 +62,7 @@ vi.mock("../src/agents/default-agents.js", () => ({
 
 vi.mock("../src/agents/agent-discovery.js", () => ({
   scanAgentFilesInDir: vi.fn(async () => new Map()),
-  mergeAgents: vi.fn((...maps: Map[][]) => {
+  mergeAgents: vi.fn((...maps: Map<any, any>[][]) => {
     const merged = new Map();
     for (const m of maps) for (const [k, v] of m) merged.set(k, v);
     return merged;

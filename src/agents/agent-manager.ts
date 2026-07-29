@@ -45,7 +45,7 @@ export interface ConcurrencyConfig {
   default: number;
 }
 
-type OnAgentComplete = (record: AgentRecord) => void;
+export type OnAgentComplete = (record: AgentRecord) => void;
 type OnAgentStart = (record: AgentRecord) => void;
 
 /** Internal global concurrency state. */

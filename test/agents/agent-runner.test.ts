@@ -11,6 +11,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import { fakeCtx, fakePi as makeFakePi } from "../fixtures.ts";
 import type { AgentConfig } from "../../src/agents/types.js";
+import type { Model } from "@earendil-works/pi-ai";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 const fakePi = makeFakePi();
 
@@ -140,7 +142,14 @@ function resetMocks() {
 /**
  * Create a mock session with default stubs.
  */
-function createMockSession() {
+type MockAgentSession = Omit<AgentSession, "getActiveToolNames" | "setActiveToolsByName"> & {
+  agent: any;
+  getActiveToolNames: any;
+  setActiveToolsByName: any;
+  _getListeners: () => Array<(event: any) => void>;
+};
+
+function createMockSession(): MockAgentSession {
   const listeners: Array<(event: any) => void> = [];
   return {
     setSessionName: vi.fn(),
@@ -159,7 +168,7 @@ function createMockSession() {
     abort: vi.fn(),
     messages: [],
     _getListeners: () => listeners,
-  };
+  } as unknown as MockAgentSession;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1498,7 +1507,7 @@ describe("runAgent — maxTokens: front matter to provider payload", () => {
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
   });
 
-  function makeMockModel(overrides = {}) {
+  function makeMockModel(overrides = {}): Model<any> {
     return {
       id: "test-model",
       name: "Test Model",
@@ -1511,7 +1520,7 @@ describe("runAgent — maxTokens: front matter to provider payload", () => {
       contextWindow: 128000,
       maxTokens: 16384,
       ...overrides,
-    };
+    } as Model<any>;
   }
 
   it("max_tokens in agent config ends up in the provider request payload", async () => {
