@@ -4,6 +4,7 @@ import {
   formatCost,
   formatTokens,
   getLifetimeTotal,
+  getSessionContextPercent,
   getSessionUsageSnapshot,
   type LifetimeUsage,
 } from "../../src/agents/usage.js";
@@ -56,5 +57,28 @@ describe("Pi footer primitives", () => {
       getSessionStats: () => ({ contextUsage: { percent: 70.1 } }),
     })).toEqual({ contextPercent: 70.1 });
     expect(getSessionUsageSnapshot({ getContextUsage: () => { throw new Error("mock"); } })).toBeUndefined();
+  });
+
+  it("preserves context when model data is only available from session state", () => {
+    const session = {
+      getSessionStats: () => ({ contextUsage: { percent: 42, contextWindow: 32_000 } }),
+      state: { model: { provider: "state-provider", contextWindow: 64_000 } },
+    };
+
+    expect(getSessionUsageSnapshot(session)).toEqual({
+      contextPercent: 42,
+      contextWindow: 32_000,
+      usingSubscription: false,
+    });
+    expect(getSessionContextPercent(session)).toBe(42);
+  });
+
+  it("contains OAuth probe failures and treats unavailable sessions as absent", () => {
+    expect(getSessionUsageSnapshot({
+      model: { provider: "oauth-provider" },
+      modelRuntime: { isUsingOAuth: () => { throw new Error("provider unavailable"); } },
+    })).toEqual({ contextPercent: null, usingSubscription: false });
+    expect(getSessionUsageSnapshot(undefined)).toBeUndefined();
+    expect(getSessionContextPercent(undefined)).toBeNull();
   });
 });

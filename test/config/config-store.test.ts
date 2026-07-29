@@ -675,6 +675,20 @@ describe("ConfigStore lifecycle", () => {
     expect(calls).toContain("setShowCost:true");
   });
 
+  it("retains an injected manager when a widget is injected later", () => {
+    const { io } = memIO();
+    const { m, concurrencies } = managerStub();
+    const { w } = widgetStub();
+    const store = new ConfigStore(io);
+    store.setDeps({ manager: m });
+    store.setDeps({ widget: w });
+    concurrencies.length = 0;
+
+    store.mutate.concurrency.setDefault(8);
+
+    expect(concurrencies).toEqual([{ default: 8 }]);
+  });
+
   it("dispose drops deps so mutations no longer sync", () => {
     const { io } = memIO();
     const { w, calls } = widgetStub();
@@ -692,16 +706,32 @@ describe("ConfigStore lifecycle", () => {
 /* ------------------------------------------------------------------ */
 
 describe("ConfigStore notifyToolsExpanded", () => {
-  it("toggles widget compact mode only when shortcut is enabled and compact is off", () => {
+  it("synchronizes compact mode for initial and later tool expansion states", () => {
     const { io } = memIO({ agent: { default: null, forceBackground: false, widgetShortcut: true, widgetCompact: false }, concurrency: { default: 4 } });
     const { w, calls } = widgetStub();
     const store = new ConfigStore(io);
     store.setDeps({ widget: w });
-
-    store.notifyToolsExpanded(false); // initial transition from undefined -> ignored
     calls.length = 0;
-    store.notifyToolsExpanded(true); // expanded -> full
-    store.notifyToolsExpanded(false); // collapsed -> compact
+
+    store.notifyToolsExpanded(false);
+    expect(calls).toContain("setCompactMode:true");
+    calls.length = 0;
+
+    store.notifyToolsExpanded(true);
+    expect(calls).toContain("setCompactMode:false");
+  });
+
+  it("uses a previously reported expansion state when shortcut is enabled later", () => {
+    const { io } = memIO({ agent: { default: null, forceBackground: false, widgetShortcut: false, widgetCompact: false }, concurrency: { default: 4 } });
+    const { w, calls } = widgetStub();
+    const store = new ConfigStore(io);
+    store.setDeps({ widget: w });
+    calls.length = 0;
+
+    store.notifyToolsExpanded(false);
+    expect(calls).toHaveLength(0);
+
+    store.mutate.widget.setShortcut(true);
     expect(calls).toContain("setCompactMode:true");
   });
 

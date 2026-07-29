@@ -10,6 +10,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import * as fs from "node:fs";
+import { join } from "node:path";
 import {
   parseAgentFile,
   scanAgentFilesInDir,
@@ -309,6 +310,27 @@ describe("scanAgentFilesInDir", () => {
       expect(agents[0]?.name).toBe("reviewer");
       expect(agents[0]?.description).toBe("Reviews changes");
     } finally {
+      cleanup();
+    }
+  });
+
+  it("skips an unreadable agent file while discovering readable filename-fallback agents", async () => {
+    const { dir, cleanup } = tempDirWithFiles([
+      { name: "broken.md", content: makeAgentMd({ name: "broken" }) },
+      { name: "reviewer.md", content: "---\ndescription: Reviews changes\n---\nInstructions" },
+    ]);
+    const brokenPath = join(dir, "broken.md");
+    const originalReadFile = fs.promises.readFile;
+    const readFile = vi.spyOn(fs.promises, "readFile").mockImplementation(async (filePath, options) => {
+      if (filePath === brokenPath) throw new Error("simulated read failure");
+      return originalReadFile(filePath, options as "utf-8");
+    });
+
+    try {
+      const agents = await scanAgentFilesInDir(dir, "user");
+      expect(agents).toEqual([expect.objectContaining({ name: "reviewer", description: "Reviews changes" })]);
+    } finally {
+      readFile.mockRestore();
       cleanup();
     }
   });

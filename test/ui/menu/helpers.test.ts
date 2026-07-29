@@ -3,12 +3,62 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { validateNumeric, buildSettingsListTheme, buildSelectListTheme } from "../../../src/ui/menu/helpers.js";
+import {
+  buildModelOptions,
+  buildSelectListTheme,
+  buildSettingsListTheme,
+  createDelegatingComponent,
+  validateNumeric,
+} from "../../../src/ui/menu/helpers.js";
 
 const mockTheme = {
   fg: (color: string, text: string) => `[${color}:${text}]`,
   bold: (text: string) => `**${text}**`,
 };
+
+describe("buildModelOptions", () => {
+  it("keeps inherit-parent first and ignores malformed provider/model keys", () => {
+    expect(buildModelOptions(["anthropic/sonnet", "invalid", "/missing-provider", "openai/"]))
+      .toEqual([
+        { value: "(inherits parent)", label: "(inherits parent)", provider: "" },
+        { value: "anthropic/sonnet", label: "sonnet", provider: "anthropic" },
+        { value: "openai/", label: "", provider: "openai" },
+      ]);
+  });
+});
+
+describe("createDelegatingComponent", () => {
+  it("forwards component APIs and SelectList properties to the active child", () => {
+    const calls: string[] = [];
+    const first = {
+      focused: false,
+      items: ["first"],
+      onSelect: undefined as unknown,
+      onCancel: undefined as unknown,
+      invalidate: () => calls.push("invalidate:first"),
+      render: (width: number) => `first:${width}`,
+      handleInput: (data: string) => calls.push(`input:first:${data}`),
+    };
+    const delegator = createDelegatingComponent(first as any);
+
+    delegator.invalidate();
+    expect(delegator.render(12)).toBe("first:12");
+    delegator.handleInput?.("a");
+    delegator.focused = true;
+    delegator.items = ["updated"];
+    delegator.onSelect = "select";
+    delegator.onCancel = "cancel";
+
+    expect(calls).toEqual(["invalidate:first", "input:first:a"]);
+    expect(first).toMatchObject({ focused: true, items: ["updated"], onSelect: "select", onCancel: "cancel" });
+
+    const second = { render: (width: number) => `second:${width}` };
+    delegator.setActive(second as any);
+    expect(delegator.focused).toBe(false);
+    expect(delegator.render(8)).toBe("second:8");
+    expect(delegator.items).toBeUndefined();
+  });
+});
 
 describe("validateNumeric", () => {
   it("returns parsed integer for valid input", () => {

@@ -32,8 +32,15 @@ describe("model-aware thinking", () => {
     expect(normalizeThinkingLevel(noReasoning, "high")).toBe("off");
   });
 
+  it("retains all supported Pi levels when no model has been resolved", () => {
+    expect(supportedThinkingLevels(undefined)).toEqual([
+      "off", "minimal", "low", "medium", "high", "xhigh", "max",
+    ]);
+  });
+
   it("leaves a missing request undefined for Pi's session default", () => {
     expect(normalizeThinkingLevel(deepSeekV4ProLike, undefined)).toBeUndefined();
     expect(normalizeThinkingLevel(noReasoning, undefined)).toBeUndefined();
+    expect(normalizeThinkingLevel(undefined, "high")).toBe("high");
   });
 });

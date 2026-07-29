@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { join } from "node:path";
 
-const { mockGetAgentDir, mockMkdirSync, mockWriteFileSync, mockRenameSync, mockReadFileSync } = vi.hoisted(() => ({
+const { mockGetAgentDir, mockMkdirSync, mockWriteFileSync, mockRenameSync, mockUnlinkSync, mockReadFileSync } = vi.hoisted(() => ({
   mockGetAgentDir: vi.fn(),
   mockMkdirSync: vi.fn(),
   mockWriteFileSync: vi.fn(),
   mockRenameSync: vi.fn(),
+  mockUnlinkSync: vi.fn(),
   mockReadFileSync: vi.fn(),
 }));
 
@@ -17,6 +18,7 @@ vi.mock("node:fs", () => ({
   mkdirSync: mockMkdirSync,
   writeFileSync: mockWriteFileSync,
   renameSync: mockRenameSync,
+  unlinkSync: mockUnlinkSync,
   readFileSync: mockReadFileSync,
 }));
 
@@ -127,5 +129,24 @@ describe("config I/O paths", () => {
     expect(mockMkdirSync).toHaveBeenCalledWith(agentDir, { recursive: true });
     expect(mockWriteFileSync).toHaveBeenCalledWith(`${configPath}.tmp`, expect.any(String), "utf-8");
     expect(mockRenameSync).toHaveBeenCalledWith(`${configPath}.tmp`, configPath);
+  });
+
+  it("reports rename failures and removes the temporary config file", async () => {
+    const agentDir = "/tmp/pi-agent";
+    const configPath = join(agentDir, "subagents-lean.json");
+    const renameError = new Error("simulated rename failure");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockGetAgentDir.mockReturnValue(agentDir);
+    mockRenameSync.mockImplementation(() => { throw renameError; });
+    vi.resetModules();
+
+    try {
+      const { saveConfigAtomic } = await import("../../src/config/config-io.ts");
+      expect(() => saveConfigAtomic({ agent: {} as any, concurrency: {} as any })).not.toThrow();
+      expect(mockUnlinkSync).toHaveBeenCalledWith(`${configPath}.tmp`);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("simulated rename failure"));
+    } finally {
+      error.mockRestore();
+    }
   });
 });
