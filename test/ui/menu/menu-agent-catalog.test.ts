@@ -67,17 +67,15 @@ describe("showAgentCatalog", () => {
     }));
   });
 
-  it("opens the orchestration submenu and views enabled guidance built from the registry", async () => {
+  it("shows enabled orchestration guidance directly from the catalog", async () => {
     (getAllTypes as any).mockReturnValue(["Explore"]);
     (getAgentConfig as any).mockReturnValue({ description: "Search the codebase", systemPrompt: "Explore carefully" });
     const ctx = createMockCtx();
-    const components = selectCatalogItems(ctx, ["__orchestration__", "view-guidance", undefined]);
+    const components = selectCatalogItems(ctx, ["__orchestration__", undefined]);
 
     await showAgentCatalog(ctx);
 
-    expect(components[1].settingsList.items).toEqual([
-      expect.objectContaining({ value: "view-guidance", label: "View generated guidance" }),
-    ]);
+    expect(components).toHaveLength(2);
     const message = ctx.ui.notify.mock.calls[0][0];
     expect(message).toContain("Orchestration is enabled and this guidance is injected into parent turns.");
     expect(message).toContain("`Explore` — Search the codebase");
@@ -88,12 +86,12 @@ describe("showAgentCatalog", () => {
     (getAllTypes as any).mockReturnValue(["Explore"]);
     (getAgentConfig as any).mockReturnValue({ description: "Search", systemPrompt: "Instructions" });
     const ctx = createMockCtx();
-    const components = selectCatalogItems(ctx, ["__orchestration__", "view-guidance", undefined]);
+    const components = selectCatalogItems(ctx, ["__orchestration__", undefined]);
 
     await showAgentCatalog(ctx);
 
+    expect(components).toHaveLength(2);
     expect(components[0].settingsList.items[0].description).toContain("Disabled");
-    expect(components[1].settingsList.items[0].description).toContain("not injected");
     expect(ctx.ui.notify.mock.calls[0][0]).toContain("Orchestration is disabled; this generated guidance is not injected into parent turns.");
     expect(ctx.ui.notify.mock.calls[0][0]).toContain("`Explore` — Search");
   });

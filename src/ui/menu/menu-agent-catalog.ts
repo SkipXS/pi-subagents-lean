@@ -124,19 +124,7 @@ async function selectItem(
   });
 }
 
-async function showOrchestrationMenu(ctx: ExtensionCommandContext): Promise<void> {
-  const enabled = getStore().agent.orchestrationPrompt;
-  const choice = await selectItem(ctx, `Orchestration — ${enabled ? "Enabled" : "Disabled"}`, [
-    {
-      value: "view-guidance",
-      label: "View generated guidance",
-      description: enabled
-        ? "Current registry guidance injected into parent turns."
-        : "Current registry guidance; it is not injected while disabled.",
-    },
-  ]);
-
-  if (choice !== "view-guidance") return;
+function showOrchestrationGuidance(ctx: ExtensionCommandContext): void {
   // Rebuild at selection time so the displayed guidance reflects the live registry.
   const guidance = buildOrchestrationGuidance();
   ctx.ui.notify(
@@ -188,7 +176,7 @@ export async function showAgentCatalog(ctx: ExtensionCommandContext): Promise<vo
     if (choice === undefined) return;
 
     if (choice === "__orchestration__") {
-      await showOrchestrationMenu(ctx);
+      showOrchestrationGuidance(ctx);
     } else if (choice.startsWith("agent:")) {
       showAgentDetails(ctx, choice.slice("agent:".length));
     }
