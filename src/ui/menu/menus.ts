@@ -12,7 +12,6 @@
  *   - menu-widget-settings.ts: showWidgetSettingsMenu
  *   - menu-running-agents.ts: showRunningAgentsMenu
  *   - menu-debug.ts: showDiagnosticsMenu
- *   - menu-spawn-options.ts: showSpawnOptionsMenu
  *   - menu-system-prompt.ts: showSystemPromptMenu
  *   - menus.ts (this file): dispatcher — main menu and settings menu
  */
@@ -26,7 +25,6 @@ import { showExecutionMenu } from "./menu-execution.js";
 import { showWidgetSettingsMenu } from "./menu-widget-settings.js";
 import { showRunningAgentsMenu } from "./menu-running-agents.js";
 import { showDiagnosticsMenu } from "./menu-debug.js";
-import { showSpawnOptionsMenu } from "./menu-spawn-options.js";
 import { showSystemPromptMenu } from "./menu-system-prompt.js";
 
 // Spawn wizard — co-located in this folder.
@@ -61,10 +59,10 @@ export async function showSettingsMenu(
   modelOptions: string[],
 ): Promise<void> {
   const items: SelectItem[] = [
-    { value: "models", label: "Agent settings", description: "Set global and per-agent model/thinking overrides" },
-    { value: "execution", label: "Execution", description: "Global concurrency, background mode, and max turns" },
+    { value: "models", label: "Agent settings", description: "Agent availability and global/per-agent model and thinking overrides" },
+    { value: "execution", label: "Execution", description: "Global concurrency, background mode, and turn limits" },
     { value: "widget", label: "Widget", description: "Appearance, sizing, behavior, and usage stats" },
-    { value: "advanced", label: "Advanced", description: "Prompts, agent behavior, and diagnostics" },
+    { value: "systemprompt", label: "System prompt, context, skills & extensions", description: "Prompt mode and implicit loading defaults" },
   ];
 
   await runSelectMenu(ctx, "Settings", items, async (choice) => {
@@ -72,23 +70,7 @@ export async function showSettingsMenu(
       case "models": await showModelSettingsMenu(ctx, modelOptions); break;
       case "execution": await showExecutionMenu(ctx); break;
       case "widget": await showWidgetSettingsMenu(ctx); break;
-      case "advanced": await showAdvancedMenu(ctx); break;
-    }
-  });
-}
-
-async function showAdvancedMenu(ctx: ExtensionCommandContext): Promise<void> {
-  const items: SelectItem[] = [
-    { value: "systemprompt", label: "System prompt, context, skills & extensions", description: "Prompt mode and implicit loading defaults" },
-    { value: "behavior", label: "Agent behavior & discovery", description: "Grace turns and built-in agent discovery" },
-    { value: "diagnostics", label: "Diagnostics", description: "Inspect discovered agent types" },
-  ];
-
-  await runSelectMenu(ctx, "Advanced", items, async (choice) => {
-    switch (choice) {
       case "systemprompt": await showSystemPromptMenu(ctx); break;
-      case "behavior": await showSpawnOptionsMenu(ctx, "behavior"); break;
-      case "diagnostics": await showDiagnosticsMenu(ctx); break;
     }
   });
 }
@@ -100,13 +82,15 @@ export async function showAgentsMainMenu(
   const items: SelectItem[] = [
     { value: "running", label: "Running agents", description: "List running, queued, and completed agents" },
     { value: "spawn", label: "Spawn agent", description: "Manually spawn a new agent" },
-    { value: "settings", label: "Settings", description: "Models, execution, widget, and advanced settings" },
+    { value: "diagnostics", label: "Diagnostics", description: "Inspect discovered agent types" },
+    { value: "settings", label: "Settings", description: "Agent, execution, widget, and prompt settings" },
   ];
 
   await runSelectMenu(ctx, "Agents", items, async (choice) => {
     switch (choice) {
       case "running": await showRunningAgentsMenu(ctx); break;
       case "spawn": await showSpawnAgentMenu(ctx, modelOptions); break;
+      case "diagnostics": await showDiagnosticsMenu(ctx); break;
       case "settings": await showSettingsMenu(ctx, modelOptions); break;
     }
   });

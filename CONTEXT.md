@@ -29,7 +29,7 @@ A user-configured model or thinking preference (per-agent or global). Per-agent 
 _Avoid_: Model injection, model preference
 
 **Grace turns**:
-Additional turns allowed after the soft turn limit steer message before hard abort. Default 6, configurable via `/agents` > Spawn options.
+Additional turns allowed after the soft turn limit steer message before hard abort. Default 6; configure the global value via `/agents` > Settings > Execution or override it for a manual spawn under Spawn options.
 _Avoid_: Grace period, extra turns
 
 ### Worktrees

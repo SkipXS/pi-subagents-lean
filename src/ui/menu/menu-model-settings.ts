@@ -159,6 +159,14 @@ export async function showModelSettingsMenu(
       });
     }
 
+    items.push({
+      id: "disableDefaultAgents",
+      label: "Disable default agents",
+      currentValue: store.agent.disableDefaultAgents ? "ON" : "OFF",
+      values: ["ON", "OFF"],
+      description: "Exclude bundled agent types from discovery; takes effect on the next parent turn.",
+    });
+
     const hasSession = store.sessionDefaultModel !== null
       || store.sessionDefaultThinking !== undefined
       || getAllTypes().some((type) => store.sessionModelOverride(type) !== null
@@ -220,7 +228,14 @@ export async function showModelSettingsMenu(
       items,
       18,
       buildSettingsListTheme(theme),
-      () => rebuild?.(buildItems(getStore(), theme)),
+      (id, value) => {
+        if (id === "disableDefaultAgents") {
+          getStore().mutate.agent.setDisableDefaultAgents(value === "ON");
+          ctx.ui.notify(`Disable default agents set to ${value} (takes effect on next parent turn)`, "info");
+          return;
+        }
+        rebuild?.(buildItems(getStore(), theme));
+      },
       () => done(undefined),
     );
     return new SettingsListWrapper(settingsList, {

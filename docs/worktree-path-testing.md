@@ -111,8 +111,7 @@ deployments go through `pi install` and pi's normal extension loader.
 1. Launch pi from the wave-1 worktree in a fresh tmux window. Capture
    the prompt; assert the loaded extensions list contains `src` and
    the status bar shows the worktree path and branch.
-2. Run `/agents > Settings > Advanced > Diagnostics > Agent types`
-   via `send-keys`. Capture and verify the expected agent catalog is
+2. Run `/agents > Diagnostics > Agent types` via `send-keys`. Capture and verify the expected agent catalog is
    available. Worktree parameter behavior is validated by the spawn
    flows below and by Vitest; the removed Agent briefing action is no
    longer part of the manual test path.

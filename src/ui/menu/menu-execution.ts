@@ -5,6 +5,7 @@ import { SettingsList, type SettingItem } from "@earendil-works/pi-tui";
 import { buildSettingsListTheme } from "./helpers.js";
 import { createNumericSubmenu } from "./submenus/numeric-input.js";
 import { SettingsListWrapper } from "./wrappers/settings-list.js";
+import { DEFAULT_GRACE_TURNS } from "../../config/config-io.js";
 import { getStore } from "../../shell.js";
 
 function createConcurrencySetting(ctx: ExtensionCommandContext): SettingItem {
@@ -44,6 +45,16 @@ export async function showExecutionMenu(ctx: ExtensionCommandContext): Promise<v
         ctx.ui.notify("Default max turns cleared", "info");
       }),
       description: "Soft turn limit. Blank leaves it unlimited.",
+    },
+    {
+      id: "graceTurns",
+      label: "Grace turns",
+      currentValue: String(store.agent.graceTurns),
+      submenu: createNumericSubmenu(ctx, { min: 0, default: DEFAULT_GRACE_TURNS }, (parsed) => {
+        store.mutate.agent.setGraceTurns(parsed);
+        ctx.ui.notify(`Grace turns set to ${parsed}`, "info");
+      }),
+      description: "Extra turns after the soft turn limit before a hard abort.",
     },
   ];
 

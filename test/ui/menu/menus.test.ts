@@ -32,12 +32,23 @@ describe("showAgentsMainMenu — SelectList dispatcher", () => {
     expect(ctx.ui.select).not.toHaveBeenCalled();
   });
 
-  it("shows the simplified three-item main menu", async () => {
+  it("shows diagnostics as the third main-menu item", async () => {
     const ctx = createMockCtx();
+    let component: any;
+    ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
+      component = factory(
+        { terminal: { rows: 40 } },
+        { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+        null,
+        () => {},
+      );
+      return undefined;
+    });
+
     await showAgentsMainMenu(ctx, ["anthropic/claude-sonnet-4-20250514"]);
-    // The SelectList is passed to ctx.ui.custom; items are in the factory
-    // We verify via the custom call — the factory is invoked
-    expect(ctx.ui.custom).toHaveBeenCalled();
+    expect(component.settingsList.items.map((item: any) => item.value)).toEqual([
+      "running", "spawn", "diagnostics", "settings",
+    ]);
   });
 
   it("Escape closes the menu", async () => {
@@ -59,6 +70,25 @@ describe("showSettingsMenu — SelectList dispatcher", () => {
     await showSettingsMenu(ctx, ["anthropic/claude-sonnet-4-20250514"]);
     expect(ctx.ui.custom).toHaveBeenCalled();
     expect(ctx.ui.select).not.toHaveBeenCalled();
+  });
+
+  it("shows prompt settings directly without an Advanced submenu", async () => {
+    const ctx = createMockCtx();
+    let component: any;
+    ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
+      component = factory(
+        { terminal: { rows: 40 } },
+        { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+        null,
+        () => {},
+      );
+      return undefined;
+    });
+
+    await showSettingsMenu(ctx, ["anthropic/claude-sonnet-4-20250514"]);
+    expect(component.settingsList.items.map((item: any) => item.value)).toEqual([
+      "models", "execution", "widget", "systemprompt",
+    ]);
   });
 
   it("Escape closes the menu", async () => {

@@ -29,17 +29,17 @@ import { showExecutionMenu } from "../../../src/ui/menu/menu-execution.js";
 
 describe("showExecutionMenu", () => {
   beforeEach(() => {
-    mockModules.mockConfig.agent = { default: null, forceBackground: false, defaultMaxTurns: undefined };
+    mockModules.mockConfig.agent = { default: null, forceBackground: false, defaultMaxTurns: undefined, graceTurns: 6 };
     mockModules.mockConfig.concurrency = { default: 4 };
     settingsLists = [];
     inputs = [];
     vi.clearAllMocks();
   });
 
-  it("contains only the three common execution defaults", async () => {
+  it("contains the global execution defaults", async () => {
     await showExecutionMenu(createMockCtx());
     expect(settingsLists[0].items.map((item: any) => item.id)).toEqual([
-      "defaultConcurrency", "forceBackground", "defaultMaxTurns",
+      "defaultConcurrency", "forceBackground", "defaultMaxTurns", "graceTurns",
     ]);
   });
 
@@ -66,5 +66,15 @@ describe("showExecutionMenu", () => {
     maxTurns.submenu("30", vi.fn());
     inputs[1].onSubmit("");
     expect(mockModules.mockConfig.agent.defaultMaxTurns).toBeUndefined();
+  });
+
+  it("sets grace turns and accepts zero", async () => {
+    await showExecutionMenu(createMockCtx());
+    const graceTurns = settingsLists[0].items.find((item: any) => item.id === "graceTurns");
+
+    expect(graceTurns.currentValue).toBe("6");
+    graceTurns.submenu("6", vi.fn());
+    inputs[0].onSubmit("0");
+    expect(mockModules.mockConfig.agent.graceTurns).toBe(0);
   });
 });

@@ -136,6 +136,18 @@ describe("showModelSettingsMenu — SettingsList migration", () => {
     expect(settingsListCalls[0].items.find((i: any) => i.id === "defaultThinking").currentValue)
       .toBe("low (global default)");
   });
+
+  it("shows and updates bundled agent discovery", async () => {
+    const ctx = createMockCtx();
+    await showModelSettingsMenu(ctx, []);
+
+    const item = settingsListCalls[0].items.find((i: any) => i.id === "disableDefaultAgents");
+    expect(item.currentValue).toBe("OFF");
+
+    settingsListCalls[0].onChange("disableDefaultAgents", "ON");
+    expect(mockModules.mockConfig.agent.disableDefaultAgents).toBe(true);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("next parent turn"), "info");
+  });
 });
 
 describe("showModelSettingsMenu — cost display removed", () => {

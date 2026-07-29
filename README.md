@@ -209,7 +209,7 @@ exclude_tools: [edit, write]
 | `skills` | `true` / `[debug, tdd]` / `false` | All / listed / no skills (metadata-only in system prompt) |
 | `preload_skills` | `[debug]` / `false` | Dump full SKILL.md content / none (default) |
 
-**Implicit loading.** `loadSkillsImplicitly` and `loadExtensionsImplicitly` are config globals that decide what an agent gets when its frontmatter **omits** `skills` / `extensions`. They default ON, so an agent that says nothing about either gets everything. Turn them OFF (in config, or `/agents` → Settings → Advanced → System prompt, context, skills & extensions) to default every new agent to nothing — isolated sessions and minimal token cost, with agents opting in explicitly via `skills: [debug]` / `extensions: [tavily]`. A concrete frontmatter value always overrides the global.
+**Implicit loading.** `loadSkillsImplicitly` and `loadExtensionsImplicitly` are config globals that decide what an agent gets when its frontmatter **omits** `skills` / `extensions`. They default ON, so an agent that says nothing about either gets everything. Turn them OFF (in config, or `/agents` → Settings → System prompt, context, skills & extensions) to default every new agent to nothing — isolated sessions and minimal token cost, with agents opting in explicitly via `skills: [debug]` / `extensions: [tavily]`. A concrete frontmatter value always overrides the global.
 
 **Token cost ranking** (highest → lowest): `preload_skills` ≫ `tools`/`exclude_tools` (each tool schema every turn) > `extensions` (hooks fire every turn) > `skills` (metadata-only, agent reads full content on-demand) > `skills: false` (zero). Prefer metadata skills over preloading; whitelist tools aggressively for narrow agents.
 
@@ -240,15 +240,16 @@ When `includeContextFiles` is `true` (default), AGENTS.md files from the project
 
 ### `/agents`
 
-Management menu with three sections:
+Management menu with four sections:
 
 - **Running agents** — status and description; per-agent actions (view conversation, result, error; steer; stop) and bulk stop
 - **Spawn agent** — manually spawn without the LLM. Pick a type, enter a prompt, then set model/background or open Advanced options for worktree, type, thinking, limits, grace turns, and description.
+- **Diagnostics** — inspect discovered agent types and verify which definitions were loaded
 - **Settings**
-  - **Agent settings** — effective model and thinking with source; global and per-agent session/saved overrides
-  - **Execution** — global concurrency, force background, default max turns
+  - **Agent settings** — agent availability plus effective model and thinking with global/per-agent session and saved overrides
+  - **Execution** — global concurrency, force background, default max turns, and grace turns
   - **Widget** — all appearance, sizing, behavior, and individual usage-stat controls in one menu
-  - **Advanced** — system prompt/context/skills/extensions, agent behavior/discovery, and diagnostics
+  - **System prompt, context, skills & extensions** — prompt construction and implicit resource loading
 
 ## Interface
 
@@ -332,7 +333,7 @@ Fullscreen transcript viewer for agent sessions — opens automatically from `/a
 
 ### Parent orchestration
 
-`orchestrationPrompt` defaults to `true`. It appends a parent-only, cache-stable catalog of visible global/trusted-current-project agents; subagents never inherit it. Visible descriptions should be concise. Only exact representable names of at most 64 UTF-8 bytes are advertised; descriptions are capped at 160 UTF-8 bytes, the catalog at 24 agents/3,879 UTF-8 bytes, and the full generated block at 4,096 UTF-8 bytes; a deterministic `… +N omitted` marker reports overflow. Toggle it in `/agents` → **Settings** → **Advanced** → **System prompt, context, skills & extensions**, or set `"orchestrationPrompt": false` under `agent` in config. Opt-out intentionally provides no automatic catalog.
+`orchestrationPrompt` defaults to `true`. It appends a parent-only, cache-stable catalog of visible global/trusted-current-project agents; subagents never inherit it. Visible descriptions should be concise. Only exact representable names of at most 64 UTF-8 bytes are advertised; descriptions are capped at 160 UTF-8 bytes, the catalog at 24 agents/3,879 UTF-8 bytes, and the full generated block at 4,096 UTF-8 bytes; a deterministic `… +N omitted` marker reports overflow. Toggle it in `/agents` → **Settings** → **System prompt, context, skills & extensions**, or set `"orchestrationPrompt": false` under `agent` in config. Opt-out intentionally provides no automatic catalog.
 
 **APPEND_SYSTEM.md migration:** remove only static subagent delegation rules and agent catalogs from existing `APPEND_SYSTEM.md`; retain unrelated global instructions. The generated block supplies delegation guidance and the live catalog when enabled.
 
