@@ -111,6 +111,75 @@ describe("AgentManager", () => {
       second.resolve(mockRunResult());
     });
 
+    it("reports a queued synchronous startup failure, releases its slot, and continues the queue", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const first = makeResolvablePromise();
+      const continuation = makeResolvablePromise();
+      mockModules.mockRunAgent
+        .mockReturnValueOnce(first.promise)
+        .mockImplementationOnce(() => { throw new Error("queued startup failed"); })
+        .mockReturnValueOnce(continuation.promise);
+
+      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", {
+        description: "first", isBackground: true,
+      });
+      const failedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "failed", {
+        description: "failed", isBackground: false,
+      });
+      const continuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "continued", {
+        description: "continued", isBackground: true,
+      });
+      const failedRecord = manager.getRecord(failedId)!;
+      const failedWaiter = failedRecord.execution.promise!;
+
+      first.resolve(mockRunResult());
+      await expect(failedWaiter).resolves.toBe("");
+
+      expect(failedRecord.lifecycle.status).toBe("error");
+      expect(failedRecord.lifecycle.completedAt).toEqual(expect.any(Number));
+      expect(failedRecord.error).toBe("queued startup failed");
+      expect(onComplete).toHaveBeenCalledWith(failedRecord);
+      expect(manager.getRecord(continuedId)?.lifecycle.status).toBe("running");
+      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(3);
+
+      continuation.resolve(mockRunResult());
+    });
+
+    it("reports a queued output-log initialization failure and releases capacity", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const first = makeResolvablePromise();
+      const continuation = makeResolvablePromise();
+      mockModules.mockRunAgent
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(continuation.promise);
+      mockModules.fsMock.writeFileSync
+        .mockImplementationOnce(() => undefined)
+        .mockImplementationOnce(() => { throw new Error("queued log init failed"); });
+
+      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", {
+        description: "first", isBackground: true,
+      });
+      const failedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "failed", {
+        description: "failed", isBackground: false,
+      });
+      const failedRecord = manager.getRecord(failedId)!;
+      const failedWaiter = failedRecord.execution.promise!;
+
+      first.resolve(mockRunResult());
+      await expect(failedWaiter).resolves.toBe("");
+
+      expect(failedRecord.lifecycle.status).toBe("error");
+      expect(failedRecord.error).toBe("queued log init failed");
+      expect(onComplete).toHaveBeenCalledWith(failedRecord);
+      expect(mockModules.mockRunAgent).toHaveBeenCalledOnce();
+
+      const continuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "continued", {
+        description: "continued", isBackground: true,
+      });
+      expect(manager.getRecord(continuedId)?.lifecycle.status).toBe("running");
+      continuation.resolve(mockRunResult());
+    });
+
     it("keeps foreground waiters pending until their queued agent completes", async () => {
       manager = new AgentManager(onComplete, { default: 1 });
       const first = makeResolvablePromise();
@@ -323,6 +392,27 @@ describe("AgentManager", () => {
       expect(manager.getTotalAgentCount()).toBe(0);
 
       const nextId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "next", { description: "next" });
+      expect(manager.getRecord(nextId)?.lifecycle.status).toBe("running");
+      await manager.getRecord(nextId)!.execution.promise;
+    });
+
+    it("cleans up a failed output-log initialization before the runner starts", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      mockModules.fsMock.writeFileSync.mockImplementationOnce(() => {
+        throw new Error("log init failed");
+      });
+
+      expect(() => manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+        description: "task", modelKey: "test/model",
+      })).toThrow("log init failed");
+      expect(mockModules.mockRunAgent).not.toHaveBeenCalled();
+      expect(manager.listAgents()).toHaveLength(0);
+      expect(manager.getTotalAgentCount()).toBe(0);
+
+      mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
+      const nextId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "next", {
+        description: "next",
+      });
       expect(manager.getRecord(nextId)?.lifecycle.status).toBe("running");
       await manager.getRecord(nextId)!.execution.promise;
     });
