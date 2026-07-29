@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  resolveModel,
   resolveModelSetting,
   resolveThinkingSetting,
   type SubagentsConfig,
@@ -38,6 +39,15 @@ describe("shared agent setting precedence", () => {
       .toEqual({ value: "global/model", source: "config-global" });
     expect(resolveModelSetting({ ...common, agentConfig: undefined, config: baseConfig, sessionOverrides: undefined }))
       .toEqual({ value: "parent/model", source: "parent" });
+  });
+
+  it("returns the resolved model value through the backwards-compatible resolver", () => {
+    expect(resolveModel({
+      subagentType: "reviewer",
+      explicitModel: "spawn/model",
+      config: baseConfig,
+      parentModelId: "parent/model",
+    })).toBe("spawn/model");
   });
 
   it("ignores malformed non-string model values from JSON config", () => {

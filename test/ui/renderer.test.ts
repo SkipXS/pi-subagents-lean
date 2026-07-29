@@ -54,6 +54,7 @@ vi.mock("../../src/ui/format.js", () => ({
 }));
 
 // Import after mocks are set up
+import { buildStatsCells, getAgentStatusDisplay } from "../../src/ui/format.js";
 import { renderAgentToolCall, renderAgentToolResult, renderSubagentResult } from "../../src/ui/renderer.js";
 
 /* ------------------------------------------------------------------ */
@@ -75,6 +76,7 @@ const SHOW_COST = false;
 describe("renderer", () => {
   beforeEach(() => {
     textInstances.length = 0;
+    vi.clearAllMocks();
   });
 
   it("shows thinking level directly after the model in a normal tool call", () => {
@@ -113,6 +115,49 @@ describe("renderer", () => {
     const text = textInstances.map((t) => t.text).join("\n");
     expect(text).toContain("Builder (high)");
     expect(text).not.toContain("undefined");
+  });
+
+  it("renders error, minimal, background, and expanded Agent result states", () => {
+    renderAgentToolResult({
+      content: [{ type: "text", text: "failed" }],
+      isError: true,
+      details: { type: "builder", description: "Build", turnCount: 1 },
+    }, { expanded: false }, noopTheme, SHOW_COST);
+    expect(textInstances.at(-1)?.text).toContain("✗ Builder");
+
+    renderAgentToolResult({ content: [{ type: "text", text: "completed" }] }, { expanded: false }, noopTheme, SHOW_COST);
+    expect(textInstances.at(-1)?.text).toBe("✓ completed");
+
+    renderAgentToolResult({
+      content: [{ type: "text", text: "Agent running in background" }],
+      details: { description: "Queued build" },
+    }, { expanded: false }, noopTheme, SHOW_COST);
+    expect(textInstances.at(-1)?.text).toBe("  Queued build");
+
+    renderAgentToolResult({
+      content: [{ type: "text", text: "first line\nsecond line" }],
+      details: { type: "builder", description: "Build", turnCount: 1 },
+    }, { expanded: true }, noopTheme, SHOW_COST);
+    expect(textInstances.at(-1)?.text).toContain("  first line\n  second line");
+  });
+
+  it("forwards cost fields to stats only when showCost is enabled", () => {
+    const result = {
+      content: [{ type: "text", text: "done" }],
+      details: { type: "builder", description: "Build", turnCount: 1, cost: 0.42, usingSubscription: true },
+    };
+
+    renderAgentToolResult(result, { expanded: false }, noopTheme, true);
+    expect(buildStatsCells).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cost: 0.42, usingSubscription: true }),
+      noopTheme,
+    );
+
+    renderAgentToolResult(result, { expanded: false }, noopTheme, false);
+    expect(buildStatsCells).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cost: undefined, usingSubscription: undefined }),
+      noopTheme,
+    );
   });
 
   it("shows worktree path in details pane for a completed agent with stats", () => {
@@ -180,20 +225,30 @@ describe("renderer", () => {
     expect(theme.fg).toHaveBeenCalledWith(color, icon);
   });
 
-  it("shows worktree path in fallback result line (no turnCount)", () => {
-    const message = {
+  it("renders output file paths in detailed and fallback result cards", () => {
+    renderSubagentResult({
       content: "Agent output",
-      details: {
-        type: "builder",
-        description: "Build something",
-        worktreePath: "/wt/feature/packages/web",
-      },
-    };
+      details: { type: "builder", description: "Build", turnCount: 1, outputFile: "/tmp/build.log" },
+    }, { expanded: false }, noopTheme, SHOW_COST);
+    expect(textInstances.map((t) => t.text).join("\n")).toContain("tail -f /tmp/build.log");
 
-    renderSubagentResult(message, { expanded: false }, noopTheme, SHOW_COST);
+    textInstances.length = 0;
+    renderSubagentResult({
+      content: "Agent output",
+      details: { type: "builder", description: "Build", outputFile: "/tmp/fallback.log" },
+    }, { expanded: false }, noopTheme, SHOW_COST);
+    expect(textInstances.map((t) => t.text).join("\n")).toContain("tail -f /tmp/fallback.log");
+  });
+
+  it("uses fallback status and type labels when result stats are unavailable", () => {
+    renderSubagentResult({
+      content: "Agent output",
+      details: { type: "builder", description: "Build", status: "stopped" },
+    }, { expanded: false }, noopTheme, SHOW_COST);
 
     const allText = textInstances.map((t) => t.text).join("\n");
-    expect(allText).toContain("worktree: /wt/feature/packages/web");
+    expect(allText).toContain("■ Builder");
+    expect(getAgentStatusDisplay).toHaveBeenCalledWith("stopped");
   });
 
   it("does not render worktree line when worktreePath is absent", () => {

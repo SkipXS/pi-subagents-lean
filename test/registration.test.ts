@@ -8,6 +8,14 @@ const state = vi.hoisted(() => {
     widget: undefined as unknown,
     pi: undefined as unknown,
     registerAgents: vi.fn(),
+    renderAgentToolCall: vi.fn(),
+    renderAgentToolResult: vi.fn(),
+    renderSubagentResult: vi.fn(),
+    showAgentsMainMenu: vi.fn(),
+    executeAgentTool: vi.fn(),
+    executeStopAgentTool: vi.fn(),
+    executeAgentStatusTool: vi.fn(),
+    getStore: vi.fn(),
     scanAndMerge: vi.fn(async () => new Map(catalog)),
     store: {
       concurrency: 1,
@@ -31,11 +39,11 @@ vi.mock("@earendil-works/pi-tui", () => ({
   matchesKey: vi.fn(() => false),
 }));
 vi.mock("../src/agents/tool-execution.js", () => ({
-  executeAgentTool: vi.fn(),
-  executeStopAgentTool: vi.fn(),
+  executeAgentTool: state.executeAgentTool,
+  executeStopAgentTool: state.executeStopAgentTool,
   toolCallListener: vi.fn(),
 }));
-vi.mock("../src/agents/agent-status.js", () => ({ executeAgentStatusTool: vi.fn() }));
+vi.mock("../src/agents/agent-status.js", () => ({ executeAgentStatusTool: state.executeAgentStatusTool }));
 vi.mock("../src/agents/agent-types.js", () => ({
   getAvailableAgents: vi.fn(() => [...state.catalog.keys()]),
   registerAgents: state.registerAgents,
@@ -59,16 +67,16 @@ vi.mock("../src/prompt/orchestration.js", () => ({
   getOrchestrationPromptUpdate: vi.fn(),
 }));
 vi.mock("../src/ui/renderer.js", () => ({
-  renderAgentToolCall: vi.fn(),
-  renderAgentToolResult: vi.fn(),
-  renderSubagentResult: vi.fn(),
+  renderAgentToolCall: state.renderAgentToolCall,
+  renderAgentToolResult: state.renderAgentToolResult,
+  renderSubagentResult: state.renderSubagentResult,
 }));
-vi.mock("../src/ui/menu/menus.js", () => ({ showAgentsMainMenu: vi.fn() }));
+vi.mock("../src/ui/menu/menus.js", () => ({ showAgentsMainMenu: state.showAgentsMainMenu }));
 vi.mock("../src/shell.js", () => ({
   getCoordinator: () => undefined,
   getManager: () => state.manager,
   getPiInstance: () => state.pi,
-  getStore: () => state.store,
+  getStore: state.getStore,
   getWidget: () => state.widget,
   isInsideSubagentSpawn: () => false,
   setCoordinator: vi.fn(),
@@ -83,13 +91,17 @@ import extension from "../src/index.ts";
 function createApi() {
   const tools: Array<Record<string, any>> = [];
   const listeners: Array<{ event: string; handler: (...args: any[]) => unknown }> = [];
+  const messageRenderers: Array<{ type: string; renderer: (...args: any[]) => unknown }> = [];
+  const commands: Array<{ name: string; command: Record<string, any> }> = [];
   return {
     tools,
     listeners,
+    messageRenderers,
+    commands,
     api: {
       registerTool: vi.fn((tool: Record<string, any>) => tools.push(tool)),
-      registerMessageRenderer: vi.fn(),
-      registerCommand: vi.fn(),
+      registerMessageRenderer: vi.fn((type: string, renderer: (...args: any[]) => unknown) => messageRenderers.push({ type, renderer })),
+      registerCommand: vi.fn((name: string, command: Record<string, any>) => commands.push({ name, command })),
       on: vi.fn((event: string, handler: (...args: any[]) => unknown) => listeners.push({ event, handler })),
     },
   };
@@ -115,7 +127,17 @@ beforeEach(() => {
   state.manager = undefined;
   state.widget = undefined;
   state.pi = undefined;
+  state.store.agent.showCost = false;
+  state.getStore.mockImplementation(() => state.store);
+  state.getStore.mockClear();
   state.registerAgents.mockClear();
+  state.renderAgentToolCall.mockClear();
+  state.renderAgentToolResult.mockClear();
+  state.renderSubagentResult.mockClear();
+  state.showAgentsMainMenu.mockClear();
+  state.executeAgentTool.mockClear();
+  state.executeStopAgentTool.mockClear();
+  state.executeAgentStatusTool.mockClear();
   state.scanAndMerge.mockClear();
   state.store.reload.mockClear();
   state.store.setDeps.mockClear();
@@ -149,6 +171,45 @@ describe("Agent tool registration", () => {
     expect(tool.parameters.required).toEqual(["prompt", "agent"]);
     expect(tool.parameters.properties.agent).not.toHaveProperty("enum");
     expect(tool.parameters.properties.agent).not.toHaveProperty("description");
+  });
+
+  it("forwards tool, message, and command rendering through the public Pi registrations", async () => {
+    const api = createApi();
+    state.store.agent.showCost = true;
+    extension(api.api as any);
+    const theme = { name: "theme" };
+    const callArgs = { agent: "reviewer" };
+    const result = { content: [{ type: "text", text: "done" }] };
+
+    agentTool(api).renderCall(callArgs, theme);
+    agentTool(api).renderResult(result, { expanded: true }, theme);
+    const messageRenderer = api.messageRenderers.find(({ type }) => type === "subagent-result");
+    messageRenderer!.renderer({ content: "done" }, { expanded: false }, theme);
+    const command = api.commands.find(({ name }) => name === "agents");
+    const ctx = { modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-4o" }] } };
+    await command!.command.handler("ignored", ctx);
+
+    expect(state.renderAgentToolCall).toHaveBeenCalledWith(callArgs, theme);
+    expect(state.renderAgentToolResult).toHaveBeenCalledWith(result, { expanded: true }, theme, true);
+    expect(state.renderSubagentResult).toHaveBeenCalledWith({ content: "done" }, { expanded: false }, theme, true);
+    expect(state.getStore).toHaveBeenCalledTimes(2);
+    expect(state.showAgentsMainMenu).toHaveBeenCalledWith(ctx, ["openai/gpt-4o"]);
+  });
+
+  it("wires StopAgent and AgentStatus to constrained schema executors", () => {
+    const api = createApi();
+    extension(api.api as any);
+    const stop = api.tools.find(({ name }) => name === "StopAgent")!;
+    const status = api.tools.find(({ name }) => name === "AgentStatus")!;
+
+    expect(stop.execute).toBe(state.executeStopAgentTool);
+    expect(stop.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
+    expect(JSON.parse(JSON.stringify(stop.parameters))).toEqual({
+      type: "object", additionalProperties: false, required: ["agent_id"], properties: { agent_id: { type: "string" } },
+    });
+    expect(status.execute).toBe(state.executeAgentStatusTool);
+    expect(status.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
+    expect(JSON.parse(JSON.stringify(status.parameters))).toEqual({ type: "object", additionalProperties: false, properties: {} });
   });
 
   it("does not re-register when session_start refreshes a changed agent catalog", async () => {

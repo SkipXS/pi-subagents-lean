@@ -10,7 +10,21 @@ import { mockModules } from "../../menu-mock-setup.js";
 import { createMockCtx } from "../../menu-test-helpers.js";
 import { getAgentConfig } from "../../../src/agents/agent-types.js";
 
-// Import
+vi.mock("../../../src/ui/menu/menu-model-settings.js", () => ({ showModelSettingsMenu: vi.fn() }));
+vi.mock("../../../src/ui/menu/menu-execution.js", () => ({ showExecutionMenu: vi.fn() }));
+vi.mock("../../../src/ui/menu/menu-widget-settings.js", () => ({ showWidgetSettingsMenu: vi.fn() }));
+vi.mock("../../../src/ui/menu/menu-running-agents.js", () => ({ showRunningAgentsMenu: vi.fn() }));
+vi.mock("../../../src/ui/menu/menu-agent-catalog.js", () => ({ showAgentCatalog: vi.fn() }));
+vi.mock("../../../src/ui/menu/menu-system-prompt.js", () => ({ showSystemPromptMenu: vi.fn() }));
+vi.mock("../../../src/ui/menu/menu-spawn-wizard.js", () => ({ showSpawnAgentMenu: vi.fn() }));
+
+import { showRunningAgentsMenu } from "../../../src/ui/menu/menu-running-agents.js";
+import { showSpawnAgentMenu } from "../../../src/ui/menu/menu-spawn-wizard.js";
+import { showAgentCatalog } from "../../../src/ui/menu/menu-agent-catalog.js";
+import { showModelSettingsMenu } from "../../../src/ui/menu/menu-model-settings.js";
+import { showExecutionMenu } from "../../../src/ui/menu/menu-execution.js";
+import { showWidgetSettingsMenu } from "../../../src/ui/menu/menu-widget-settings.js";
+import { showSystemPromptMenu } from "../../../src/ui/menu/menu-system-prompt.js";
 import { showAgentsMainMenu, showSettingsMenu } from "../../../src/ui/menu/menus.js";
 
 function resetAgentState(): void {
@@ -98,7 +112,9 @@ describe("showSettingsMenu — SelectList dispatcher", () => {
   });
 });
 
-describe("main menu — submenu navigation", () => {
+describe("menu dispatcher navigation", () => {
+  const modelOptions = ["anthropic/claude-sonnet-4-20250514"];
+
   beforeEach(() => {
     resetAgentState();
     vi.clearAllMocks();
@@ -109,14 +125,43 @@ describe("main menu — submenu navigation", () => {
     });
   });
 
-  it("opens Settings from the main menu", async () => {
+  it.each([
+    ["running", showRunningAgentsMenu, []],
+    ["spawn", showSpawnAgentMenu, [modelOptions]],
+    ["catalog", showAgentCatalog, []],
+  ])("dispatches main-menu %s to its submenu", async (choice, submenu, extraArgs) => {
     const ctx = createMockCtx();
-    let customCallCount = 0;
-    ctx.ui.custom.mockImplementation(async () => {
-      customCallCount++;
-      return customCallCount === 1 ? "settings" : undefined;
-    });
-    await showAgentsMainMenu(ctx, ["anthropic/claude-sonnet-4-20250514"]);
-    expect(ctx.ui.custom).toHaveBeenCalledTimes(3);
+    ctx.ui.custom.mockResolvedValueOnce(choice).mockResolvedValueOnce(undefined);
+
+    await showAgentsMainMenu(ctx, modelOptions);
+
+    expect(submenu).toHaveBeenCalledWith(ctx, ...extraArgs);
+  });
+
+  it("dispatches main-menu settings into the settings menu", async () => {
+    const ctx = createMockCtx();
+    ctx.ui.custom
+      .mockResolvedValueOnce("settings")
+      .mockResolvedValueOnce("models")
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    await showAgentsMainMenu(ctx, modelOptions);
+
+    expect(showModelSettingsMenu).toHaveBeenCalledWith(ctx, modelOptions);
+  });
+
+  it.each([
+    ["models", showModelSettingsMenu, [modelOptions]],
+    ["execution", showExecutionMenu, []],
+    ["widget", showWidgetSettingsMenu, []],
+    ["systemprompt", showSystemPromptMenu, []],
+  ])("dispatches settings %s to its submenu", async (choice, submenu, extraArgs) => {
+    const ctx = createMockCtx();
+    ctx.ui.custom.mockResolvedValueOnce(choice).mockResolvedValueOnce(undefined);
+
+    await showSettingsMenu(ctx, modelOptions);
+
+    expect(submenu).toHaveBeenCalledWith(ctx, ...extraArgs);
   });
 });
