@@ -40,7 +40,7 @@ function makePi(
     exec: vi.fn(async (cmd: string, args: string[], opts?: any) => {
       if (cmd === "git" && args[0] === "rev-parse") {
         const cwd = opts?.cwd ?? "";
-        if (args[1] === "--git-common-dir") {
+        if (args[1] === "--path-format=absolute" && args[2] === "--git-common-dir") {
           const result = gitCommonDirResults.get(cwd);
           if (result === null || result === undefined) {
             return { code: 128, stdout: "", stderr: "not a git repo" };
@@ -108,8 +108,21 @@ describe("validateWorktreePath", () => {
       [worktreePath, worktreePath],
     ]);
 
-    const result = await validateWorktreePath(makePi(gitResults, toplevelResults), worktreePath, parentCwd);
+    const pi = makePi(gitResults, toplevelResults);
+    const result = await validateWorktreePath(pi, worktreePath, parentCwd);
 
+    expect(pi.exec).toHaveBeenNthCalledWith(
+      1,
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { cwd: parentCwd, timeout: 5000 },
+    );
+    expect(pi.exec).toHaveBeenNthCalledWith(
+      2,
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { cwd: worktreePath, timeout: 5000 },
+    );
     expect(result.ok).toBe(true);
     const success = result as WorktreeValidationSuccess;
     expect(success.resolvedPath).toBe(toForwardSlashPath(worktreePath));

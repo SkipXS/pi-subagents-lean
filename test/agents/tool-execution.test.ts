@@ -470,7 +470,7 @@ describe("executeAgentTool — worktree_path validation", () => {
   it("flushes validator warnings via ctx.ui.notify on validation failure", async () => {
     // Mock validateWorktreePath to invoke the onWarning callback before returning failure
     mockValidateWorktreePath.mockImplementation((_pi, _path, _cwd, onWarning) => {
-      onWarning?.("git rev-parse --git-common-dir failed in /etc: EACCES permission denied");
+      onWarning?.("git rev-parse --path-format=absolute --git-common-dir failed in /etc: EACCES permission denied");
       return Promise.resolve({ ok: false, error: "worktree_path validation failed: git rev-parse failed: EACCES permission denied" });
     });
 
@@ -486,7 +486,7 @@ describe("executeAgentTool — worktree_path validation", () => {
     expect(result.isError).toBe(true);
     expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
     expect(ctx.ui.notify).toHaveBeenCalledWith(
-      "[pi-subagents-lean] git rev-parse --git-common-dir failed in /etc: EACCES permission denied",
+      "[pi-subagents-lean] git rev-parse --path-format=absolute --git-common-dir failed in /etc: EACCES permission denied",
       "warning",
     );
   });
