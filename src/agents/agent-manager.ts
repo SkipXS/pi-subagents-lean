@@ -89,6 +89,9 @@ export class AgentManager {
   /** Queue of agents waiting to start, including completion for foreground waiters. */
   private queue: { id: string; args: SpawnArgs; resolve: (result: string) => void }[] = [];
 
+  /** Parent-signal listeners, retained so they can be removed at terminal states. */
+  private parentAbortListeners = new Map<string, { signal: AbortSignal; listener: () => void }>();
+
   constructor(
     onComplete?: OnAgentComplete,
     concurrency?: ConcurrencyConfig,
@@ -171,9 +174,21 @@ export class AgentManager {
     };
     this.agents.set(id, record);
 
-    // Queued agents have been successfully accepted even though their start is deferred.
+    // Add a queued entry before binding the parent signal: an already-aborted
+    // signal must be able to remove and settle it immediately.
     if (queued) {
       this.queue.push({ id, args, resolve: resolveQueued! });
+      this.bindParentAbortSignal(id, options.signal);
+      this.totalAgentCount++;
+      return id;
+    }
+
+    this.bindParentAbortSignal(id, options.signal);
+    // AbortSignal does not dispatch a past abort event, so bindParentAbortSignal
+    // stops an already-aborted parent synchronously. Do not start it afterwards.
+    if (record.lifecycle.status !== "running") {
+      // No runner was created to reach startAgent's completion handler.
+      this.safeNotifyComplete(record);
       this.totalAgentCount++;
       return id;
     }
@@ -184,6 +199,7 @@ export class AgentManager {
       this.startAgent(id, record, args, this.concurrencySlot);
     } catch (err) {
       this.concurrencySlot.running--;
+      this.clearParentAbortSignal(id);
       this.agents.delete(id);
       this.drainQueue();
       throw err;
@@ -212,11 +228,6 @@ export class AgentManager {
     record.display.outputFile = record.execution.outputLog.path;
 
     this.onStart?.(record);
-
-    // Wire parent abort signal to stop the subagent when the parent is interrupted
-    if (options.signal) {
-      options.signal.addEventListener("abort", () => this.abort(id, "agent"), { once: true });
-    }
 
     const promise = runAgent(ctx, type, prompt, {
       pi,
@@ -299,6 +310,7 @@ export class AgentManager {
 
         // Decrement global concurrency count
         concurrencySlot.running--;
+        this.clearParentAbortSignal(id);
 
         this.safeNotifyComplete(record);
         this.drainQueue();
@@ -389,6 +401,7 @@ export class AgentManager {
         record.lifecycle.completedAt = Date.now();
         entry.resolve("");
         started.add(entry.id);
+        this.clearParentAbortSignal(entry.id);
         this.safeNotifyComplete(record);
       }
     }
@@ -420,6 +433,25 @@ export class AgentManager {
       // steer failures are surfaced to the caller via the boolean return value
       return false;
     }
+  }
+
+  /** Bind a parent abort signal and retain its listener for explicit cleanup. */
+  private bindParentAbortSignal(id: string, signal?: AbortSignal): void {
+    if (!signal) return;
+
+    const listener = () => this.abort(id, "agent");
+    this.parentAbortListeners.set(id, { signal, listener });
+    signal.addEventListener("abort", listener, { once: true });
+    // AbortSignal does not invoke listeners added after it was aborted.
+    if (signal.aborted && this.parentAbortListeners.has(id)) listener();
+  }
+
+  /** Remove the parent abort listener once an agent can no longer react to it. */
+  private clearParentAbortSignal(id: string): void {
+    const entry = this.parentAbortListeners.get(id);
+    if (!entry) return;
+    entry.signal.removeEventListener("abort", entry.listener);
+    this.parentAbortListeners.delete(id);
   }
 
   getRecord(id: string): AgentRecord | undefined {
@@ -457,12 +489,14 @@ export class AgentManager {
     record.lifecycle.status = "stopped";
     record.lifecycle.stoppedBy = stoppedBy;
     record.lifecycle.completedAt = Date.now();
+    this.clearParentAbortSignal(record.id);
     if (wasQueued) this.safeNotifyComplete(record);
     return true;
   }
 
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
+    this.clearParentAbortSignal(id);
     record.execution.session?.dispose();
     record.execution.session = undefined;
     this.agents.delete(id);
@@ -485,6 +519,7 @@ export class AgentManager {
     clearInterval(this.cleanupInterval);
     for (const entry of this.queue) entry.resolve("");
     this.queue = [];
+    for (const id of this.parentAbortListeners.keys()) this.clearParentAbortSignal(id);
     for (const record of this.agents.values()) {
       // A session may not exist yet while setup is in progress. Abort the
       // controller as well so every active run is stopped during shutdown.

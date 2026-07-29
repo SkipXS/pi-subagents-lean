@@ -31,6 +31,7 @@ const {
   mockModelFor,
   mockModelSettingFor,
   mockThinkingSettingFor,
+  mockCoordinatorSpawn,
 } = vi.hoisted(() => ({
   mockValidateWorktreePath: vi.fn(),
   mockSpawn: vi.fn().mockReturnValue("agent-id-123"),
@@ -50,6 +51,27 @@ const {
     value: explicitThinking ?? agentConfig?.thinkingLevel ?? parentThinking,
     source: explicitThinking ? "spawn" : "parent",
   })),
+  mockCoordinatorSpawn: vi.fn(async (_pi: any, _ctx: any, intent: any) => {
+    const id = mockSpawn(_pi, _ctx, intent.type, intent.prompt, {
+      description: intent.description,
+      agentConfig: intent.agentConfig,
+      model: intent.model,
+      invocation: intent.invocation,
+      maxTurns: intent.maxTurns,
+      thinkingLevel: intent.thinkingLevel,
+      modelKey: intent.modelKey,
+      graceTurns: intent.graceTurns,
+      worktreePath: intent.worktreePath,
+      worktreeLabel: intent.worktreeLabel,
+      isBackground: intent.runInBackground,
+      signal: intent.signal,
+    });
+    const record = mockGetRecord(id);
+    if (!intent.runInBackground && record?.execution?.promise) {
+      await record.execution.promise;
+    }
+    return { agentId: id, record };
+  }),
 }));
 
 vi.mock("../../src/spawn/worktree-validator.js", () => ({
@@ -105,31 +127,7 @@ vi.mock("../../src/shell.js", () => ({
     update: vi.fn(),
   }),
   getCoordinator: () => ({
-    spawn: vi.fn(async (_pi: any, _ctx: any, intent: any) => {
-      // Delegate to the mocked manager.spawn
-      const manager = {
-        spawn: mockSpawn,
-        getRecord: mockGetRecord,
-      };
-      const id = mockSpawn(_pi, _ctx, intent.type, intent.prompt, {
-        description: intent.description,
-        agentConfig: intent.agentConfig,
-        model: intent.model,
-        invocation: intent.invocation,
-        maxTurns: intent.maxTurns,
-        thinkingLevel: intent.thinkingLevel,
-        modelKey: intent.modelKey,
-        graceTurns: intent.graceTurns,
-        worktreePath: intent.worktreePath,
-        worktreeLabel: intent.worktreeLabel,
-        isBackground: intent.runInBackground,
-      });
-      const record = mockGetRecord(id);
-      if (!intent.runInBackground && record?.execution?.promise) {
-        await record.execution.promise;
-      }
-      return { agentId: id, record };
-    }),
+    spawn: mockCoordinatorSpawn,
     isBackground: vi.fn(() => false),
     scheduleNudge: vi.fn(),
     onAgentComplete: vi.fn(),
@@ -322,6 +320,19 @@ describe("executeAgentTool — worktree_path validation", () => {
       thinkingLevel: "high",
       maxTurns: 25,
     });
+  });
+
+  it("forwards the parent abort signal to the spawn coordinator", async () => {
+    const signal = new AbortController().signal;
+
+    await executeAgentTool("tc-parent-abort", makeParams(), signal, undefined, ctx);
+
+    expect(mockCoordinatorSpawn).toHaveBeenCalledWith(
+      expect.anything(),
+      ctx,
+      expect.objectContaining({ signal }),
+    );
+    expect(mockSpawn.mock.calls[0][4].signal).toBe(signal);
   });
 
   it("rejects an unknown explicit model instead of silently using the parent", async () => {
@@ -563,6 +574,32 @@ describe("executeAgentTool — worktree_path with background spawn", () => {
 
     expect(mockValidateWorktreePath).toHaveBeenCalledTimes(1);
     expect(result.content[0].text).toContain("running");
+  });
+
+  it("reports an already terminal background record instead of saying it is running", async () => {
+    mockGetRecord.mockReturnValue({
+      id: "agent-id-stopped",
+      display: { type: "general-purpose", description: "Test agent" },
+      lifecycle: { status: "stopped", startedAt: Date.now(), completedAt: Date.now() },
+      execution: {},
+      stats: {
+        lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+        toolUses: 0,
+        compactionCount: 0,
+      },
+    });
+
+    const result = await executeAgentTool(
+      "tc-bg-stopped",
+      makeParams({ run_in_background: true }),
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(result.content[0].text).toContain("[Agent stopped]");
+    expect(result.content[0].text).not.toContain("Agent running");
+    expect(result.content[0].text).not.toContain("A notification will arrive");
   });
 
   it("returns error for invalid worktree_path in background spawn", async () => {

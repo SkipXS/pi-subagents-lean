@@ -35,6 +35,8 @@ export interface SpawnIntent extends SpawnConfig {
   type: string;
   prompt: string;
   runInBackground: boolean;
+  /** Parent abort signal forwarded to the agent manager. */
+  signal?: AbortSignal;
   /** Narrowed to required — all callers resolve this before spawn. */
   graceTurns: number;
 }
@@ -121,10 +123,11 @@ export class SpawnCoordinator {
     const agentConfig = snapshotAgentConfig(intent.agentConfig ?? getAgentConfig(intent.type));
 
     // Shared config fields (SpawnConfig) pass through unchanged; only the
-    // intent-only fields (type/prompt/runInBackground) need translation.
-    const { type, prompt, runInBackground, invocation, ...config } = intent;
+    // intent-only fields (type/prompt/runInBackground/signal) need translation.
+    const { type, prompt, runInBackground, invocation, signal, ...config } = intent;
     const spawnOptions: SpawnOptions = {
       ...config,
+      signal,
       model,
       modelKey,
       thinkingLevel,
@@ -135,6 +138,26 @@ export class SpawnCoordinator {
     };
 
     const agentId = this.manager.spawn(pi, ctx, type, prompt, spawnOptions);
+    const record = this.manager.getRecord(agentId)!;
+    const isTerminal = record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
+
+    // A parent signal may already be aborted. AgentManager then stops and
+    // notifies synchronously, before this method can register its completion
+    // tracking. There is no parent turn left to receive a nudge, so do not
+    // retain UI/tracking state or an unconsumed terminal record.
+    if (isTerminal) {
+      if (intent.signal?.aborted) {
+        record.lifecycle.resultConsumed = true;
+      } else if (intent.runInBackground) {
+        // Reconcile any other synchronous terminal completion that occurred
+        // before onAgentComplete could observe the background registration.
+        this.backgroundContexts.set(agentId, ctx);
+        this.scheduleNudge(agentId);
+      } else {
+        record.lifecycle.resultConsumed = true;
+      }
+      return { agentId, record };
+    }
 
     // Register live view
     this.liveViews.set(agentId, liveView);
@@ -151,8 +174,6 @@ export class SpawnCoordinator {
       this.backgroundAgentIds.add(agentId);
       this.backgroundContexts.set(agentId, ctx);
     }
-
-    const record = this.manager.getRecord(agentId)!;
 
     if (!intent.runInBackground) {
       // Foreground: await completion

@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../../src/types.js";
+import { AgentManager } from "../../src/agents/agent-manager.js";
 import { buildInvocationTags } from "../../src/ui/format.js";
 
 // --- Mock modules ---
@@ -128,6 +129,54 @@ describe("SpawnCoordinator", () => {
     expect(manager.spawn.mock.calls[0][2]).toBe("builder");
     expect(manager.spawn.mock.calls[0][3]).toBe("do something");
     expect(manager.spawn.mock.calls[0][4].isBackground).toBe(true);
+  });
+
+  it("forwards the parent abort signal to the agent manager", async () => {
+    const coordinator = new SpawnCoordinator(manager as any);
+    const signal = new AbortController().signal;
+
+    await coordinator.spawn(mockPi, ctx, {
+      type: "builder",
+      prompt: "do something",
+      description: "Test parent abort forwarding",
+      graceTurns: 6,
+      runInBackground: true,
+      signal,
+    });
+
+    expect(manager.spawn.mock.calls[0][4].signal).toBe(signal);
+  });
+
+  it("does not retain or nudge a synchronously parent-aborted background spawn", async () => {
+    const realManager = new AgentManager(undefined, { default: 1 });
+    const coordinator = new SpawnCoordinator(realManager);
+    realManager.setOnComplete((record) => coordinator.onAgentComplete(record));
+    const parent = new AbortController();
+    parent.abort();
+
+    try {
+      const result = await coordinator.spawn(mockPi, ctx, {
+        type: "builder",
+        prompt: "do something",
+        description: "Already cancelled",
+        graceTurns: 6,
+        runInBackground: true,
+        signal: parent.signal,
+      });
+
+      expect(result.record.lifecycle).toMatchObject({
+        status: "stopped",
+        stoppedBy: "agent",
+        resultConsumed: true,
+      });
+      expect(coordinator.liveView(result.agentId)).toBeUndefined();
+      expect(coordinator.isBackground(result.agentId)).toBe(false);
+
+      vi.advanceTimersByTime(200);
+      expect(mockPi.sendMessage).not.toHaveBeenCalled();
+    } finally {
+      realManager.dispose();
+    }
   });
 
   it("snapshots an explicitly resolved agent config before handing it to the manager", async () => {

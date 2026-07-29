@@ -129,7 +129,7 @@ export function formatResultContent(record: AgentRecord): string {
 export async function executeAgentTool(
   _toolCallId: string,
   params: Record<string, unknown>,
-  _signal: AbortSignal | undefined,
+  signal: AbortSignal | undefined,
   _onUpdate: ((update: any) => void) | undefined,
   ctx: ExtensionContext,
 ): Promise<any> {
@@ -234,15 +234,21 @@ export async function executeAgentTool(
     worktreeLabel,
     invocation: { modelName, thinkingLevel, maxTurns },
     runInBackground: runInBackground || getStore().agent.forceBackground,
+    signal,
   });
 
   const { agentId, record } = result;
 
   if (runInBackground || getStore().agent.forceBackground) {
+    const isActive = record.lifecycle.status === "queued" || record.lifecycle.status === "running";
+    const details = buildAgentDetails(record, isActive ? undefined : { includeStatus: true });
+    if (!isActive) {
+      return successResult(`[Agent ${record.lifecycle.status}] Agent ID: ${agentId}`, details);
+    }
+
     // Background: return immediately
     const suffix = `A notification will arrive when done - User asks you not to poll, check status or duplicate the delegated work.\n\nAgent ID: ${agentId}`;
     const label = record.lifecycle.status === "queued" ? "Agent queued" : "Agent running";
-    const details = buildAgentDetails(record);
     return successResult(`[${label}] ${suffix}`, details);
   }
 
