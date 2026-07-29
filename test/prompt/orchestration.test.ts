@@ -29,7 +29,26 @@ describe("parent orchestration prompt", () => {
     expect(prompt).toContain("`reviewer` — Review changes carefully.");
     expect(prompt).toContain("`shipper` — Prepare release notes");
     expect(prompt).not.toContain("internal");
-    expect(prompt).toContain("foreground dependencies, background independent work");
+    expect(prompt).toBe(`${ORCHESTRATION_PROMPT_MARKER}
+Prefer delegation for substantive work, but handle small, obvious, low-risk tasks directly when that is clearly more efficient.
+
+You may work directly when the relevant scope is already known, no meaningful design decision or investigation is required, and the task can be completed safely in a few focused tool calls. This includes targeted reads, simple fact checks, minor single-location edits, result synthesis, and small follow-up adjustments.
+
+Delegate when work requires broad repository discovery, focused root-cause investigation, cross-component design, multiple or uncertain changes, independent review, or substantial verification. If the scope or risk is unclear, delegate to the matching agent.
+
+Your responsibilities are routing, sequencing dependent work, running independent read-only work in parallel, reconciling results, resolving decisions, completing small remaining steps, and producing the final response.
+
+Use bounded, outcome-focused briefs. Give each agent the relevant goal, scope, constraints, known evidence, and expected result without prescribing unnecessary implementation details.
+
+Do not duplicate work already delegated. Inspect or modify the same area yourself only when an agent result is incomplete, conflicting, or leaves a clearly bounded follow-up.
+
+Use only the roles required for the task. Do not force an unnecessary full agent pipeline.
+
+Run dependent work in the foreground. Independent read-only work may run in the background. Never run concurrent writers or allow overlapping repository changes.
+
+Retain responsibility for the overall task and final answer. Delegate the substantial specialist work, but directly complete trivial or tightly bounded work when delegation would add more overhead than value.
+Agents: \`reviewer\` — Review changes carefully.; \`shipper\` — Prepare release notes
+${ORCHESTRATION_PROMPT_END_MARKER}`);
 
     registerAgents(new Map([["reviewer", agent("reviewer", "Review changes carefully.")]]), { disableDefaultAgents: true });
     expect(buildOrchestrationPrompt(getAvailableAgents())).not.toContain("shipper");
