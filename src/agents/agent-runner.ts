@@ -175,6 +175,11 @@ function getLastAssistantText(session: AgentSession): string {
 function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
   const onAbort = () => session.abort();
+  // addEventListener does not replay an abort that happened before wiring.
+  if (signal.aborted) {
+    onAbort();
+    return () => {};
+  }
   signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
 }
@@ -590,7 +595,6 @@ async function createAndConfigureSession(
     notify,
   });
   if (filteredTools) session.setActiveToolsByName(filteredTools);
-  options.onSessionCreated?.(session);
   return session;
 }
 /**
@@ -671,6 +675,12 @@ async function runAgentImpl(
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
+  if (options.signal?.aborted) {
+    const error = new Error("Agent run aborted before setup");
+    error.name = "AbortError";
+    throw error;
+  }
+
   const store = getStore();
   // A queued run uses the definition selected at enqueue time. Registry
   // lookup remains only for legacy direct callers that did not provide a snapshot.
@@ -707,6 +717,16 @@ async function runAgentImpl(
   const session = await createAndConfigureSession(
     ctx, options, agentConfig, type, effectiveCwd, loader, extToolMap, bufferNotify,
   );
+  // Session setup is asynchronous, so shutdown may have aborted the run while
+  // the session was being created. Never publish or prompt a late session.
+  if (options.signal?.aborted) {
+    session.dispose();
+    const error = new Error("Agent run aborted during setup");
+    error.name = "AbortError";
+    throw error;
+  }
+  options.onSessionCreated?.(session);
+
   const { unsubscribe: unsubTurns, getAborted, getTurnLimited } = wireTurnTracking(session, {
     ...options,
     maxTurns: options.maxTurns ?? agentConfig?.maxTurns,

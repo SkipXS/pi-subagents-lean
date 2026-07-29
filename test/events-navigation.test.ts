@@ -76,21 +76,47 @@ vi.mock("../src/agents/agent-manager.js", () => ({
     setConcurrency() {}
     getTotalAgentCost() { return 0; }
     getTotalAgentCount() { return 0; }
-    setOnComplete() {}
+    setOnComplete(cb: any) { (this as any).onComplete = cb; }
     dispose() { return Promise.resolve(); }
   },
 }));
 
 vi.mock("../src/ui/agent-widget.js", () => ({
-  AgentWidget: class AgentWidget {},
+  AgentWidget: class AgentWidget {
+    setUICtx = vi.fn();
+    onTurnStart = vi.fn();
+    setShowCost = vi.fn();
+    setForceCompact = vi.fn();
+    setWidgetShortcut = vi.fn();
+    setShowModelThinking = vi.fn();
+    setShowStartTime = vi.fn();
+    setMaxLines = vi.fn();
+    setMaxLinesCompact = vi.fn();
+    setDescLengthFull = vi.fn();
+    setDescLengthCompact = vi.fn();
+    setStatsVisibility = vi.fn();
+    update = vi.fn();
+  },
 }));
 
 vi.mock("../src/ui/result-viewer.js", () => ({
   ResultViewer: class ResultViewer {},
 }));
 
+vi.mock("../src/ui/conversation-viewer.js", () => ({
+  ConversationViewer: class ConversationViewer {
+    constructor(...args: any[]) {
+      (globalThis as any).__conversationViewerArgs = args;
+    }
+  },
+  VIEWER_OVERLAY_OPTIONS: {},
+}));
+
 vi.mock("../src/spawn/spawn-coordinator.js", () => ({
-  SpawnCoordinator: class SpawnCoordinator {},
+  SpawnCoordinator: class SpawnCoordinator {
+    onAgentComplete = vi.fn();
+    liveView = vi.fn();
+  },
 }));
 
 vi.mock("../src/agents/tool-execution.js", () => ({
@@ -116,7 +142,12 @@ const mockManager: any = {
   listAgents: vi.fn(() => []),
   getTotalAgentCost: vi.fn(() => 0),
   getTotalAgentCount: vi.fn(() => 0),
+  dispose: vi.fn(),
+  abort: vi.fn(),
+  steer: vi.fn(),
 };
+
+const mockCoordinator: any = { dispose: vi.fn() };
 
 const mockWidget: any = {
   isViewerOpen: vi.fn(() => false),
@@ -130,24 +161,35 @@ const mockWidget: any = {
   setViewerOpen: vi.fn(),
   highlightedIndex: vi.fn(() => 0),
   update: vi.fn(),
+  setUICtx: vi.fn(),
+  onTurnStart: vi.fn(),
+  notifyToolsExpansionChanged: vi.fn(),
+  dispose: vi.fn(),
 };
+
+let currentManager: any = mockManager;
+let currentWidget: any = mockWidget;
+let currentCoordinator: any = mockCoordinator;
 
 const mockStore: any = {
   agent: { disableDefaultAgents: false, orchestrationPrompt: true },
   notifyToolsExpanded: vi.fn(),
+  reload: vi.fn(),
+  dispose: vi.fn(),
+  setDeps: vi.fn(),
 };
 
 vi.mock("../src/shell.js", () => ({
-  getManager: () => mockManager,
-  getWidget: () => mockWidget,
+  getManager: () => currentManager,
+  getWidget: () => currentWidget,
   getStore: () => mockStore,
-  getCoordinator: () => ({}),
+  getCoordinator: () => currentCoordinator,
   getPiInstance: () => ({}),
   getSessionCtx: () => ({}),
   setSessionCtx: vi.fn(),
-  setManager: vi.fn(),
-  setWidget: vi.fn(),
-  setCoordinator: vi.fn(),
+  setManager: (manager: any) => { currentManager = manager; },
+  setWidget: (widget: any) => { currentWidget = widget; },
+  setCoordinator: (coordinator: any) => { currentCoordinator = coordinator; },
 }));
 
 /* ------------------------------------------------------------------ */
@@ -163,10 +205,15 @@ describe("navigation key handler (createNavInputHandler)", () => {
     mockWidget.isEditorFocused.mockReturnValue(true);
     mockWidget.isNavActive.mockReturnValue(false);
     mockWidget.highlightedIndex.mockReturnValue(0);
+    mockWidget.navSelect.mockReturnValue(null);
     mockManager.listAgents.mockReturnValue([]);
     mockMatchesKey.mockReturnValue(false);
     mockIsKeyRelease.mockReturnValue(false);
     mockGetAgentDir.mockReturnValue("C:\\Users\\Pi User\\.pi\\agent");
+    currentManager = mockManager;
+    currentWidget = mockWidget;
+    currentCoordinator = mockCoordinator;
+    mockStore.agent.orchestrationPrompt = true;
     ctx = {
       ui: {
         getEditorText: vi.fn(() => ""),
@@ -403,6 +450,51 @@ describe("navigation key handler (createNavInputHandler)", () => {
       expect(mockWidget.navSelect).toHaveBeenCalled();
     });
 
+    it("opens and closes the conversation viewer for a selected session", async () => {
+      mockMatchesKey.mockImplementation((_d: string, key: string) => key === "enter");
+      const record = { id: "agent-1", execution: { session: {} } };
+      mockWidget.navSelect.mockReturnValue(record);
+      (ctx.ui as any).custom = vi.fn(async (render: any) => {
+        render({}, {}, {}, () => {});
+      });
+
+      createNavInputHandler(ctx)("enter");
+      await vi.waitFor(() => expect(mockWidget.setViewerOpen).toHaveBeenCalledWith(false));
+
+      expect((ctx.ui as any).custom).toHaveBeenCalledWith(expect.any(Function), {
+        overlay: true,
+        overlayOptions: {},
+      });
+      const viewerArgs = (globalThis as any).__conversationViewerArgs;
+      viewerArgs[5]();
+      viewerArgs[7]("steer this agent");
+      expect(mockManager.abort).toHaveBeenCalledWith("agent-1", "user");
+      expect(mockManager.steer).toHaveBeenCalledWith("agent-1", "steer this agent");
+    });
+
+    it("does not open a viewer for an incomplete selected record", () => {
+      mockMatchesKey.mockImplementation((_d: string, key: string) => key === "enter");
+      mockWidget.navSelect.mockReturnValue({ id: "agent-1" });
+
+      const result = createNavInputHandler(ctx)("enter");
+
+      expect(result).toEqual({ consume: true });
+      expect((ctx.ui as any).custom).toBeUndefined();
+      expect(mockWidget.setViewerOpen).not.toHaveBeenCalled();
+    });
+
+    it("reports viewer creation failures without consuming the next input", async () => {
+      mockMatchesKey.mockImplementation((_d: string, key: string) => key === "enter");
+      mockWidget.navSelect.mockReturnValue({ id: "agent-1", execution: { session: {} } });
+      (ctx.ui as any).custom = vi.fn().mockRejectedValue(new Error("overlay failed"));
+
+      createNavInputHandler(ctx)("enter");
+
+      await vi.waitFor(() => expect(ctx.ui.notify).toHaveBeenCalledWith(
+        "Failed to open agent viewer: Error: overlay failed", "error",
+      ));
+    });
+
     it("deactivates on non-navigation key", () => {
       mockMatchesKey.mockReturnValue(false);
       const handler = createNavInputHandler(ctx);
@@ -410,5 +502,111 @@ describe("navigation key handler (createNavInputHandler)", () => {
       expect(result).toBeUndefined();
       expect(mockWidget.navDeactivate).toHaveBeenCalled();
     });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Event listener lifecycle and Ctrl-O                               */
+/* ------------------------------------------------------------------ */
+
+describe("event listener lifecycle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockManager.listAgents.mockReturnValue([]);
+    mockWidget.isViewerOpen.mockReturnValue(false);
+    mockWidget.isEditorFocused.mockReturnValue(true);
+    mockWidget.isNavActive.mockReturnValue(false);
+    mockMatchesKey.mockReturnValue(false);
+    mockIsKeyRelease.mockReturnValue(false);
+    currentManager = mockManager;
+    currentWidget = mockWidget;
+    currentCoordinator = mockCoordinator;
+  });
+
+  it("binds UI context and starts the widget turn on tool execution", async () => {
+    const on = vi.fn();
+    setupEventListeners({ on } as any);
+    const handler = on.mock.calls.find(([event]) => event === "tool_execution_start")?.[1]!;
+    const ctx = { ui: { id: "ui" } } as any;
+
+    await handler({}, ctx);
+
+    expect(mockWidget.setUICtx).toHaveBeenCalledWith(ctx.ui);
+    expect(mockWidget.onTurnStart).toHaveBeenCalledOnce();
+  });
+
+  it("lazily creates the manager and widget on the first tool execution", async () => {
+    currentManager = null;
+    currentWidget = null;
+    const on = vi.fn();
+    setupEventListeners({ on } as any);
+    const handler = on.mock.calls.find(([event]) => event === "tool_execution_start")?.[1]!;
+    const ctx = { ui: { id: "ui" } } as any;
+
+    await handler({}, ctx);
+
+    expect(currentManager).toBeTruthy();
+    expect(currentWidget).toBeTruthy();
+    expect(mockStore.setDeps).toHaveBeenCalledTimes(2);
+    expect(currentWidget.setUICtx).toHaveBeenCalledWith(ctx.ui);
+    expect(currentWidget.onTurnStart).toHaveBeenCalledOnce();
+    currentManager.onComplete({ id: "agent-1" });
+    expect(currentCoordinator.onAgentComplete).toHaveBeenCalledWith({ id: "agent-1" });
+    expect(currentWidget.update).toHaveBeenCalledOnce();
+  });
+
+  it("syncs Ctrl-O expansion state after Pi's terminal handler runs", () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = {
+        ui: {
+          getEditorText: vi.fn(() => ""),
+          getToolsExpanded: vi.fn(() => true),
+          notify: vi.fn(),
+        },
+      } as unknown as ExtensionContext;
+
+      createNavInputHandler(ctx)("\u000f");
+      expect(mockStore.notifyToolsExpanded).not.toHaveBeenCalled();
+      vi.runAllTimers();
+
+      expect(mockWidget.notifyToolsExpansionChanged).toHaveBeenCalledWith(true);
+      expect(mockStore.notifyToolsExpanded).toHaveBeenCalledWith(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("registers terminal input at session start and disposes active session resources on shutdown", async () => {
+    const on = vi.fn();
+    setupEventListeners({ on } as any);
+    const start = on.mock.calls.find(([event]) => event === "session_start")?.[1]!;
+    const shutdown = on.mock.calls.find(([event]) => event === "session_shutdown")?.[1]!;
+    const unregister = vi.fn();
+    const ctx = {
+      cwd: "C:\\work\\project",
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: {
+        onTerminalInput: vi.fn(() => unregister),
+        notify: vi.fn(),
+      },
+    } as unknown as ExtensionContext;
+    mockManager.listAgents.mockReturnValue([
+      { lifecycle: { status: "running" } },
+      { lifecycle: { status: "queued" } },
+      { lifecycle: { status: "completed" } },
+    ]);
+
+    await start({}, ctx);
+    await shutdown({}, ctx);
+
+    expect((ctx.ui as any).onTerminalInput).toHaveBeenCalledOnce();
+    expect(unregister).toHaveBeenCalledOnce();
+    expect((ctx.ui as any).notify).toHaveBeenCalledWith("2 agent(s) killed by reload", "warning");
+    expect(mockCoordinator.dispose).toHaveBeenCalledOnce();
+    expect(mockStore.dispose).toHaveBeenCalledOnce();
+    expect(mockWidget.dispose).toHaveBeenCalledOnce();
+    expect(mockManager.dispose).toHaveBeenCalledOnce();
   });
 });

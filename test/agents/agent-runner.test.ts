@@ -2054,3 +2054,83 @@ describe("runAgent — agent config snapshot", () => {
       .rejects.toThrow("Unknown agent type: unknown");
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  runAgent — abort and callback event paths                         */
+/* ------------------------------------------------------------------ */
+
+describe("runAgent — abort and callback event paths", () => {
+  beforeEach(() => {
+    resetMocks();
+    fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
+  });
+
+  it("does not create or prompt a session when the supplied signal was already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(runAgent(fakeCtx(), "test-agent", "do something", {
+      pi: fakePi,
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(mockModules.mockCreateAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("disposes a session created after the run was aborted during setup", async () => {
+    const session = createMockSession();
+    session.dispose = vi.fn();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    let finishCreation!: (value: { session: ReturnType<typeof createMockSession>; extensionsResult: object }) => void;
+    mockModules.mockCreateAgentSession.mockReturnValue(new Promise((resolve) => { finishCreation = resolve; }));
+    const controller = new AbortController();
+    const onSessionCreated = vi.fn();
+
+    const run = runAgent(fakeCtx(), "test-agent", "do something", {
+      pi: fakePi,
+      signal: controller.signal,
+      onSessionCreated,
+    });
+    await vi.waitFor(() => expect(mockModules.mockCreateAgentSession).toHaveBeenCalledOnce());
+    controller.abort();
+    finishCreation({ session, extensionsResult: {} });
+
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(onSessionCreated).not.toHaveBeenCalled();
+  });
+
+  it("forwards session-created, text-delta, and tool activity callbacks", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    let resolvePrompt!: () => void;
+    session.prompt = vi.fn(() => new Promise<void>((resolve) => { resolvePrompt = resolve; })) as any;
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    const onSessionCreated = vi.fn();
+    const onTextDelta = vi.fn();
+    const onToolActivity = vi.fn();
+
+    const run = runAgent(fakeCtx(), "test-agent", "do something", {
+      pi: fakePi,
+      onSessionCreated,
+      onTextDelta,
+      onToolActivity,
+    });
+    await vi.waitFor(() => expect(session.prompt).toHaveBeenCalled());
+
+    for (const listener of session._getListeners()) {
+      listener({ type: "tool_execution_start", toolName: "read" });
+      listener({ type: "message_start" });
+      listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hello" } });
+      listener({ type: "tool_execution_end", toolName: "read" });
+    }
+    resolvePrompt();
+    await run;
+
+    expect(onSessionCreated).toHaveBeenCalledWith(session);
+    expect(onTextDelta).toHaveBeenCalledWith("hello", "hello");
+    expect(onToolActivity).toHaveBeenNthCalledWith(1, { type: "start", toolName: "read" });
+    expect(onToolActivity).toHaveBeenNthCalledWith(2, { type: "end", toolName: "read" });
+  });
+});

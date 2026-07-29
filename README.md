@@ -427,6 +427,21 @@ Result cards always include elapsed time; among these visibility settings, only 
 - Bun >= 1.0
 - pi >= 0.82.0
 
+## Development
+
+Use Bun for development and run source typechecking, test typechecking, and the
+Vitest suite before submitting changes:
+
+```bash
+bun install --frozen-lockfile
+bun run typecheck
+bun run typecheck:test
+bun run test
+```
+
+See [docs/coverage.md](docs/coverage.md) for coverage thresholds, compatibility
+checks, package smoke testing, and the required CI checks for `main`.
+
 ## Origin and license
 
 This fork preserves the project's MIT license and Alexander Paramonov's copyright notice. See [LICENSE](LICENSE). The implementation was originally derived from [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents); thanks to both upstream projects and their contributors.

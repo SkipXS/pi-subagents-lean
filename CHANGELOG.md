@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-agent thinking overrides** for the current session or persisted config, alongside existing model overrides.
 - **`finishedRetentionMinutes` setting** (Widget Settings, default 10, min 1). Controls how long finished agents stay visible.
 - **Navigation highlight clamps** when roster shrinks from agent eviction.
+- **Cross-platform and minimum-Pi CI coverage** with strict source/test typechecking, risk-based coverage gates, and an installed-tarball Pi loader smoke test.
+
+### Fixed
+- **Shutdown now aborts active agent controllers** even when session setup has not completed.
+- **Already-aborted parent signals propagate immediately** when a subagent run begins.
+- **Session shutdown and terminal-input cleanup are failure-safe**, and temporary config files are removed after failed atomic writes.
 
 The `1.x` entries below document the inherited `pi-subagents-lite` history. `pi-subagents-lean` starts a new release line at `0.1.0`.
 
