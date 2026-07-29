@@ -523,6 +523,18 @@ describe("ConversationViewer", () => {
       expect(modelLine).toContain("background");
     });
 
+    it("uses the session thinking level over stale invocation metadata", () => {
+      const session = makeMockSession();
+      session.thinkingLevel = "low";
+      const record = makeMockRecord({ execution: { session } });
+      record.display.invocation = { modelName: "sonnet", thinkingLevel: "high" };
+      const viewer = new ConversationViewer(makeTui(), session, record, noopTheme, vi.fn());
+
+      const statsLine = viewer.render(120).find(line => line.includes("sonnet"));
+      expect(statsLine).toContain("sonnet · low · 5⚙︎");
+      expect(statsLine).not.toContain("high");
+    });
+
     it("renders concrete thinking without inventing a model", () => {
       const session = makeMockSession();
       const record = makeMockRecord({ execution: { session } });

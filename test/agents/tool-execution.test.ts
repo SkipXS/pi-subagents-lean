@@ -318,6 +318,10 @@ describe("executeAgentTool — worktree_path validation", () => {
       "high",
     );
     expect(mockSpawn.mock.calls[0][4].thinkingLevel).toBe("high");
+    expect(mockSpawn.mock.calls[0][4].invocation).toMatchObject({
+      thinkingLevel: "high",
+      maxTurns: 25,
+    });
   });
 
   it("rejects an unknown explicit model instead of silently using the parent", async () => {

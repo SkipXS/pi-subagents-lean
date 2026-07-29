@@ -924,6 +924,18 @@ describe("model and thinking labels", () => {
     expect(lines[1]).toContain("(sonnet · high)");
   });
 
+  it("uses the session thinking level over stale invocation metadata", () => {
+    const agent = makeRunningAgent("a1");
+    agent.display.invocation = { modelName: "sonnet", thinkingLevel: "high" };
+    agent.execution.session = { thinkingLevel: "low" };
+    activity.set("a1", makeActivity("a1"));
+    (manager as any).listAgents = () => [agent];
+
+    const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
+    expect(lines[1]).toContain("(sonnet · low)");
+    expect(lines[1]).not.toContain("high");
+  });
+
   it("shows model and concrete thinking level for a running agent in compact mode", () => {
     widget.setCompactMode(true);
     widget.setWidgetShortcut(true);

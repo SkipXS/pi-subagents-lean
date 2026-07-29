@@ -550,6 +550,10 @@ export async function showSpawnAgentMenu(
             onSelect: (model) => {
               modelChanged = true;
               currentModelStr = model === "(inherits parent)" ? "" : model;
+              // Persist the model-supported value, not only its rendered
+              // representation, so the eventual spawn receives it too.
+              currentThinking = normalizeThinkingLevel(currentModel(), currentThinking);
+              thinkingChanged = true;
               rebuild?.(buildItems());
               done(model);
             },
@@ -604,8 +608,12 @@ export async function showSpawnAgentMenu(
           break;
         case "prompt":
           prompt = newValue;
-        break;
+          break;
       }
+      // SettingsList does not rebuild its item values after top-level
+      // changes; rebuild so subsequent selections and the displayed values
+      // use the current wizard state.
+      rebuild?.(buildItems());
     };
     const settingsList = new SettingsList(items, 15, buildSettingsListTheme(theme), onChange, doneRef);
     return new SettingsListWrapper(settingsList, {

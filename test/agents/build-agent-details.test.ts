@@ -142,6 +142,15 @@ describe("buildAgentDetails", () => {
     expect(details.thinkingLevel).toBe("high");
   });
 
+  it("uses the session thinking level over stale invocation metadata", () => {
+    const record = makeRecord({
+      display: { type: "builder", description: "Build something", invocation: { thinkingLevel: "high" } },
+      execution: { session: { thinkingLevel: "low" } as any },
+    });
+
+    expect(buildAgentDetails(record, { includeStats: true }).thinkingLevel).toBe("low");
+  });
+
   // --- includeStatus ---
 
   it("includes status and outputFile when includeStatus is true", () => {

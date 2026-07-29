@@ -102,7 +102,9 @@ export function buildAgentDetails(
     details.durationMs = elapsedMs;
     details.compactions = record.stats.compactionCount;
     details.modelName = record.display.invocation?.modelName;
-    details.thinkingLevel = record.display.invocation?.thinkingLevel;
+    // The session is the source of truth: Pi may normalize the requested
+    // invocation level for the selected model when it creates the session.
+    details.thinkingLevel = record.execution.session?.thinkingLevel ?? record.display.invocation?.thinkingLevel;
     details.cost = record.stats.lifetimeUsage.cost;
   }
 
@@ -230,7 +232,7 @@ export async function executeAgentTool(
     graceTurns: getStore().agent.graceTurns,
     worktreePath: validatedWorktreePath,
     worktreeLabel,
-    invocation: { modelName, thinkingLevel },
+    invocation: { modelName, thinkingLevel, maxTurns },
     runInBackground: runInBackground || getStore().agent.forceBackground,
   });
 

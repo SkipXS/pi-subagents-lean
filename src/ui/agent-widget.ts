@@ -431,7 +431,9 @@ export class AgentWidget {
     const modelName = typeof invocation?.modelName === "string" && invocation.modelName.trim()
       ? invocation.modelName.trim()
       : undefined;
-    const thinkingLevel = formatThinkingTag(invocation?.thinkingLevel);
+    // The session reflects Pi's final, model-normalized level rather than
+    // merely the requested value captured in invocation metadata.
+    const thinkingLevel = formatThinkingTag(a.execution.session?.thinkingLevel ?? invocation?.thinkingLevel);
     const parts = [modelName, thinkingLevel].filter((part): part is string => part !== undefined);
     return parts.length > 0 ? `(${parts.join(" · ")})` : "";
   }

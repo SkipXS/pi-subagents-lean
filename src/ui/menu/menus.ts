@@ -11,7 +11,7 @@
  *   - menu-execution.ts: showExecutionMenu
  *   - menu-widget-settings.ts: showWidgetSettingsMenu
  *   - menu-running-agents.ts: showRunningAgentsMenu
- *   - menu-debug.ts: showDiagnosticsMenu
+ *   - menu-agent-catalog.ts: showAgentCatalog
  *   - menu-system-prompt.ts: showSystemPromptMenu
  *   - menus.ts (this file): dispatcher — main menu and settings menu
  */
@@ -24,7 +24,7 @@ import { showModelSettingsMenu } from "./menu-model-settings.js";
 import { showExecutionMenu } from "./menu-execution.js";
 import { showWidgetSettingsMenu } from "./menu-widget-settings.js";
 import { showRunningAgentsMenu } from "./menu-running-agents.js";
-import { showDiagnosticsMenu } from "./menu-debug.js";
+import { showAgentCatalog } from "./menu-agent-catalog.js";
 import { showSystemPromptMenu } from "./menu-system-prompt.js";
 
 // Spawn wizard — co-located in this folder.
@@ -82,7 +82,7 @@ export async function showAgentsMainMenu(
   const items: SelectItem[] = [
     { value: "running", label: "Running agents", description: "List running, queued, and completed agents" },
     { value: "spawn", label: "Spawn agent", description: "Manually spawn a new agent" },
-    { value: "diagnostics", label: "Diagnostics", description: "Inspect discovered agent types" },
+    { value: "catalog", label: "Agent catalog", description: "Inspect discovered agent definitions and their configuration" },
     { value: "settings", label: "Settings", description: "Agent, execution, widget, and prompt settings" },
   ];
 
@@ -90,7 +90,7 @@ export async function showAgentsMainMenu(
     switch (choice) {
       case "running": await showRunningAgentsMenu(ctx); break;
       case "spawn": await showSpawnAgentMenu(ctx, modelOptions); break;
-      case "diagnostics": await showDiagnosticsMenu(ctx); break;
+      case "catalog": await showAgentCatalog(ctx); break;
       case "settings": await showSettingsMenu(ctx, modelOptions); break;
     }
   });

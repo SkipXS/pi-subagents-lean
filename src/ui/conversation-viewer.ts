@@ -273,7 +273,12 @@ export class ConversationViewer implements Component {
     ));
 
     // Row 2: model name + compact usage stats
-    const { modelName, thinkingTag, tags } = buildInvocationTags(this.record.display.invocation);
+    // The session reflects Pi's final, model-normalized level rather than
+    // merely the requested value captured in invocation metadata.
+    const { modelName, thinkingTag, tags } = buildInvocationTags({
+      ...this.record.display.invocation,
+      thinkingLevel: this.session.thinkingLevel ?? this.record.display.invocation?.thinkingLevel,
+    });
     const statsLine = fgPreservingNestedStyles(th, "dim", formatStatsRow(statsCells) ?? "");
     if (modelName) {
       const parts = [thinkingTag, statsLine, ...tags].filter(Boolean);

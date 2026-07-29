@@ -244,7 +244,7 @@ Management menu with four sections:
 
 - **Running agents** — status and description; per-agent actions (view conversation, result, error; steer; stop) and bulk stop
 - **Spawn agent** — manually spawn without the LLM. Pick a type, enter a prompt, then set model/background or open Advanced options for worktree, type, thinking, limits, grace turns, and description.
-- **Diagnostics** — inspect discovered agent types and verify which definitions were loaded
+- **Agent catalog** — inspect discovered agent definitions and verify their configuration
 - **Settings**
   - **Agent settings** — agent availability plus effective model and thinking with global/per-agent session and saved overrides
   - **Execution** — global concurrency, force background, default max turns, and grace turns

@@ -32,7 +32,7 @@ describe("showAgentsMainMenu — SelectList dispatcher", () => {
     expect(ctx.ui.select).not.toHaveBeenCalled();
   });
 
-  it("shows diagnostics as the third main-menu item", async () => {
+  it("shows the agent catalog as the third main-menu item", async () => {
     const ctx = createMockCtx();
     let component: any;
     ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
@@ -47,7 +47,7 @@ describe("showAgentsMainMenu — SelectList dispatcher", () => {
 
     await showAgentsMainMenu(ctx, ["anthropic/claude-sonnet-4-20250514"]);
     expect(component.settingsList.items.map((item: any) => item.value)).toEqual([
-      "running", "spawn", "diagnostics", "settings",
+      "running", "spawn", "catalog", "settings",
     ]);
   });
 

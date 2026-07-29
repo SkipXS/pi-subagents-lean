@@ -337,8 +337,15 @@ describe("showSpawnAgentMenu — model-aware thinking", () => {
     selectDialogInstances.at(-1)!.callbacks.onSelect("anthropic/claude-sonnet-4-20250514");
 
     rebuiltThinking = allOptionItems().find((i: any) => i.id === "thinkingLevel");
-    expect(rebuiltThinking.currentValue).toBe("medium");
-    expect(rebuiltThinking.values).toContain("medium");
+    expect(rebuiltThinking.currentValue).toBe("off");
+    expect(rebuiltThinking.values).toContain("off");
+
+    allOptionItems().find((i: any) => i.id === "spawn").submenu("", vi.fn());
+    await vi.waitFor(() => expect(mockModules.mockManager.spawn).toHaveBeenCalledTimes(1));
+    expect(mockModules.mockManager.spawn.mock.calls[0][4]).toMatchObject({
+      thinkingLevel: "off",
+      invocation: { thinkingLevel: "off" },
+    });
   });
 });
 
@@ -497,6 +504,23 @@ describe("showSpawnAgentMenu — grace turns submenu", () => {
     inputInstances[inputInstances.length - 1].onSubmit!("-1");
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.any(String), "error");
     expect(mockDone).not.toHaveBeenCalled();
+  });
+});
+
+describe("showSpawnAgentMenu — top-level item rebuilds", () => {
+  beforeEach(() => {
+    setupMocks();
+  });
+
+  it("rebuilds displayed values after top-level background and prompt changes", async () => {
+    const ctx = createMockWizardCtx(["general-purpose", "fix the bug", undefined]);
+    await completeWizard(ctx);
+
+    settingsListCalls[1].onChange("background", "ON");
+    settingsListCalls[1].onChange("prompt", "updated prompt");
+
+    expect(settingsListCalls[1].instance.items.find((item: any) => item.id === "background").currentValue).toBe("ON");
+    expect(settingsListCalls[1].instance.items.find((item: any) => item.id === "prompt").currentValue).toBe("updated prompt");
   });
 });
 
