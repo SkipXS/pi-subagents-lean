@@ -69,11 +69,11 @@ export function loadConfig(): SubagentsConfig {
     default: raw.concurrency?.default ?? DEFAULT_CONCURRENCY.default,
   };
   const agent = { ...DEFAULT_AGENT, ...raw.agent };
-  // v1.5 and earlier shipped `Explore`; retain its model selection for the new
-  // lowercase `explorer` default only when the user did not configure that key.
-  // An own `explorer` property, including null or an empty string, is explicit.
-  if (!Object.hasOwn(raw.agent ?? {}, "explorer") && typeof raw.agent?.Explore === "string") {
-    agent.explorer = raw.agent.Explore;
+  // v1.5 and earlier shipped `Explore`; retain its model selection for the
+  // bundled scout that now covers discovery, unless scout was configured.
+  // An own `scout` property, including null or an empty string, is explicit.
+  if (!Object.hasOwn(raw.agent ?? {}, "scout") && typeof raw.agent?.Explore === "string") {
+    agent.scout = raw.agent.Explore;
   }
   const defaultThinking = parseThinkingLevel(agent.defaultThinking);
   if (defaultThinking === undefined) delete agent.defaultThinking;

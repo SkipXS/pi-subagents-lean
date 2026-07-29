@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { parseAgentFile, toAgentConfig } from "./agent-discovery.js";
 import type { AgentConfig } from "./types.js";
 
-const DEFAULT_AGENT_NAMES = ["explorer", "scout", "implementer", "reviewer", "verifier"] as const;
+const DEFAULT_AGENT_NAMES = ["architect", "scout", "implementer", "reviewer", "verifier"] as const;
 const defaultsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults");
 
 function loadDefaultAgents(): Map<string, AgentConfig> {

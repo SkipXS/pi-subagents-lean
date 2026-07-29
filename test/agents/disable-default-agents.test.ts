@@ -36,8 +36,9 @@ describe("registerAgents — disableDefaultAgents", () => {
 
   it("includes exactly the five bundled Markdown defaults by default", () => {
     registerAgents(new Map());
-    expect(getAvailableTypes()).toEqual(["explorer", "scout", "implementer", "reviewer", "verifier"]);
-    expect([...DEFAULT_AGENTS.keys()]).toEqual(["explorer", "scout", "implementer", "reviewer", "verifier"]);
+    const defaultNames = ["architect", "scout", "implementer", "reviewer", "verifier"];
+    expect(getAvailableTypes()).toEqual(defaultNames);
+    expect([...DEFAULT_AGENTS.keys()]).toEqual(defaultNames);
     for (const config of DEFAULT_AGENTS.values()) {
       expect(config.source).toBe("default");
       expect(config.model).toBeUndefined();
@@ -45,10 +46,15 @@ describe("registerAgents — disableDefaultAgents", () => {
       expect(config.extensions).toBe(false);
       expect(config.skills).toBe(false);
     }
-    expect(DEFAULT_AGENTS.get("explorer")).toMatchObject({
-      displayName: "Explorer",
+    expect(DEFAULT_AGENTS.get("architect")).toMatchObject({
+      displayName: "Architect",
       registeredTools: ["read", "grep", "bash"],
-      systemPrompt: expect.stringContaining("Explore only the delegated question."),
+      systemPrompt: expect.stringContaining("Design only the delegated change or decision."),
+    });
+    expect(DEFAULT_AGENTS.get("scout")).toMatchObject({
+      displayName: "Scout",
+      registeredTools: ["read", "grep", "bash"],
+      systemPrompt: expect.stringContaining("Investigate only the delegated question."),
     });
     expect(DEFAULT_AGENTS.get("implementer")).toMatchObject({
       registeredTools: ["read", "grep", "bash", "edit", "write"],
@@ -57,7 +63,7 @@ describe("registerAgents — disableDefaultAgents", () => {
   });
 
   it("hardens Bash-enabled read-only defaults against repository mutation", () => {
-    for (const name of ["explorer", "scout", "reviewer", "verifier"]) {
+    for (const name of ["reviewer", "verifier"]) {
       const prompt = DEFAULT_AGENTS.get(name)!.systemPrompt;
       expect(prompt).toContain("Do not intentionally change tracked source or configuration");
       expect(prompt).toContain("install anything");
@@ -65,8 +71,8 @@ describe("registerAgents — disableDefaultAgents", () => {
       expect(prompt).toContain("state-changing or destructive Git or shell commands");
       expect(prompt).toContain("git status --short");
     }
-    expect(DEFAULT_AGENTS.get("explorer")!.systemPrompt).toContain("Run tests only when reproduction is explicitly delegated");
-    expect(DEFAULT_AGENTS.get("scout")!.systemPrompt).toContain("Run tests only when reproduction is explicitly delegated");
+    expect(DEFAULT_AGENTS.get("architect")!.systemPrompt).toContain("Do not edit files, implement the solution, or delegate");
+    expect(DEFAULT_AGENTS.get("scout")!.systemPrompt).toContain("do not intentionally modify tracked files");
     for (const name of ["reviewer", "verifier"]) {
       expect(DEFAULT_AGENTS.get(name)!.systemPrompt).toContain("run existing tests or builds");
     }
@@ -92,15 +98,15 @@ describe("registerAgents — disableDefaultAgents", () => {
 
   it("user agent named like a default is still registered when setting is on", () => {
     const userAgents = new Map<string, AgentConfig>();
-    userAgents.set("explorer", {
-      name: "explorer",
-      description: "My custom explorer agent",
+    userAgents.set("scout", {
+      name: "scout",
+      description: "My custom scout agent",
       systemPrompt: "custom prompt",
     });
     registerAgents(userAgents, { disableDefaultAgents: true });
-    const config = getAgentConfig("explorer");
+    const config = getAgentConfig("scout");
     expect(config).toBeDefined();
-    expect(config!.description).toBe("My custom explorer agent");
+    expect(config!.description).toBe("My custom scout agent");
   });
 
   it("returns empty types when defaults disabled and no user agents", () => {
@@ -121,17 +127,17 @@ describe("discoverNewAgents — disableDefaultAgents", () => {
 
   it("refreshes an existing bundled type when a higher-precedence file appears", async () => {
     const { dir: projectDir, cleanup } = tempDirWithFiles([
-      { name: "explorer.md", content: makeAgentMd({ name: "explorer", description: "Project explorer" }) },
+      { name: "scout.md", content: makeAgentMd({ name: "scout", description: "Project scout" }) },
     ], "project-agents");
 
     try {
       setAgentScanDirs("", projectDir);
-      expect(getAgentConfig("explorer")?.source).toBe("default");
+      expect(getAgentConfig("scout")?.source).toBe("default");
 
       await discoverNewAgents();
 
-      expect(getAgentConfig("explorer")).toMatchObject({
-        description: "Project explorer",
+      expect(getAgentConfig("scout")).toMatchObject({
+        description: "Project scout",
         source: "project",
       });
     } finally {
@@ -141,17 +147,17 @@ describe("discoverNewAgents — disableDefaultAgents", () => {
 
   it("resolves a worktree definition locally without overriding the bundled registry", async () => {
     const { dir: worktreeDir, cleanup } = tempDirWithFiles([
-      { name: "explorer.md", content: "---\nname: explorer\ndescription: Worktree explorer\n---\nWorktree prompt" },
+      { name: "scout.md", content: "---\nname: scout\ndescription: Worktree scout\n---\nWorktree prompt" },
     ], "worktree-agents");
 
     try {
-      const local = await resolveWorktreeAgent("explorer", worktreeDir);
+      const local = await resolveWorktreeAgent("scout", worktreeDir);
       expect(local?.config).toMatchObject({
-        description: "Worktree explorer",
+        description: "Worktree scout",
         source: "project",
         registeredTools: ["read", "grep", "bash"],
       });
-      expect(getAgentConfig("explorer")?.source).toBe("default");
+      expect(getAgentConfig("scout")?.source).toBe("default");
     } finally {
       cleanup();
     }

@@ -28,19 +28,19 @@ afterEach(() => {
 describe("config I/O paths", () => {
   it.each([
     ["is absent", {}, "legacy/model"],
-    ["is explicitly null", { explorer: null }, null],
-    ["is explicitly empty", { explorer: "" }, ""],
-    ["has another explicit value", { explorer: "new/model" }, "new/model"],
-  ])("migrates legacy Explore only when explorer %s", async (_, explorer, expected) => {
+    ["is explicitly null", { scout: null }, null],
+    ["is explicitly empty", { scout: "" }, ""],
+    ["has another explicit value", { scout: "new/model" }, "new/model"],
+  ])("migrates legacy Explore only when scout %s", async (_, scout, expected) => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({
-      agent: { Explore: "legacy/model", ...explorer },
+      agent: { Explore: "legacy/model", ...scout },
       concurrency: { default: 4 },
     }));
     vi.resetModules();
 
     const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().agent.explorer).toBe(expected);
+    expect(loadConfig().agent.scout).toBe(expected);
   });
 
   it("defaults global concurrency to four", async () => {

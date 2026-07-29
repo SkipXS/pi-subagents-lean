@@ -97,7 +97,7 @@ Spawn a sub-agent.
 |---|---|---|
 | `prompt` | ✅ | The task for the sub-agent |
 | `description` | | Brief description for the caller (optional — derived from `prompt` if omitted) |
-| `agent` | ✅ | Explicit type name — one of bundled `explorer`, `scout`, `implementer`, `reviewer`, `verifier`, or a custom type. The parent orchestration catalog lists visible types when enabled. `hidden: true` removes a type from automatic catalog/menu listing (still callable by name). |
+| `agent` | ✅ | Explicit type name — one of bundled `architect`, `scout`, `implementer`, `reviewer`, `verifier`, or a custom type. The parent orchestration catalog lists visible types when enabled. `hidden: true` removes a type from automatic catalog/menu listing (still callable by name). |
 | `run_in_background` | | Fire-and-forget; result delivered automatically when done |
 | `worktree_path` | | Absolute path to a git worktree. In a trusted project, an explicitly selected worktree can supply its `.pi/agents/` for that spawn and shows a worktree label in the UI. It is never crawled automatically. Validated against the parent repo's git common dir. |
 
@@ -111,11 +111,11 @@ Stop a running agent by ID.
 |---|---|---|
 | `agent_id` | ✅ | The agent ID returned by `Agent` at spawn |
 
-IDs come from the `Agent` result, the `StopAgent` error (lists all running IDs), or `/agents` → **Running agents**. Display format is `id (type)` (e.g. `a1b2c3 (explorer)`).
+IDs come from the `Agent` result, the `StopAgent` error (lists all running IDs), or `/agents` → **Running agents**. Display format is `id (type)` (e.g. `a1b2c3 (scout)`).
 
 ### `AgentStatus`
 
-List all agents with type, short ID, and status. Output: `type·short_id·status, ...` (e.g. `implementer·a1b2c3·running, explorer·d4e5f6·completed`).
+List all agents with type, short ID, and status. Output: `type·short_id·status, ...` (e.g. `implementer·a1b2c3·running, scout·d4e5f6·completed`).
 
 The result nudges the LLM to wait for automatic notifications instead of polling — preventing wasteful repeated calls while still letting it discover agents when needed.
 
@@ -123,7 +123,7 @@ The result nudges the LLM to wait for automatic notifications instead of polling
 
 Drop a `.md` file into `.pi/agents/` (project), `.agents/agents/` (shared workspace), or `~/.pi/agent/agents/` (global). Frontmatter configures the agent; the body is its system prompt. The `name` field, or the filename without `.md`, becomes the agent type. Project files are read only after project trust.
 
-Bundled defaults `explorer`, `scout`, `implementer`, `reviewer`, and `verifier` ship as inspectable Markdown definitions and are enabled by default. The parent refreshes global and trusted current-project files before every turn, so added, changed, hidden, and removed files are reflected without restart. A trusted worktree's `.pi/agents/` is resolved as an invocation-local overlay and never mutates the parent registry. Give visible agents concise descriptions; those descriptions are parent prompt text. The automatic parent catalog advertises only exact agent names of at most 64 UTF-8 bytes without control characters, backticks, or orchestration markers; omitted names remain callable by their exact name. **Precedence:** worktree overlay (for that invocation) > project (`.pi/agents/`) > shared (`.agents/agents/`) > user (`~/.pi/agent/agents/`) > bundled defaults. `disableDefaultAgents` applies on the next parent turn and to on-demand discovery. On name clash, higher precedence wins.
+Bundled defaults `architect`, `scout`, `implementer`, `reviewer`, and `verifier` ship as inspectable Markdown definitions and are enabled by default. The parent refreshes global and trusted current-project files before every turn, so added, changed, hidden, and removed files are reflected without restart. A trusted worktree's `.pi/agents/` is resolved as an invocation-local overlay and never mutates the parent registry. Give visible agents concise descriptions; those descriptions are parent prompt text. The automatic parent catalog advertises only exact agent names of at most 64 UTF-8 bytes without control characters, backticks, or orchestration markers; omitted names remain callable by their exact name. **Precedence:** worktree overlay (for that invocation) > project (`.pi/agents/`) > shared (`.agents/agents/`) > user (`~/.pi/agent/agents/`) > bundled defaults. `disableDefaultAgents` applies on the next parent turn and to on-demand discovery. On name clash, higher precedence wins.
 
 ```markdown
 ---
@@ -285,7 +285,7 @@ Fullscreen transcript viewer for agent sessions — opens automatically from `/a
 
 `~/.pi/agent/subagents-lite.json` — managed via `/agents`, or edit directly. Per-agent model overrides are dynamic keys in `agent`; per-agent thinking overrides live in `thinkingOverrides`.
 
-**Migration from 1.5.x:** Agent selection is now explicit. Calls that omitted `agent` or used `general-purpose` must choose one of `explorer`, `scout`, `implementer`, `reviewer`, or `verifier`. The former built-in `Explore` model key is migrated to lowercase `explorer` unless that key is already configured, including an explicit `null` inheritance value.
+**Migration from 1.5.x:** Agent selection is now explicit. Calls that omitted `agent` or used `general-purpose` must choose one of `architect`, `scout`, `implementer`, `reviewer`, or `verifier`. The former built-in `Explore` model key is migrated to `scout` unless that key is already configured, including an explicit `null` inheritance value.
 
 ```json
 {
@@ -316,12 +316,12 @@ Fullscreen transcript viewer for agent sessions — opens automatically from `/a
     "loadSkillsImplicitly": false,
     "loadExtensionsImplicitly": false,
     "disableDefaultAgents": false,
-    "explorer": "xiaomi/mimo-v2.5",
+    "scout": "xiaomi/mimo-v2.5",
     "implementer": "xiaomi/mimo-v2-pro",
     "reviewer": "zai/glm-5.2"
   },
   "thinkingOverrides": {
-    "explorer": "medium",
+    "scout": "medium",
     "implementer": "high",
     "reviewer": "high"
   },
