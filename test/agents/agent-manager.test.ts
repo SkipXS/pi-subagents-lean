@@ -218,6 +218,50 @@ describe("AgentManager", () => {
       first.resolve(mockRunResult());
     });
 
+    it("does not start an agent when its parent signal was already aborted", () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const parent = new AbortController();
+      const removeListener = vi.spyOn(parent.signal, "removeEventListener");
+      parent.abort();
+
+      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+        description: "task", signal: parent.signal,
+      });
+      const record = manager.getRecord(id)!;
+
+      expect(mockModules.mockRunAgent).not.toHaveBeenCalled();
+      expect(record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "agent" });
+      expect(record.lifecycle.completedAt).toEqual(expect.any(Number));
+      expect(onComplete).toHaveBeenCalledWith(record);
+      expect(removeListener).toHaveBeenCalledOnce();
+    });
+
+    it("removes a queued agent when its parent signal aborts before capacity frees", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const first = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValue(first.promise);
+      const parent = new AbortController();
+      const removeListener = vi.spyOn(parent.signal, "removeEventListener");
+
+      const firstId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", {
+        description: "first", isBackground: true,
+      });
+      const queuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "queued", {
+        description: "queued", signal: parent.signal,
+      });
+      const queuedRecord = manager.getRecord(queuedId)!;
+
+      parent.abort();
+      await expect(queuedRecord.execution.promise).resolves.toBe("");
+      expect(queuedRecord.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "agent" });
+      expect(onComplete).toHaveBeenCalledWith(queuedRecord);
+      expect(removeListener).toHaveBeenCalledOnce();
+
+      first.resolve(mockRunResult());
+      await manager.getRecord(firstId)!.execution.promise;
+      expect(mockModules.mockRunAgent).toHaveBeenCalledOnce();
+    });
+
     it("applies an expanded global limit immediately", () => {
       manager = new AgentManager(onComplete, { default: 1 });
       const deferred = makeResolvablePromise();
