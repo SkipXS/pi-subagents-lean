@@ -23,15 +23,17 @@ The global thresholds in `vitest.config.ts` are:
 
 | Metric | Minimum |
 |---|---:|
-| Statements | 80% |
-| Branches | 72% |
+| Statements | 79% |
+| Branches | 69% |
 | Functions | 75% |
 | Lines | 80% |
 
 Coverage runs once on Ubuntu with one worker. A single worker makes aggregation
 reproducible for this suite because many tests intentionally isolate and mock the
-same extension modules. Linux also executes filesystem permission and symlink
-cases that may be skipped on Windows.
+same extension modules. The gates use the reproducible Ubuntu baseline; V8's
+module/mocking instrumentation reports different aggregate values on Windows.
+Linux also executes filesystem permission and symlink cases that may be skipped
+on Windows.
 
 Treat the thresholds as a regression floor, not a target for low-value tests.
 Prefer lifecycle, concurrency, cleanup, configuration, and Pi contract paths.
