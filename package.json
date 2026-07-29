@@ -36,11 +36,12 @@
     "@earendil-works/pi-tui": "^0.82.0"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "^0.80.10",
     "@sinclair/typebox": "^0.34.49"
   },
   "files": [
     "src/",
+    "docs/coverage.md",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],
@@ -48,6 +49,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json",
     "pack:check": "bun pm pack --dry-run",
+    "package:smoke": "bun scripts/package-smoke.ts",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage --maxWorkers=1",
     "test:watch": "vitest"

@@ -837,3 +837,100 @@ describe("ConfigStore outputThinkingBufferSize", () => {
     expect(snap.Explore).toBeUndefined();
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  Thinking overrides and mutation boundaries                         */
+/* ------------------------------------------------------------------ */
+
+describe("ConfigStore thinking overrides and boundaries", () => {
+  it("persists, clears, and reports persisted thinking overrides", () => {
+    const { io, saves } = memIO();
+    const store = new ConfigStore(io);
+
+    store.mutate.agent.setThinkingOverride("reviewer", "high");
+    expect(store.persistedThinkingOverride("reviewer")).toBe("high");
+    expect(store.hasPersistedThinkingOverrides()).toBe(true);
+    expect(saves).toHaveLength(1);
+
+    store.mutate.agent.clearThinkingOverride("reviewer");
+    expect(store.persistedThinkingOverride("reviewer")).toBeUndefined();
+    expect(store.hasPersistedThinkingOverrides()).toBe(false);
+    store.mutate.agent.clearAllThinkingOverrides();
+    expect(saves).toHaveLength(3);
+  });
+
+  it("keeps session thinking overrides in memory and clearAll resets them", () => {
+    const { io, saves } = memIO();
+    const store = new ConfigStore(io);
+    store.mutate.session.setThinkingOverride("reviewer", "medium");
+    expect(store.sessionThinkingOverride("reviewer")).toBe("medium");
+    expect(saves).toHaveLength(0);
+
+    store.mutate.session.clearAll();
+    expect(store.sessionThinkingOverride("reviewer")).toBeUndefined();
+    expect(saves).toHaveLength(0);
+  });
+
+  it("clamps widget line limits to two in reads and mutations", () => {
+    const { io, saves } = memIO({
+      agent: { default: null, forceBackground: false, widgetMaxLines: 1, widgetMaxLinesCompact: 0 },
+      concurrency: { default: 4 },
+    });
+    const store = new ConfigStore(io);
+    expect(store.agent.widgetMaxLines).toBe(2);
+    expect(store.agent.widgetMaxLinesCompact).toBe(2);
+
+    store.mutate.widget.setMaxLines(-5);
+    store.mutate.widget.setMaxLinesCompact(1);
+    expect(saves[0].agent.widgetMaxLines).toBe(2);
+    expect(saves[1].agent.widgetMaxLinesCompact).toBe(2);
+  });
+
+  it("persists the remaining scalar agent mutators", () => {
+    const { io, saves } = memIO();
+    const store = new ConfigStore(io);
+    store.mutate.agent.setDefaultModel("provider/model");
+    store.mutate.agent.setModelOverride("reviewer", "provider/reviewer");
+    store.mutate.agent.setForceBackground(true);
+    store.mutate.agent.setGraceTurns(9);
+    store.mutate.agent.setOrchestrationPrompt(false);
+
+    expect(store.agentConfigSnapshot()).toMatchObject({
+      default: "provider/model",
+      reviewer: "provider/reviewer",
+      forceBackground: true,
+      graceTurns: 9,
+      orchestrationPrompt: false,
+    });
+    expect(saves).toHaveLength(5);
+  });
+});
+
+/* Exercise the per-toggle mutators so each remains wired to persistence and widget sync. */
+describe("ConfigStore remaining display mutators", () => {
+  it("persists every stats and widget display toggle", () => {
+    const { io, saves } = memIO();
+    const { w, calls } = widgetStub();
+    const store = new ConfigStore(io);
+    store.setDeps({ widget: w });
+    saves.length = 0;
+    calls.length = 0;
+
+    store.mutate.agent.setShowTurns(false);
+    store.mutate.agent.setShowInput(false);
+    store.mutate.agent.setShowOutput(false);
+    store.mutate.agent.setShowContext(false);
+    store.mutate.agent.setShowTime(false);
+    store.mutate.widget.setShowModelThinking(false);
+    store.mutate.widget.setShowStartTime(false);
+
+    expect(store.agent).toMatchObject({
+      showTurns: false, showInput: false, showOutput: false, showContext: false, showTime: false,
+      widgetShowModelThinking: false, widgetShowStartTime: false,
+    });
+    expect(saves).toHaveLength(7);
+    expect(calls).toContain("setShowModelThinking:false");
+    expect(calls).toContain("setShowStartTime:false");
+    expect(calls.filter(c => c.startsWith("setStatsVisibility:")).length).toBe(5);
+  });
+});

@@ -11,10 +11,10 @@ export default defineConfig({
       reporter: ["text", "json-summary", "lcov"],
       // Baseline from the full cross-platform suite; raise these as gaps close.
       thresholds: {
-        statements: 76,
-        branches: 68,
-        functions: 71,
-        lines: 78,
+        statements: 79,
+        branches: 69,
+        functions: 75,
+        lines: 80,
       },
     },
   },

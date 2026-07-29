@@ -520,3 +520,71 @@ describe("usage accounting", () => {
   });
 });
 }); // end describe AgentManager
+
+describe("AgentManager steering and shutdown", () => {
+  let manager: AgentManager;
+
+  beforeEach(() => {
+    mockModules.resetUuidCounter();
+    mockModules.mockRunAgent.mockReset();
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("queues steering until a session exists, then forwards later steering failures", async () => {
+    let runnerOptions: any;
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockImplementation((_ctx: any, _type: any, _prompt: any, options: any) => {
+      runnerOptions = options;
+      return deferred.promise;
+    });
+    manager = new AgentManager(undefined, { default: 1 });
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+
+    expect(await manager.steer(id, "first instruction")).toBe(true);
+    const session = { steer: vi.fn().mockResolvedValue(undefined), dispose: vi.fn(), subscribe: vi.fn(), messages: [] };
+    runnerOptions.onSessionCreated(session);
+    await vi.waitFor(() => expect(session.steer).toHaveBeenCalledWith("first instruction"));
+
+    session.steer.mockRejectedValueOnce(new Error("closed"));
+    expect(await manager.steer(id, "second instruction")).toBe(false);
+    deferred.resolve(mockRunResult({ session }));
+    await manager.getRecord(id)!.execution.promise;
+  });
+
+  it("returns false when steering or aborting an unknown agent", async () => {
+    manager = new AgentManager(undefined, { default: 1 });
+
+    expect(await manager.steer("missing", "instruction")).toBe(false);
+    expect(manager.abort("missing", "user")).toBe(false);
+  });
+
+  it("forwards record callbacks and aborts an active controller on dispose", async () => {
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const onToolActivity = vi.fn();
+    const onAssistantUsage = vi.fn();
+    const onCompaction = vi.fn();
+    manager = new AgentManager(undefined, { default: 1 });
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+      description: "task", onToolActivity, onAssistantUsage, onCompaction,
+    });
+    const callbacks = mockModules.mockRunAgent.mock.calls[0][3];
+
+    callbacks.onToolActivity({ type: "end", toolName: "read" });
+    callbacks.onAssistantUsage({ input: 2, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.01 });
+    callbacks.onCompaction({ reason: "threshold", tokensBefore: 10 });
+    expect(onToolActivity).toHaveBeenCalledWith({ type: "end", toolName: "read" });
+    expect(onAssistantUsage).toHaveBeenCalledOnce();
+    expect(onCompaction).toHaveBeenCalledOnce();
+    expect(manager.getRecord(id)!.stats).toMatchObject({ toolUses: 1, compactionCount: 1 });
+
+    const signal = callbacks.signal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    manager.dispose();
+    expect(signal.aborted).toBe(true);
+    deferred.resolve(mockRunResult());
+  });
+});

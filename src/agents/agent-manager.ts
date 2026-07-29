@@ -486,6 +486,9 @@ export class AgentManager {
     for (const entry of this.queue) entry.resolve("");
     this.queue = [];
     for (const record of this.agents.values()) {
+      // A session may not exist yet while setup is in progress. Abort the
+      // controller as well so every active run is stopped during shutdown.
+      record.execution.abortController?.abort();
       record.execution.session?.dispose();
     }
     this.agents.clear();

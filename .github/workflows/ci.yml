@@ -11,23 +11,37 @@ concurrency:
 
 jobs:
   checks:
-    name: Checks (${{ matrix.os }})
+    name: Checks (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - label: Ubuntu, Pi locked
+            os: ubuntu-latest
+            pi-version: locked
+          - label: Windows, Pi locked
+            os: windows-latest
+            pi-version: locked
+          - label: Ubuntu, Pi minimum
+            os: ubuntu-latest
+            pi-version: 0.82.0
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - run: bun install --frozen-lockfile
+      - if: matrix.pi-version == 'locked'
+        run: bun install --frozen-lockfile
+      - if: matrix.pi-version != 'locked'
+        shell: bash
+        run: |
+          bun -e 'const fs = require("fs"); const p = require("./package.json"); const names = ["@earendil-works/pi-ai", "@earendil-works/pi-agent-core", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"]; p.overrides = Object.fromEntries(names.map((name) => [name, "${{ matrix.pi-version }}"])); for (const name of names.filter((name) => name !== "@earendil-works/pi-agent-core")) p.devDependencies[name] = "${{ matrix.pi-version }}"; fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n")'
+          rm bun.lock
+          bun install --ignore-scripts
       - run: bun run typecheck
       - run: bun run typecheck:test
       - run: bun run test
-      - if: runner.os == 'Linux'
-        run: bun run pack:check
 
   coverage:
     name: Coverage
@@ -44,3 +58,15 @@ jobs:
           name: coverage
           path: coverage/
           if-no-files-found: error
+
+  package-smoke:
+    name: Package smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun run pack:check
+      - run: bun run package:smoke
