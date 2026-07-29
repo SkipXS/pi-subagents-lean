@@ -230,14 +230,14 @@ describe("renderer", () => {
       content: "Agent output",
       details: { type: "builder", description: "Build", turnCount: 1, outputFile: "/tmp/build.log" },
     }, { expanded: false }, noopTheme, SHOW_COST);
-    expect(textInstances.map((t) => t.text).join("\n")).toContain("tail -f /tmp/build.log");
+    expect(textInstances.map((t) => t.text).join("\n")).toContain("output log: /tmp/build.log");
 
     textInstances.length = 0;
     renderSubagentResult({
       content: "Agent output",
       details: { type: "builder", description: "Build", outputFile: "/tmp/fallback.log" },
     }, { expanded: false }, noopTheme, SHOW_COST);
-    expect(textInstances.map((t) => t.text).join("\n")).toContain("tail -f /tmp/fallback.log");
+    expect(textInstances.map((t) => t.text).join("\n")).toContain("output log: /tmp/fallback.log");
   });
 
   it("uses fallback status and type labels when result stats are unavailable", () => {

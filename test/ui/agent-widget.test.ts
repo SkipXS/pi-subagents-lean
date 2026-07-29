@@ -174,7 +174,7 @@ describe("widget rendering format", () => {
 
       const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
       // line[1] = header, line[2] = outputFile, line[3] = activity
-      expect(lines[2]).toContain("tail -f");
+      expect(lines[2]).toContain("output log:");
       expect(lines[3]).toMatch(/^\[text:  [│└]/);
       expect(lines[3]).toContain("reading");
     });
@@ -250,7 +250,7 @@ describe("widget rendering format", () => {
       expect(lines[1]).toContain("[text:(sonnet · high)]");
       expect(lines[1]).toContain("[text:Test agent a1]");
       expect(lines[1]).toContain("[text:5⚙︎");
-      expect(lines[2]).toMatch(/^\[text:  │ @feature  tail -f \/tmp\/output\.log\]/);
+      expect(lines[2]).toMatch(/^\[text:  │ @feature  output log: \/tmp\/output\.log\]/);
       expect(lines[3]).toMatch(/^\[text:  └ reading…\]/);
       expect(lines.slice(1).join("\n")).not.toContain("[dim:");
     });
@@ -327,15 +327,15 @@ describe("widget rendering format", () => {
       expect(lines[2]).toMatch(/^  /); // All agents use 2-space prefix
     });
 
-    it("uses spaces for tail-f line of last finished agent", () => {
+    it("uses spaces for output-log line of last finished agent", () => {
       const a1 = makeFinishedAgent("a1");
       a1.display.outputFile = "/tmp/pi-agent-outputs/test.log";
       (manager as any).listAgents = () => [a1];
       const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
       expect(lines[1]).toMatch(/^  /); // All agents use 2-space prefix
-      // tail-f line should have spaces only (no connector)
+      // Output-log line should have spaces only (no connector)
       expect(lines[2]).toMatch(/^\[dim:\s{4}/);
-      expect(lines[2]).toContain("tail -f");
+      expect(lines[2]).toContain("output log:");
     });
 
     it("outputFile lines use spaces for all finished agents", () => {
@@ -345,8 +345,8 @@ describe("widget rendering format", () => {
       a2.display.outputFile = "/tmp/out2.log";
       (manager as any).listAgents = () => [a1, a2];
       const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
-      // All tail-f lines use spaces only (no connector) for finished agents
-      const outputLines = lines.filter((line: string) => line.includes("tail -f"));
+      // All output-log lines use spaces only (no connector) for finished agents
+      const outputLines = lines.filter((line: string) => line.includes("output log:"));
       expect(outputLines).toHaveLength(2);
       expect(outputLines.every((line: string) => /^\[dim:\s{4}/.test(line))).toBe(true);
       expect(outputLines.some((line: string) => line.includes("out1.log"))).toBe(true);

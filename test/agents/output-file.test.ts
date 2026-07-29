@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMockSession, tempDirFixture } from "../fixtures.ts";
 import {
@@ -46,8 +47,8 @@ describe("createOutputFilePath", () => {
     expect(createOutputFilePath("same-id", dir)).toBe(createOutputFilePath("same-id", dir));
   });
 
-  it("defaults to /tmp/pi-agent-outputs when baseDir is omitted", () => {
-    expect(createOutputFilePath("test")).toBe(join("/tmp/pi-agent-outputs", "test.log"));
+  it("defaults to the system temporary directory when baseDir is omitted", () => {
+    expect(createOutputFilePath("test")).toBe(join(tmpdir(), "pi-agent-outputs", "test.log"));
   });
 });
 
@@ -439,9 +440,9 @@ describe("AgentOutputLog", () => {
     expect(readFileSync(log.path, "utf-8")).toMatch(/\[USER\]\s+explore auth/);
   });
 
-  it("uses default baseDir when omitted", () => {
+  it("uses the system temporary directory when baseDir is omitted", () => {
     const log = new AgentOutputLog(testAgentId, "test prompt");
-    expect(log.path).toBe(join("/tmp/pi-agent-outputs", `${testAgentId}.log`));
+    expect(log.path).toBe(join(tmpdir(), "pi-agent-outputs", `${testAgentId}.log`));
   });
 
   it("subscribes to session events on attach", () => {

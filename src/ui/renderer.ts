@@ -127,7 +127,7 @@ export function renderSubagentResult(
     const statsLine = buildStatsLine(d, theme, showCost);
     let headerLine = `${statusIcon} ${namePart} · ${statsLine}\n  ${theme.fg("text", (d.description as string) || "")}`;
     if (d.outputFile as string) {
-      headerLine += `\n  ${theme.fg("dim", `tail -f ${d.outputFile}`)}`;
+      headerLine += `\n  ${theme.fg("dim", `output log: ${d.outputFile}`)}`;
     }
     if (d.worktreePath as string) {
       headerLine += `\n  ${theme.fg("dim", `worktree: ${d.worktreePath}`)}`;
@@ -167,7 +167,7 @@ function buildFallbackResultLine(
   const desc = (d?.description as string) || "";
   if (desc) line += `\n  ${theme.fg("text", desc)}`;
   if (d?.outputFile) {
-    line += `\n  ${theme.fg("dim", `tail -f ${d.outputFile}`)}`;
+    line += `\n  ${theme.fg("dim", `output log: ${d.outputFile}`)}`;
   }
   if (d?.worktreePath) {
     line += `\n  ${theme.fg("dim", `worktree: ${d.worktreePath}`)}`;

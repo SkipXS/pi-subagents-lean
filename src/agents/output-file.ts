@@ -1,12 +1,13 @@
 /**
  * output-file.ts — Human-readable output logging for agent transcripts.
  *
- * Path: /tmp/pi-agent-outputs/<agentId>.log
- * Append-only, human-readable, supports `tail -f`.
+ * Path: <system temp dir>/pi-agent-outputs/<agentId>.log
+ * Append-only, human-readable, and can be followed with `tail -f` where available.
  * Lines: [USER], [TOOL], [ASSISTANT], [DONE] with ISO timestamps.
  */
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { formatCost, formatTokens } from "./usage.js";
@@ -42,14 +43,14 @@ function timestamp(): string {
 
 /**
  * Create the output file path for an agent.
- * Default path: /tmp/pi-agent-outputs/<agentId>.log
+ * Default path: <system temp dir>/pi-agent-outputs/<agentId>.log
  * Ensures the parent directory exists with 0o700 permissions.
  *
- * @param baseDir - Optional base directory (defaults to /tmp/pi-agent-outputs).
- *                    Provided for testability; production callers omit it.
+ * @param baseDir - Optional base directory. Provided for testability;
+ *                  production callers use the system temporary directory.
  */
 export function createOutputFilePath(agentId: string, baseDir?: string): string {
-  const dir = baseDir ?? "/tmp/pi-agent-outputs";
+  const dir = baseDir ?? join(tmpdir(), "pi-agent-outputs");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return join(dir, `${agentId}.log`);
 }

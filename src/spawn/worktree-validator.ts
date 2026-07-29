@@ -78,6 +78,35 @@ async function getGitCommonDir(
   }
 }
 
+/** Whether a path uses Windows drive-letter or UNC syntax. */
+function isWindowsAbsolutePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value)
+    || /^\\\\[^\\/]+[\\/][^\\/]+/.test(value)
+    // On POSIX, // has implementation-defined semantics and must remain case-sensitive.
+    || (process.platform === "win32" && /^\/\/[^\\/]+[\\/][^\\/]+/.test(value));
+}
+
+/** Resolve git's potentially relative common-dir output against the command CWD. */
+function resolveGitCommonDir(commonDir: string, cwd: string): string {
+  return path.posix.isAbsolute(commonDir) || isWindowsAbsolutePath(commonDir)
+    ? commonDir
+    : path.resolve(cwd, commonDir);
+}
+
+/** Compare common dirs without touching the filesystem. */
+function sameGitCommonDir(first: string, second: string): boolean {
+  const firstIsWindowsPath = isWindowsAbsolutePath(first);
+  const secondIsWindowsPath = isWindowsAbsolutePath(second);
+
+  if (firstIsWindowsPath || secondIsWindowsPath) {
+    return firstIsWindowsPath
+      && secondIsWindowsPath
+      && path.win32.normalize(first).toLowerCase() === path.win32.normalize(second).toLowerCase();
+  }
+
+  return path.posix.normalize(first) === path.posix.normalize(second);
+}
+
 /**
  * Validate a worktree path against the parent's git repository.
  *
@@ -138,14 +167,10 @@ export async function validateWorktreePath(
   if (!targetResult.ok) return targetResult;
 
   // Compare common dirs — must share the same repo
-  const parentCommonAbs = path.isAbsolute(parentResult.commonDir)
-    ? parentResult.commonDir
-    : path.resolve(parentCwd, parentResult.commonDir);
-  const targetCommonAbs = path.isAbsolute(targetResult.commonDir)
-    ? targetResult.commonDir
-    : path.resolve(realPath, targetResult.commonDir);
+  const parentCommonAbs = resolveGitCommonDir(parentResult.commonDir, parentCwd);
+  const targetCommonAbs = resolveGitCommonDir(targetResult.commonDir, realPath);
 
-  if (parentCommonAbs !== targetCommonAbs) {
+  if (!sameGitCommonDir(parentCommonAbs, targetCommonAbs)) {
     return { ok: false, error: WORKTREE_VALIDATION_ERRORS.DIFFERENT_REPO };
   }
 

@@ -223,9 +223,12 @@ export class AgentManager {
     record.lifecycle.status = "running";
     record.lifecycle.startedAt = Date.now();
 
-    // Create output log for this agent (creates file + writes [USER] entry)
-    record.execution.outputLog = new AgentOutputLog(id, prompt, undefined, this.bufferSize);
-    record.display.outputFile = record.execution.outputLog.path;
+    // Output logs are optional telemetry. A filesystem failure must not prevent
+    // the agent from running or hold a queue slot.
+    try {
+      record.execution.outputLog = new AgentOutputLog(id, prompt, undefined, this.bufferSize);
+      record.display.outputFile = record.execution.outputLog.path;
+    } catch { /* ignore output-log initialization failures */ }
 
     this.onStart?.(record);
 

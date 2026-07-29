@@ -86,7 +86,7 @@ Transient per-agent display state for active tools and streaming response text. 
 
 **Output log**
 
-An append-only, human-readable transcript under `/tmp/pi-agent-outputs/`, suitable for `tail -f`.
+An append-only, human-readable transcript under the system temporary directory. On systems with `tail`, it can be followed with `tail -f`; use an equivalent command elsewhere.
 
 ### Interface
 
