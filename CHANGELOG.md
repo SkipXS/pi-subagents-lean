@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cross-platform and minimum-Pi CI coverage** with strict source/test typechecking, risk-based coverage gates, and an installed-tarball Pi loader smoke test.
 
 ### Fixed
+- **Git-source installations now complete with npm.** Vitest's dev dependency is pinned to the matching coverage-provider version, avoiding npm Arborist peer-resolution failures during Pi's production install.
 - **Shutdown now aborts active agent controllers** even when session setup has not completed.
 - **Already-aborted parent signals propagate immediately** when a subagent run begins.
 - **Session shutdown and terminal-input cleanup are failure-safe**, and temporary config files are removed after failed atomic writes.
