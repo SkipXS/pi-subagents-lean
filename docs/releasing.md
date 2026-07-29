@@ -20,6 +20,7 @@ GitHub release. Publishing and releasing require separate, explicit approval.
    bun run typecheck:test
    bun run test
    bun run test:coverage
+   bun run npm:production:smoke
    bun run package:smoke
    bun run release:validate
    ```

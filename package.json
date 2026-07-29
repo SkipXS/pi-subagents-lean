@@ -51,6 +51,7 @@
     "typecheck:test": "tsc -p tsconfig.test.json",
     "pack:check": "bun pm pack --dry-run",
     "package:smoke": "bun scripts/package-smoke.ts",
+    "npm:production:smoke": "bun scripts/npm-production-smoke.ts",
     "release:validate": "bun scripts/release-validate.ts",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage --maxWorkers=1",
@@ -67,6 +68,6 @@
     "@earendil-works/pi-tui": "^0.82.0",
     "@vitest/coverage-v8": "4.1.9",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.7"
+    "vitest": "4.1.9"
   }
 }

@@ -10,6 +10,7 @@ bun run typecheck
 bun run typecheck:test
 bun run test
 bun run test:coverage
+bun run npm:production:smoke
 bun run package:smoke
 ```
 
@@ -48,10 +49,12 @@ CI tests three supported environments:
 - Windows with the lockfile Pi versions;
 - Ubuntu with the minimum supported Pi version, `0.82.0`.
 
-`bun run package:smoke` packs the published file set, installs the resulting
-tarball in an isolated project, and loads the installed extension through Pi's
-public extension loader. It performs no model or network request beyond package
-installation.
+`bun run npm:production:smoke` installs the production dependency graph from a
+fresh copy of `package.json` with npm. It catches npm peer-resolution failures
+before install scripts run in Pi's production Git-source installation. `bun run package:smoke` packs
+the published file set, installs the resulting tarball in an isolated project,
+and loads the installed extension through Pi's public extension loader. It
+performs no model or network request beyond package installation.
 
 ## Required checks for `main`
 
