@@ -221,6 +221,10 @@ describe("showTextViewer (via buildAgentActionsList)", () => {
     await list.onSelect!({ value: "view-result" });
 
     expect(capturedFactory).toBeDefined();
+    expect(ctx.ui.custom).toHaveBeenCalledWith(expect.any(Function), {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "90%", maxHeight: "70%" },
+    });
   });
 
   it("opens text viewer when selecting view-error", async () => {
@@ -259,6 +263,10 @@ describe("showTextViewer (via buildAgentActionsList)", () => {
     await list.onSelect!({ value: "view-conversation" });
 
     expect(capturedFactory).toBeDefined();
+    expect(ctx.ui.custom).toHaveBeenCalledWith(expect.any(Function), {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "90%", maxHeight: "70%" },
+    });
   });
 });
 
@@ -295,8 +303,10 @@ describe("showTextViewer — component behavior", () => {
 
     expect(lines[0]).toMatch(/\u256d/); // top-left corner
     expect(lines[lines.length - 1]).toMatch(/\u2570/); // bottom-right corner
-    expect(lines[1]).toContain("general-purpose"); // title contains agent type
-    expect(lines[1]).toContain("test-id"); // title contains short id
+    expect(lines[1]).toContain("✓");
+    expect(lines[1]).toContain("general-purpose");
+    expect(lines[1]).toContain("Test agent");
+    expect(lines.join("\n")).toContain("test-id");
   });
 
   it("renders content lines", async () => {
@@ -310,7 +320,24 @@ describe("showTextViewer — component behavior", () => {
     expect(text).toContain("line three");
   });
 
-  it("renders error viewer with Error suffix", async () => {
+  it("renders the shared status and model header", async () => {
+    const record = makeRecord({
+      display: {
+        type: "general-purpose",
+        description: "Test agent",
+        invocation: { modelName: "claude-sonnet", thinkingLevel: "high" },
+      },
+      result: "done",
+    });
+    const { component } = await getComponent(record, "result", "done");
+    const lines = component.render(80);
+
+    expect(lines[1]).toContain("✓");
+    expect(lines[2]).toContain("claude-sonnet");
+    expect(lines[2]).toContain("high");
+  });
+
+  it("renders error viewer with error status and label", async () => {
     const record = makeRecord({
       lifecycle: { status: "error", startedAt: Date.now() - 30000 },
       result: "",
@@ -320,6 +347,7 @@ describe("showTextViewer — component behavior", () => {
     const lines = component.render(80);
     const text = lines.join("\n");
 
+    expect(text).toContain("✗");
     expect(text).toContain("Error");
     expect(text).toContain("something went wrong");
   });

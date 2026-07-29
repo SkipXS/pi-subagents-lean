@@ -95,6 +95,14 @@ vi.mock("../src/ui/format.js", () => ({
   }[status])),
   getDisplayName: vi.fn((t: string) => t),
   truncateDesc: vi.fn((t: string) => t),
+  buildInvocationTags: vi.fn((invocation: any) => ({
+    modelName: invocation?.modelName,
+    thinkingTag: invocation?.thinkingLevel,
+    tags: [],
+  })),
+  buildStatsCells: vi.fn(() => ({})),
+  formatStatsRow: vi.fn(() => undefined),
+  fgPreservingNestedStyles: vi.fn((_theme: any, _color: string, text: string) => text),
 }));
 
 vi.mock("../src/prompt/context.js", () => ({

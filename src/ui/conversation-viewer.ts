@@ -31,12 +31,70 @@ const CHROME_LINES_BASE = 7;
 const MIN_VIEWPORT = 3;
 /** Cap viewport height at this % of terminal rows so the bordered box fits without clipping. */
 export const VIEWPORT_HEIGHT_PCT = 70;
+/** Shared overlay geometry for every agent viewer entry point. */
+export const VIEWER_OVERLAY_OPTIONS = {
+  anchor: "center",
+  width: "90%",
+  maxHeight: `${VIEWPORT_HEIGHT_PCT}%`,
+} as const;
 /** Maximum characters for a single tool result before truncation. */
 const TOOL_RESULT_MAX_CHARS = 500;
 /** Maximum lines to show from a large tool result. */
 const TOOL_RESULT_MAX_LINES = 5;
 /** Debounce interval for streaming renders — reduces CPU during fast token arrival. */
 const STREAM_RENDER_DEBOUNCE_MS = 100;
+
+/** Build the two identity/metadata rows shared by conversation and result viewers. */
+export function buildAgentViewerHeaderRows(
+  record: AgentRecord,
+  theme: Theme,
+  statsVisibility?: StatsVisibility,
+  session?: AgentSession,
+): [string, string] {
+  const name = getDisplayName(record.display.type);
+  const { icon, color } = getAgentStatusDisplay(record.lifecycle.status);
+  const statusIcon = theme.fg(color, icon);
+  const durationMs = (record.lifecycle.completedAt ?? Date.now()) - record.lifecycle.startedAt;
+  const liveSnapshot = session ? getSessionUsageSnapshot(session) : undefined;
+  const persistedSnapshot = {
+    contextPercent: record.stats.contextPercent,
+    contextWindow: record.stats.contextWindow,
+    autoCompactionEnabled: record.stats.autoCompactionEnabled,
+    usingSubscription: record.stats.usingSubscription,
+  };
+  const usageSnapshot = record.lifecycle.completedAt != null
+    && (persistedSnapshot.contextPercent != null || persistedSnapshot.contextWindow != null)
+    ? persistedSnapshot
+    : (liveSnapshot ?? persistedSnapshot);
+  const statsCells = buildStatsCells({
+    toolUses: record.stats.toolUses,
+    turnCount: record.stats.turnCount,
+    maxTurns: record.stats.maxTurns,
+    input: record.stats.lifetimeUsage.input,
+    output: record.stats.lifetimeUsage.output,
+    cacheRead: record.stats.cacheRead,
+    cacheWrite: record.stats.lifetimeUsage.cacheWrite,
+    latestCacheHitRate: record.stats.latestCacheHitRate,
+    cost: record.stats.lifetimeUsage.cost,
+    ...usageSnapshot,
+    durationMs,
+  }, theme, statsVisibility);
+
+  const worktreeTag = record.display.worktreeLabel ? theme.fg("muted", ` @${record.display.worktreeLabel}`) : "";
+  const identityRow = `${statusIcon} ${theme.bold(name)}  ${theme.fg("muted", record.display.description)}${worktreeTag}`;
+
+  const { modelName, thinkingTag, tags } = buildInvocationTags({
+    ...record.display.invocation,
+    thinkingLevel: session?.thinkingLevel ?? record.display.invocation?.thinkingLevel,
+  });
+  const statsLine = fgPreservingNestedStyles(theme, "dim", formatStatsRow(statsCells) ?? "");
+  if (modelName) {
+    const parts = [thinkingTag, statsLine, ...tags].filter(Boolean);
+    return [identityRow, theme.fg("dim", `  ${modelName} · ${parts.join(" · ")}`)];
+  }
+  const parts = [thinkingTag, statsLine].filter(Boolean);
+  return [identityRow, parts.join(" · ")];
+}
 
 export class ConversationViewer implements Component {
   private scrollOffset = 0;
@@ -233,60 +291,14 @@ export class ConversationViewer implements Component {
 
     // Header
     lines.push(hrTop);
-    const name = getDisplayName(this.record.display.type);
-
-    const status = this.record.lifecycle.status;
-    const { icon, color } = getAgentStatusDisplay(status);
-    const statusIcon = th.fg(color, icon);
-    // Build stats line like the widget, retaining the final snapshot after a
-    // completed session has no longer-live context information.
-    const durationMs = (this.record.lifecycle.completedAt ?? Date.now()) - this.record.lifecycle.startedAt;
-    const liveSnapshot = getSessionUsageSnapshot(this.session);
-    const persistedSnapshot = {
-      contextPercent: this.record.stats.contextPercent,
-      contextWindow: this.record.stats.contextWindow,
-      autoCompactionEnabled: this.record.stats.autoCompactionEnabled,
-      usingSubscription: this.record.stats.usingSubscription,
-    };
-    const usageSnapshot = this.record.lifecycle.completedAt != null
-      && (persistedSnapshot.contextPercent != null || persistedSnapshot.contextWindow != null)
-      ? persistedSnapshot
-      : (liveSnapshot ?? persistedSnapshot);
-    const statsCells = buildStatsCells({
-      toolUses: this.record.stats.toolUses,
-      turnCount: this.record.stats.turnCount,
-      maxTurns: this.record.stats.maxTurns,
-      input: this.record.stats.lifetimeUsage.input,
-      output: this.record.stats.lifetimeUsage.output,
-      cacheRead: this.record.stats.cacheRead,
-      cacheWrite: this.record.stats.lifetimeUsage.cacheWrite,
-      latestCacheHitRate: this.record.stats.latestCacheHitRate,
-      cost: this.record.stats.lifetimeUsage.cost,
-      ...usageSnapshot,
-      durationMs,
-    }, th, this.statsVisibility);
-
-    const worktreeTag = this.record.display.worktreeLabel ? th.fg("muted", ` @${this.record.display.worktreeLabel}`) : "";
-    // Row 1: status icon, name, description, worktree
-    lines.push(row(
-      `${statusIcon} ${th.bold(name)}  ${th.fg("muted", this.record.display.description)}${worktreeTag}`
-    ));
-
-    // Row 2: model name + compact usage stats
-    // The session reflects Pi's final, model-normalized level rather than
-    // merely the requested value captured in invocation metadata.
-    const { modelName, thinkingTag, tags } = buildInvocationTags({
-      ...this.record.display.invocation,
-      thinkingLevel: this.session.thinkingLevel ?? this.record.display.invocation?.thinkingLevel,
-    });
-    const statsLine = fgPreservingNestedStyles(th, "dim", formatStatsRow(statsCells) ?? "");
-    if (modelName) {
-      const parts = [thinkingTag, statsLine, ...tags].filter(Boolean);
-      lines.push(row(th.fg("dim", `  ${modelName} · ${parts.join(" · ")}`)));
-    } else {
-      const parts = [thinkingTag, statsLine].filter(Boolean);
-      lines.push(row(parts.join(" · ")));
-    }
+    const [identityRow, metadataRow] = buildAgentViewerHeaderRows(
+      this.record,
+      th,
+      this.statsVisibility,
+      this.session,
+    );
+    lines.push(row(identityRow));
+    lines.push(row(metadataRow));
     lines.push(hrMid);
 
     // Content area

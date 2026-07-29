@@ -18,7 +18,12 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Input, matchesKey, SelectList, truncateToWidth, visibleWidth, type Component, type SelectItem } from "@earendil-works/pi-tui";
 import type { AgentRecord } from "../../types.js";
 import { SHORT_ID_LENGTH } from "../../types.js";
-import { ConversationViewer } from "../conversation-viewer.js";
+import {
+  buildAgentViewerHeaderRows,
+  ConversationViewer,
+  VIEWER_OVERLAY_OPTIONS,
+  VIEWPORT_HEIGHT_PCT,
+} from "../conversation-viewer.js";
 import { getAgentStatusDisplay, getDisplayName, truncateDesc } from "../format.js";
 import { buildSelectListTheme, createDelegatingComponent } from "./helpers.js";
 import { getCoordinator, getManager, getStore } from "../../shell.js";
@@ -48,7 +53,7 @@ async function showConversationViewer(
         (msg: string) => manager?.steer(record.id, msg),
         getStore().agent,
       ),
-    { overlay: true },
+    { overlay: true, overlayOptions: VIEWER_OVERLAY_OPTIONS },
   );
 }
 
@@ -62,14 +67,10 @@ async function showTextViewer(
   kind: "result" | "error",
   text: string,
 ): Promise<void> {
-  const titleSuffix = kind === "result"
-    ? record.id.slice(0, SHORT_ID_LENGTH)
-    : "Error";
+  const label = kind === "result" ? record.id.slice(0, SHORT_ID_LENGTH) : "Error";
   const textLines = text.split("\n");
-  const displayName = getDisplayName(record.display.type);
-  const chromeLines = 5; // top border + title + sep + footer + bottom border
+  const chromeLines = 7; // top border + 2 header rows + 2 separators + footer + bottom border
   const MIN_VIEWPORT = 3;
-  const VIEWPORT_HEIGHT_PCT = 70;
   let scrollOffset = 0;
   let autoScroll = true;
 
@@ -85,18 +86,26 @@ async function showTextViewer(
       return {
         invalidate() {},
         render(width: number) {
+          if (width < 6) return [];
           const innerW = width - 4;
+          const row = (content: string) => {
+            const truncated = truncateToWidth(content, innerW, "...", true);
+            const padding = " ".repeat(Math.max(0, innerW - visibleWidth(truncated)));
+            return `${border} ${truncated}${padding} ${border}`;
+          };
+          const separator = row(theme.fg("dim", "\u2500".repeat(innerW)));
+          const [identityRow, metadataRow] = buildAgentViewerHeaderRows(
+            record,
+            theme,
+            getStore().agent,
+            record.execution.session,
+          );
           const out: string[] = [
             theme.fg("border", `\u256d${"\u2500".repeat(width - 2)}\u256e`),
+            row(identityRow),
+            row(metadataRow),
+            separator,
           ];
-
-          // Title row: │ name · suffix pad │
-          const titleStr = theme.bold(theme.fg("accent", `${displayName} \u00b7 ${titleSuffix}`));
-          const titlePad = Math.max(0, innerW - visibleWidth(titleStr));
-          out.push(`${border} ${truncateToWidth(titleStr + " ".repeat(titlePad), innerW, "...", true)} ${border}`);
-
-          // Separator
-          out.push(`${border} ${theme.fg("dim", "\u2500".repeat(innerW))} ${border}`);
 
           // Content with scrolling
           const vp = viewportHeight();
@@ -113,10 +122,11 @@ async function showTextViewer(
           }
 
           // Footer
+          out.push(separator);
           const scrollPct = textLines.length <= vp
             ? "100%"
             : `${Math.round(((vs + vp) / textLines.length) * 100)}%`;
-          const count = theme.fg("dim", `${textLines.length} lines \u00b7 ${scrollPct}`);
+          const count = theme.fg("dim", `${label} \u00b7 ${textLines.length} lines \u00b7 ${scrollPct}`);
           const footerText = theme.fg("dim", "q/Esc close");
           const gap = Math.max(1, innerW - visibleWidth(count) - visibleWidth(footerText));
           out.push(`${border} ${count}${" ".repeat(gap)}${footerText} ${border}`);
@@ -155,7 +165,7 @@ async function showTextViewer(
         },
       };
     },
-    { overlay: true },
+    { overlay: true, overlayOptions: VIEWER_OVERLAY_OPTIONS },
   );
 }
 

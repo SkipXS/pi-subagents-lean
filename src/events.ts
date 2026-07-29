@@ -6,7 +6,7 @@ import { matchesKey, isKeyRelease } from "@earendil-works/pi-tui";
 import { registerAgents, getAvailableAgents, setAgentScanDirs, scanAndMerge } from "./agents/agent-types.js";
 import { AgentManager } from "./agents/agent-manager.js";
 import { AgentWidget, type UICtx } from "./ui/agent-widget.js";
-import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./ui/conversation-viewer.js";
+import { ConversationViewer, VIEWER_OVERLAY_OPTIONS } from "./ui/conversation-viewer.js";
 import { SpawnCoordinator } from "./spawn/spawn-coordinator.js";
 import { toolCallListener } from "./agents/tool-execution.js";
 import { getOrchestrationPromptUpdate } from "./prompt/orchestration.js";
@@ -138,7 +138,7 @@ async function openViewer(ctx: ExtensionContext, record: AgentRecord | null): Pr
           (msg: string) => manager?.steer(record.id, msg),
           getStore().agent,
         ),
-      { overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` } },
+      { overlay: true, overlayOptions: VIEWER_OVERLAY_OPTIONS },
     );
   } finally {
     widget.setViewerOpen(false);
