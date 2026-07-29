@@ -160,16 +160,16 @@ describe("widget worktree label — full mode", () => {
     expect(lines.length).toBeGreaterThan(0);
   });
 
-  it("shows worktreeLabel and tail -f on the same continuation line", () => {
+  it("shows worktreeLabel and output log on the same continuation line", () => {
     const agent = makeRunningAgent("a1", "builder", "feature");
     agent.display.outputFile = "/tmp/pi-agent-outputs/test.log";
     activity.set("a1", makeActivity("a1"));
     (manager as any).listAgents = () => [agent];
 
     const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
-    // Both @ feature and tail -f should be on the same continuation line
+    // Both @ feature and output log should be on the same continuation line
     const combinedLine = lines.find(
-      (l: string) => l.includes("@feature") && l.includes("tail -f"),
+      (l: string) => l.includes("@feature") && l.includes("output log:"),
     );
     expect(combinedLine).toBeDefined();
   });
@@ -182,7 +182,7 @@ describe("widget worktree label — full mode", () => {
     const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
     const labelLine = lines.find((l: string) => l.includes("@feature"));
     expect(labelLine).toBeDefined();
-    expect(labelLine).not.toContain("tail -f");
+    expect(labelLine).not.toContain("output log:");
   });
 
   it("shows distinct worktree labels for parallel agents with different worktrees", () => {

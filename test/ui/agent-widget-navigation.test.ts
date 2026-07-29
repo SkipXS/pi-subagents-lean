@@ -483,7 +483,7 @@ describe("overflow with navigation", () => {
 
     expect(lines.length).toBeLessThanOrEqual(3);
     expect(pinnedHeader).toContain("→");
-    expect(lines.some((line: string) => line.includes("tail -f /tmp/pinned.log"))).toBe(false);
+    expect(lines.some((line: string) => line.includes("output log: /tmp/pinned.log"))).toBe(false);
     expect(lines.some((line: string) => line.includes("more"))).toBe(true);
   });
 

@@ -100,7 +100,7 @@ function padToVisibleWidth(text: string, width: number): string {
 function buildWorktreeOutputParts(a: AgentRecord): string[] {
   const parts: string[] = [];
   if (a.display.worktreeLabel) parts.push(`@${a.display.worktreeLabel}`);
-  if (a.display.outputFile) parts.push(`tail -f ${a.display.outputFile}`);
+  if (a.display.outputFile) parts.push(`output log: ${a.display.outputFile}`);
   return parts;
 }
 

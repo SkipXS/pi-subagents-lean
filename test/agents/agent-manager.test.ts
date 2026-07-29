@@ -145,13 +145,13 @@ describe("AgentManager", () => {
       continuation.resolve(mockRunResult());
     });
 
-    it("reports a queued output-log initialization failure and releases capacity", async () => {
+    it("starts a queued agent and frees queue capacity when output-log initialization fails", async () => {
       manager = new AgentManager(onComplete, { default: 1 });
       const first = makeResolvablePromise();
-      const continuation = makeResolvablePromise();
+      const queued = makeResolvablePromise();
       mockModules.mockRunAgent
         .mockReturnValueOnce(first.promise)
-        .mockReturnValueOnce(continuation.promise);
+        .mockReturnValueOnce(queued.promise);
       mockModules.fsMock.writeFileSync
         .mockImplementationOnce(() => undefined)
         .mockImplementationOnce(() => { throw new Error("queued log init failed"); });
@@ -159,25 +159,21 @@ describe("AgentManager", () => {
       manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", {
         description: "first", isBackground: true,
       });
-      const failedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "failed", {
-        description: "failed", isBackground: false,
+      const queuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "queued", {
+        description: "queued", isBackground: false,
       });
-      const failedRecord = manager.getRecord(failedId)!;
-      const failedWaiter = failedRecord.execution.promise!;
+      const queuedRecord = manager.getRecord(queuedId)!;
+      const queuedWaiter = queuedRecord.execution.promise!;
 
       first.resolve(mockRunResult());
-      await expect(failedWaiter).resolves.toBe("");
+      await vi.waitFor(() => expect(queuedRecord.lifecycle.status).toBe("running"));
+      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2);
+      expect(queuedRecord.execution.outputLog).toBeUndefined();
+      expect(queuedRecord.display.outputFile).toBeUndefined();
 
-      expect(failedRecord.lifecycle.status).toBe("error");
-      expect(failedRecord.error).toBe("queued log init failed");
-      expect(onComplete).toHaveBeenCalledWith(failedRecord);
-      expect(mockModules.mockRunAgent).toHaveBeenCalledOnce();
-
-      const continuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "continued", {
-        description: "continued", isBackground: true,
-      });
-      expect(manager.getRecord(continuedId)?.lifecycle.status).toBe("running");
-      continuation.resolve(mockRunResult());
+      queued.resolve(mockRunResult({ responseText: "queued done" }));
+      await expect(queuedWaiter).resolves.toBe("queued done");
+      expect(queuedRecord.lifecycle.status).toBe("completed");
     });
 
     it("keeps foreground waiters pending until their queued agent completes", async () => {
@@ -440,25 +436,24 @@ describe("AgentManager", () => {
       await manager.getRecord(nextId)!.execution.promise;
     });
 
-    it("cleans up a failed output-log initialization before the runner starts", async () => {
+    it("runs a foreground agent when output-log initialization fails", async () => {
       manager = new AgentManager(onComplete, { default: 1 });
       mockModules.fsMock.writeFileSync.mockImplementationOnce(() => {
         throw new Error("log init failed");
       });
+      mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult({ responseText: "done without log" }));
 
-      expect(() => manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
         description: "task", modelKey: "test/model",
-      })).toThrow("log init failed");
-      expect(mockModules.mockRunAgent).not.toHaveBeenCalled();
-      expect(manager.listAgents()).toHaveLength(0);
-      expect(manager.getTotalAgentCount()).toBe(0);
-
-      mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-      const nextId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "next", {
-        description: "next",
       });
-      expect(manager.getRecord(nextId)?.lifecycle.status).toBe("running");
-      await manager.getRecord(nextId)!.execution.promise;
+      const record = manager.getRecord(id)!;
+
+      expect(mockModules.mockRunAgent).toHaveBeenCalledOnce();
+      expect(record.execution.outputLog).toBeUndefined();
+      expect(record.display.outputFile).toBeUndefined();
+      await expect(record.execution.promise).resolves.toBe("done without log");
+      expect(record.lifecycle.status).toBe("completed");
+      expect(manager.getTotalAgentCount()).toBe(1);
     });
 
     it("persists after an agent is evicted", async () => {
@@ -693,6 +688,68 @@ describe("AgentManager steering and shutdown", () => {
 
     expect(await manager.steer("missing", "instruction")).toBe(false);
     expect(manager.abort("missing", "user")).toBe(false);
+  });
+
+  it("removes the parent abort listener after normal completion", async () => {
+    const parent = new AbortController();
+    const removeListener = vi.spyOn(parent.signal, "removeEventListener");
+    mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
+    manager = new AgentManager(undefined, { default: 1 });
+
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+      description: "task", signal: parent.signal,
+    });
+    await manager.getRecord(id)!.execution.promise;
+
+    expect(manager.getRecord(id)?.lifecycle.status).toBe("completed");
+    expect(removeListener).toHaveBeenCalledOnce();
+  });
+
+  it("removes parent abort listeners when disposed during a run", () => {
+    const parent = new AbortController();
+    const removeListener = vi.spyOn(parent.signal, "removeEventListener");
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(deferred.promise);
+    manager = new AgentManager(undefined, { default: 1 });
+
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+      description: "task", signal: parent.signal,
+    });
+    const signal = mockModules.mockRunAgent.mock.calls[0][3].signal as AbortSignal;
+    manager.dispose();
+
+    expect(signal.aborted).toBe(true);
+    expect(removeListener).toHaveBeenCalledOnce();
+    deferred.resolve(mockRunResult());
+  });
+
+  it("forwards a parent abort during runner initialization and retains stopped status", async () => {
+    const parent = new AbortController();
+    const removeListener = vi.spyOn(parent.signal, "removeEventListener");
+    const deferred = makeResolvablePromise();
+    let runnerOptions: any;
+    mockModules.mockRunAgent.mockImplementation((_ctx: any, _type: any, _prompt: any, options: any) => {
+      runnerOptions = options;
+      return deferred.promise;
+    });
+    manager = new AgentManager(undefined, { default: 1 });
+
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+      description: "task", signal: parent.signal,
+    });
+    const record = manager.getRecord(id)!;
+    parent.abort();
+
+    expect(runnerOptions.signal.aborted).toBe(true);
+    expect(record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "agent" });
+    expect(record.lifecycle.completedAt).toEqual(expect.any(Number));
+    expect(removeListener).toHaveBeenCalledOnce();
+
+    const session = mockAgentSession();
+    runnerOptions.onSessionCreated(session);
+    deferred.resolve(mockRunResult({ session, aborted: true }));
+    await record.execution.promise;
+    expect(record.lifecycle.status).toBe("stopped");
   });
 
   it("forwards record callbacks and aborts an active controller on dispose", async () => {

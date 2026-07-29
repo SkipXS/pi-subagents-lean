@@ -178,6 +178,92 @@ describe("validateWorktreePath", () => {
     expect(success.resolvedPath).toBe(toForwardSlashPath(absolutePath));
   });
 
+  it("resolves relative git-common-dir outputs against each command CWD", async () => {
+    const parentCwd = join(tmpDir, "project", "parent");
+    const worktreePath = join(tmpDir, "project", "nested", "feature");
+    mkdirSync(parentCwd, { recursive: true });
+    mkdirSync(worktreePath, { recursive: true });
+
+    const gitResults = new Map<string, string | null>([
+      [parentCwd, "../shared.git"],
+      [worktreePath, "../../shared.git"],
+    ]);
+
+    const result = await validateWorktreePath(makePi(gitResults), worktreePath, parentCwd);
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts equivalent Windows git-common-dir paths with different case and separators", async () => {
+    const parentCwd = join(tmpDir, "parent");
+    const worktreePath = join(tmpDir, "feature");
+    mkdirSync(parentCwd, { recursive: true });
+    mkdirSync(worktreePath, { recursive: true });
+
+    const gitResults = new Map<string, string | null>([
+      [parentCwd, "C:\\Repos\\Shared\\.git"],
+      [worktreePath, "c:/repos/shared/.GIT"],
+    ]);
+
+    const result = await validateWorktreePath(makePi(gitResults), worktreePath, parentCwd);
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts equivalent Windows UNC git-common-dir paths with different case and separators", async () => {
+    const parentCwd = join(tmpDir, "parent");
+    const worktreePath = join(tmpDir, "feature");
+    mkdirSync(parentCwd, { recursive: true });
+    mkdirSync(worktreePath, { recursive: true });
+
+    // Git for Windows can emit a UNC path with either leading backslashes or slashes.
+    const targetCommonDir = process.platform === "win32"
+      ? "//server/share/repos/.GIT"
+      : "\\\\server\\share/repos/.GIT";
+    const gitResults = new Map<string, string | null>([
+      [parentCwd, "\\\\Server\\Share\\Repos\\.git"],
+      [worktreePath, targetCommonDir],
+    ]);
+
+    const result = await validateWorktreePath(makePi(gitResults), worktreePath, parentCwd);
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects POSIX git-common-dir paths that differ only by case", async () => {
+    const parentCwd = join(tmpDir, "parent");
+    const worktreePath = join(tmpDir, "feature");
+    mkdirSync(parentCwd, { recursive: true });
+    mkdirSync(worktreePath, { recursive: true });
+
+    const gitResults = new Map<string, string | null>([
+      [parentCwd, "/repos/Shared/.git"],
+      [worktreePath, "/repos/shared/.git"],
+    ]);
+
+    const result = await validateWorktreePath(makePi(gitResults), worktreePath, parentCwd);
+
+    expect(result.ok).toBe(false);
+    expect((result as WorktreeValidationFailure).error).toBe(WORKTREE_VALIDATION_ERRORS.DIFFERENT_REPO);
+  });
+
+  it.skipIf(process.platform === "win32")("keeps POSIX double-slash common-dir paths case-sensitive", async () => {
+    const parentCwd = join(tmpDir, "parent");
+    const worktreePath = join(tmpDir, "feature");
+    mkdirSync(parentCwd, { recursive: true });
+    mkdirSync(worktreePath, { recursive: true });
+
+    const gitResults = new Map<string, string | null>([
+      [parentCwd, "//Server/Share/.git"],
+      [worktreePath, "//server/share/.git"],
+    ]);
+
+    const result = await validateWorktreePath(makePi(gitResults), worktreePath, parentCwd);
+
+    expect(result.ok).toBe(false);
+    expect((result as WorktreeValidationFailure).error).toBe(WORKTREE_VALIDATION_ERRORS.DIFFERENT_REPO);
+  });
+
   it("resolves ./wt/feature style relative path", async () => {
     const parentCwd = join(tmpDir, "parent");
     const worktreePath = "./wt/feature";

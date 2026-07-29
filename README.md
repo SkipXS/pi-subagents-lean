@@ -39,7 +39,7 @@ It is intentionally **minimal fluff**, not zero context: by default, parent turn
 - **Live widget** — persistent status bar with running/completed agents, full and compact modes
 - **Conversation viewer** — fullscreen transcript with live streaming, markdown rendering, and keyboard navigation
 - **Worktrees** — run agents in a git worktree via `worktree_path`
-- **Output logs** — `tail -f` friendly, ISO-timestamped with configurable thinking buffer (OFF, 80, 200, 500, 1000 chars). Flush rounds to sentence boundaries.
+- **Output logs** — stored under the system temporary directory, ISO-timestamped with configurable thinking buffer (OFF, 80, 200, 500, 1000 chars). Flush rounds to sentence boundaries.
 - **Constrained control tools** — `StopAgent` and `AgentStatus` prefer provider-side strict JSON-schema validation, with graceful fallback on unsupported providers
 
 ## Install
@@ -61,7 +61,7 @@ Agents appear in the live widget:
 ```
 ◈ Agents
   ⠙ 09:42 Implementer  Write model precedence unit tests  6⚙︎  3⟳ · ↑6.8k ↓1.3k 6.0%/128k (auto) · 12s
-  │ tail -f /tmp/pi-agent-outputs/bb3382a9-1f7e-474.log
+  │ output log: <temporary-directory>/pi-agent-outputs/bb3382a9-1f7e-474.log
   └ The file already exists but is ~175 lines. The user wants a …
   ◇ 09:41 Reviewer     Review agent-runner.ts
   ✓ 09:40 Scout        Explore codebase architecture  13⚙︎  4⟳ · ↑16k ↓2.9k 15.0%/128k (auto) · 12s
@@ -74,7 +74,7 @@ Background agents deliver a result notification when done:
 
  ✓ Scout (model-name) · 13⚙︎  5⟳ · ↑25.9k ↓4.9k 15.0%/128k · 21s
    Explore codebase architecture
-   tail -f /tmp/pi-agent-outputs/4f6b0f08-7a9a-419.log
+   output log: <temporary-directory>/pi-agent-outputs/4f6b0f08-7a9a-419.log
 ```
 
 Foreground results land inline:
@@ -90,7 +90,7 @@ Stop a running agent from `/agents`:
 ```
 ○ Agents
   ■ 09:42 Reviewer  Code review of agent-runner.ts  12⚙︎  10⟳ · ↑32.8k ↓6.2k 8% · 52s stopped
-    tail -f /tmp/pi-agent-outputs/23689696-3cd3-400.log
+    output log: <temporary-directory>/pi-agent-outputs/23689696-3cd3-400.log
 ```
 
 ## Tools
@@ -273,12 +273,12 @@ Management menu with four sections:
 
 ### Live widget
 
-Persistent bar above the editor showing running, queued, and completed agents in one newest-first list, updating live. `widgetShowModelThinking` controls one shared model-and-thinking column; when OFF, both values and their column are removed to free space. When `widgetShowStartTime` is ON (the default), every row shows its local creation/start time (`HH:MM`) directly after its status symbol; for queued agents this is the time it entered the queue. Running agents show a spinner, current tool activity, turn count, Pi-compatible token/cache/cost usage, context window utilization, and elapsed time. Completed agents retain their final context and subscription snapshot. Under overflow, running and queued rows take precedence over completed rows, then the visible rows are put back into newest-first order. Full rows show a `tail -f` command path for following the output log.
+Persistent bar above the editor showing running, queued, and completed agents in one newest-first list, updating live. `widgetShowModelThinking` controls one shared model-and-thinking column; when OFF, both values and their column are removed to free space. When `widgetShowStartTime` is ON (the default), every row shows its local creation/start time (`HH:MM`) directly after its status symbol; for queued agents this is the time it entered the queue. Running agents show a spinner, current tool activity, turn count, Pi-compatible token/cache/cost usage, context window utilization, and elapsed time. Completed agents retain their final context and subscription snapshot. Under overflow, running and queued rows take precedence over completed rows, then the visible rows are put back into newest-first order. Full rows show the output-log location. On systems with `tail`, that path can be followed with `tail -f`; use an equivalent log-following command elsewhere.
 
-**Full mode** (header + `tail -f` path + activity):
+**Full mode** (header + output-log location + activity):
 ```
   ⠙ 09:42 Scout  description  3⚙︎  5≤30⟳ · ↑10k ↓1.8k R85k W3.0k CH89.2% $0.024 45.0%/128k (auto) · 1h 2m 3s
-  │ tail -f /tmp/pi-agent-outputs/...
+  │ output log: <temporary-directory>/pi-agent-outputs/...
   └ thinking…
 ```
 
@@ -411,7 +411,7 @@ Result cards always include elapsed time; among these visibility settings, only 
 
 ## Output Logs
 
-`/tmp/pi-agent-outputs/<agentId>.log` — append-only, human-readable, and `tail -f` friendly. Log entries are ISO-8601 timestamped; embedded newlines in a prompt can continue on an unprefixed line:
+`<system temporary directory>/pi-agent-outputs/<agentId>.log` — append-only and human-readable. On systems with `tail`, it can be followed with `tail -f`; use an equivalent command elsewhere. Log entries are ISO-8601 timestamped; embedded newlines in a prompt can continue on an unprefixed line:
 
 ```
 2026-05-27T12:00:00.000Z [USER] Find all authentication files
