@@ -145,10 +145,10 @@ async function showOrchestrationMenu(ctx: ExtensionCommandContext): Promise<void
   );
 }
 
-async function showAgentMenu(
+function showAgentDetails(
   ctx: ExtensionCommandContext,
   name: string,
-): Promise<void> {
+): void {
   const cfg = getAgentConfig(name);
   const displayName = sanitizeDisplayText(name) || "(unnamed agent)";
   if (!cfg) {
@@ -156,19 +156,13 @@ async function showAgentMenu(
     return;
   }
 
-  const choice = await selectItem(ctx, displayName, [
-    { value: "view-configuration", label: "View configuration", description: "Effective model, thinking, tools, skills, extensions, and source." },
-    { value: "view-instructions", label: "View agent instructions", description: "Configured agent instructions only; not the full runtime prompt." },
-  ]);
-
-  if (choice === "view-configuration") {
-    ctx.ui.notify(formatAgentConfiguration(ctx, name, cfg), "info");
-  } else if (choice === "view-instructions") {
-    ctx.ui.notify(`Agent instructions: ${displayName}\n\n${cfg.systemPrompt || "(No agent instructions configured.)"}`, "info");
-  }
+  ctx.ui.notify(
+    `${formatAgentConfiguration(ctx, name, cfg)}\n\nAgent instructions: ${displayName}\n\n${cfg.systemPrompt || "(No agent instructions configured.)"}`,
+    "info",
+  );
 }
 
-/** Show an interactive catalog, returning to it after each sequential submenu. */
+/** Show an interactive catalog, returning to it after each selection. */
 export async function showAgentCatalog(ctx: ExtensionCommandContext): Promise<void> {
   while (true) {
     const types = getAllTypes();
@@ -196,7 +190,7 @@ export async function showAgentCatalog(ctx: ExtensionCommandContext): Promise<vo
     if (choice === "__orchestration__") {
       await showOrchestrationMenu(ctx);
     } else if (choice.startsWith("agent:")) {
-      await showAgentMenu(ctx, choice.slice("agent:".length));
+      showAgentDetails(ctx, choice.slice("agent:".length));
     }
   }
 }

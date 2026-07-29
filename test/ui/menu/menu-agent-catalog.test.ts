@@ -98,7 +98,7 @@ describe("showAgentCatalog", () => {
     expect(ctx.ui.notify.mock.calls[0][0]).toContain("`Explore` — Search");
   });
 
-  it("shows effective configuration details from the agent submenu", async () => {
+  it("shows effective configuration and instructions directly from the catalog", async () => {
     mockModules.mockConfig.agent.Explore = "anthropic/claude-sonnet-4-20250514";
     mockModules.mockConfig.thinkingOverrides.Explore = "medium";
     (getAllTypes as any).mockReturnValue(["Explore"]);
@@ -115,13 +115,11 @@ describe("showAgentCatalog", () => {
       systemPrompt: "Follow exploration instructions.",
     });
     const ctx = createMockCtx();
-    const components = selectCatalogItems(ctx, ["agent:Explore", "view-configuration", undefined]);
+    const components = selectCatalogItems(ctx, ["agent:Explore", undefined]);
 
     await showAgentCatalog(ctx);
 
-    expect(components[1].settingsList.items.map((item: any) => item.value)).toEqual([
-      "view-configuration", "view-instructions",
-    ]);
+    expect(components).toHaveLength(2);
     const message = ctx.ui.notify.mock.calls[0][0];
     expect(message).toContain("Agent configuration: Explore [HIDDEN]");
     expect(message).toContain("Search the codebase");
@@ -132,13 +130,14 @@ describe("showAgentCatalog", () => {
     expect(message).toContain("Preloaded skills: testing");
     expect(message).toContain("Extensions: tavily");
     expect(message).toContain("Source: .pi/agents/explore.md");
+    expect(message).toContain("Agent instructions: Explore\n\nFollow exploration instructions.");
   });
 
   it("preserves inherited model/thinking and implicit resource defaults", async () => {
     (getAllTypes as any).mockReturnValue(["Explore"]);
     (getAgentConfig as any).mockReturnValue({ description: "Search", systemPrompt: "Instructions" });
     const ctx = createMockCtx();
-    selectCatalogItems(ctx, ["agent:Explore", "view-configuration", undefined]);
+    selectCatalogItems(ctx, ["agent:Explore", undefined]);
 
     await showAgentCatalog(ctx);
 
@@ -158,13 +157,14 @@ describe("showAgentCatalog", () => {
       systemPrompt: "Only perform bounded implementation work.",
     });
     const ctx = createMockCtx();
-    selectCatalogItems(ctx, ["agent:Worker", "view-instructions", undefined]);
+    selectCatalogItems(ctx, ["agent:Worker", undefined]);
 
     await showAgentCatalog(ctx);
 
-    expect(ctx.ui.notify).toHaveBeenCalledWith(
+    const message = ctx.ui.notify.mock.calls[0][0];
+    expect(message).toContain("Agent configuration: Worker");
+    expect(message).toContain(
       "Agent instructions: Worker\n\nOnly perform bounded implementation work.",
-      "info",
     );
   });
 
@@ -181,7 +181,7 @@ describe("showAgentCatalog", () => {
     const ctx = createMockCtx();
     ctx.model = { provider: "test", id: "parent-model", reasoning: true };
     ctx.modelRegistry.find = vi.fn(() => undefined);
-    selectCatalogItems(ctx, ["agent:Worker", "view-configuration", undefined]);
+    selectCatalogItems(ctx, ["agent:Worker", undefined]);
 
     await showAgentCatalog(ctx);
 
@@ -204,7 +204,7 @@ describe("showAgentCatalog", () => {
       systemPrompt: "Instructions",
     });
     const ctx = createMockCtx();
-    selectCatalogItems(ctx, ["agent:Restricted", "view-configuration", undefined]);
+    selectCatalogItems(ctx, ["agent:Restricted", undefined]);
 
     await showAgentCatalog(ctx);
 
