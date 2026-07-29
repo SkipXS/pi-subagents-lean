@@ -3,7 +3,7 @@
  *
  * Displays a scrollable, live-updating view of an agent's conversation.
  * Subscribes to session events for real-time streaming updates.
- * Adapted for pi-subagents-lite type shapes.
+ * Adapted for pi-subagents-lean type shapes.
  */
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";

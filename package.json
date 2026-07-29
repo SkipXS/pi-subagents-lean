@@ -1,6 +1,6 @@
 {
-  "name": "pi-subagents-lite",
-  "version": "1.5.1",
+  "name": "pi-subagents-lean",
+  "version": "0.1.0",
   "description": "Lightweight sub-agents for pi — spawn specialized agents with isolated sessions, tools, and models.",
   "keywords": [
     "pi-package",
@@ -12,7 +12,10 @@
     "ai",
     "agents"
   ],
-  "author": "AlexParamonov",
+  "author": "SkipXS",
+  "contributors": [
+    "Alexander Paramonov"
+  ],
   "license": "MIT",
   "packageManager": "bun@1",
   "engines": {
@@ -21,11 +24,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AlexParamonov/pi-subagents-lite.git"
+    "url": "git+https://github.com/SkipXS/pi-subagents-lean.git"
   },
-  "homepage": "https://github.com/AlexParamonov/pi-subagents-lite#readme",
+  "homepage": "https://github.com/SkipXS/pi-subagents-lean#readme",
   "bugs": {
-    "url": "https://github.com/AlexParamonov/pi-subagents-lite/issues"
+    "url": "https://github.com/SkipXS/pi-subagents-lean/issues"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "^0.82.0",

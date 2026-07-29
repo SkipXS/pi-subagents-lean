@@ -418,7 +418,7 @@ describe("executeAgentTool — worktree_path validation", () => {
     expect(result.isError).toBe(true);
     expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
     expect(ctx.ui.notify).toHaveBeenCalledWith(
-      "[pi-subagents-lite] git rev-parse --git-common-dir failed in /etc: EACCES permission denied",
+      "[pi-subagents-lean] git rev-parse --git-common-dir failed in /etc: EACCES permission denied",
       "warning",
     );
   });

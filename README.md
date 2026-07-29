@@ -1,11 +1,13 @@
-# pi-subagents-lite
+# pi-subagents-lean
 
-[![npm version](https://img.shields.io/npm/v/pi-subagents-lite)](https://www.npmjs.com/package/pi-subagents-lite)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Sub-agents for [pi](https://pi.dev) — schema-first, zero-fluff.**
 
 Spawn specialized agents with isolated sessions, custom tools, and per-type models at minimal token cost.
+
+> [!NOTE]
+> This repository is the actively developed [`SkipXS/pi-subagents-lean`](https://github.com/SkipXS/pi-subagents-lean) fork and renamed successor of [`AlexParamonov/pi-subagents-lite`](https://github.com/AlexParamonov/pi-subagents-lite), which originated as a focused fork of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents). It deliberately keeps a smaller scope: immediate foreground/background execution, without scheduling or join modes. Subagents cannot spawn further subagents.
 
 ## Schema-First Design
 
@@ -36,14 +38,16 @@ Names like `Agent`, `StopAgent`, `AgentStatus`, `run_in_background`, `worktree_p
 - **Conversation viewer** — fullscreen transcript with live streaming, markdown rendering, and keyboard navigation
 - **Worktrees** — run agents in a git worktree via `worktree_path`
 - **Output logs** — `tail -f` friendly, ISO-timestamped with configurable thinking buffer (OFF, 80, 200, 500, 1000 chars). Flush rounds to sentence boundaries.
-- **Constrained tool sampling** — provider-side strict JSON schema validation reduces malformed tool calls and retry loops (graceful fallback on unsupported providers)
+- **Constrained control tools** — `StopAgent` and `AgentStatus` prefer provider-side strict JSON-schema validation, with graceful fallback on unsupported providers
 
 ## Install
 
+Install this fork directly from GitHub:
+
 ```bash
-pi install npm:pi-subagents-lite
-pi install -l npm:pi-subagents-lite   # project-local
-pi -e npm:pi-subagents-lite           # try without installing
+pi install git:github.com/SkipXS/pi-subagents-lean
+pi install -l git:github.com/SkipXS/pi-subagents-lean   # project-local
+pi -e git:github.com/SkipXS/pi-subagents-lean           # try without installing
 ```
 
 ## Quick Start
@@ -54,11 +58,11 @@ Agents appear in the live widget:
 
 ```
 ◈ Agents
-  ⠙ 09:42 Agent    Write model precedence unit tests  6⚙︎  3⟳ · ↑6.8k ↓1.3k 6.0%/128k (auto) · 12s
+  ⠙ 09:42 Implementer  Write model precedence unit tests  6⚙︎  3⟳ · ↑6.8k ↓1.3k 6.0%/128k (auto) · 12s
   │ tail -f /tmp/pi-agent-outputs/bb3382a9-1f7e-474.log
   └ The file already exists but is ~175 lines. The user wants a …
-  ◇ 09:41 Agent    Review agent-runner.ts
-  ✓ 09:40 Explorer  Explore codebase architecture  13⚙︎  4⟳ · ↑16k ↓2.9k 15.0%/128k (auto) · 12s
+  ◇ 09:41 Reviewer     Review agent-runner.ts
+  ✓ 09:40 Scout        Explore codebase architecture  13⚙︎  4⟳ · ↑16k ↓2.9k 15.0%/128k (auto) · 12s
 ```
 
 Background agents deliver a result notification when done:
@@ -66,7 +70,7 @@ Background agents deliver a result notification when done:
 ```
  Subagent Result
 
- ✓ Explorer (model-name) · 13⚙︎  5⟳ · ↑25.9k ↓4.9k 15% · 21s
+ ✓ Scout (model-name) · 13⚙︎  5⟳ · ↑25.9k ↓4.9k 15% · 21s
    Explore codebase architecture
    tail -f /tmp/pi-agent-outputs/4f6b0f08-7a9a-419.log
 ```
@@ -74,7 +78,7 @@ Background agents deliver a result notification when done:
 Foreground results land inline:
 
 ```
- ▸ Explorer
+ ▸ Scout
  ✓ 31⚙︎  6⟳ · ↑48.1k ↓9.2k 28% · 39s
    Explore project directory structure
 ```
@@ -83,7 +87,7 @@ Stop a running agent from `/agents`:
 
 ```
 ○ Agents
-  ■ 09:42 Agent  Code review of agent-runner.ts  12⚙︎  10⟳ · ↑32.8k ↓6.2k 8% · 52s stopped
+  ■ 09:42 Reviewer  Code review of agent-runner.ts  12⚙︎  10⟳ · ↑32.8k ↓6.2k 8% · 52s stopped
     tail -f /tmp/pi-agent-outputs/23689696-3cd3-400.log
 ```
 
@@ -97,9 +101,9 @@ Spawn a sub-agent.
 |---|---|---|
 | `prompt` | ✅ | The task for the sub-agent |
 | `description` | | Brief description for the caller (optional — derived from `prompt` if omitted) |
-| `agent` | ✅ | Explicit type name — one of bundled `architect`, `scout`, `implementer`, `reviewer`, `verifier`, or a custom type. The parent orchestration catalog lists visible types when enabled. `hidden: true` removes a type from automatic catalog/menu listing (still callable by name). |
+| `agent` | ✅ | Explicit type name — one of bundled `architect`, `scout`, `implementer`, `reviewer`, `verifier`, or a custom type. The parent orchestration catalog lists visible types when enabled. `hidden: true` suppresses automatic advertisement and spawn selection but remains callable by name. |
 | `run_in_background` | | Fire-and-forget; result delivered automatically when done |
-| `worktree_path` | | Absolute path to a git worktree. In a trusted project, an explicitly selected worktree can supply its `.pi/agents/` for that spawn and shows a worktree label in the UI. It is never crawled automatically. Validated against the parent repo's git common dir. |
+| `worktree_path` | | Absolute path, or a path relative to the parent cwd, inside a working tree of the parent repository. The path is validated through Git's common directory and shown as a UI label. In a trusted project, the selected working tree can also supply a spawn-local `.pi/agents/` overlay; untrusted projects never load that overlay. Other working trees are not crawled automatically. |
 
 The fixed bare schema requires `agent`. Model, thinking, turn, and token settings are intentionally not exposed to the orchestrator; configure them through `/agents`, Agent Markdown, or persistent settings. See [Custom Agent Types](#custom-agent-types).
 
@@ -115,7 +119,7 @@ IDs come from the `Agent` result, the `StopAgent` error (lists all running IDs),
 
 ### `AgentStatus`
 
-List all agents with type, short ID, and status. Output: `type·short_id·status, ...` (e.g. `implementer·a1b2c3·running, scout·d4e5f6·completed`).
+List all agents with short ID, type, and status. Output: `short_id (type) status, ...` (e.g. `a1b2c3d4 (implementer) running, d4e5f6a7 (scout) completed`).
 
 The result nudges the LLM to wait for automatic notifications instead of polling — preventing wasteful repeated calls while still letting it discover agents when needed.
 
@@ -123,7 +127,19 @@ The result nudges the LLM to wait for automatic notifications instead of polling
 
 Drop a `.md` file into `.pi/agents/` (project), `.agents/agents/` (shared workspace), or `~/.pi/agent/agents/` (global). Frontmatter configures the agent; the body is its system prompt. The `name` field, or the filename without `.md`, becomes the agent type. Project files are read only after project trust.
 
-Bundled defaults `architect`, `scout`, `implementer`, `reviewer`, and `verifier` ship as inspectable Markdown definitions and are enabled by default. The parent refreshes global and trusted current-project files before every turn, so added, changed, hidden, and removed files are reflected without restart. A trusted worktree's `.pi/agents/` is resolved as an invocation-local overlay and never mutates the parent registry. Give visible agents concise descriptions; those descriptions are parent prompt text. The automatic parent catalog advertises only exact agent names of at most 64 UTF-8 bytes without control characters, backticks, or orchestration markers; omitted names remain callable by their exact name. **Precedence:** worktree overlay (for that invocation) > project (`.pi/agents/`) > shared (`.agents/agents/`) > user (`~/.pi/agent/agents/`) > bundled defaults. `disableDefaultAgents` applies on the next parent turn and to on-demand discovery. On name clash, higher precedence wins.
+Bundled defaults ship as inspectable Markdown definitions and are enabled by default:
+
+| Type | Purpose | Default policy |
+|---|---|---|
+| `architect` | Cross-component design and technical trade-offs | Read-only tools; no extensions or skills |
+| `scout` | Repository discovery, tracing, and failure investigation | Read-only tools; no extensions or skills |
+| `implementer` | Bounded code, test, configuration, or documentation changes | Read/write tools; no extensions or skills |
+| `reviewer` | Independent correctness, regression, and security review | Read-only tools; no extensions or skills |
+| `verifier` | Reproduction, checks, tests, and failure analysis | Read-only tools; no extensions or skills |
+
+Here, “read-only tools” means `read`, `grep`, and `bash`; shell commands still depend on the agent instructions and project policy.
+
+The parent refreshes global and trusted current-project files before every turn, so added, changed, hidden, and removed files are reflected without restart. A trusted worktree's `.pi/agents/` is resolved as an invocation-local overlay and never mutates the parent registry. Give visible agents concise descriptions; those descriptions are parent prompt text. The automatic parent catalog advertises only exact agent names of at most 64 UTF-8 bytes without control characters, backticks, or orchestration markers; omitted names remain callable by their exact name. **Precedence:** worktree overlay (for that invocation) > project (`.pi/agents/`) > shared (`.agents/agents/`) > user (`~/.pi/agent/agents/`) > bundled defaults. `disableDefaultAgents` applies on the next parent turn and to on-demand discovery. On name clash, higher precedence wins.
 
 ```markdown
 ---
@@ -148,10 +164,10 @@ A minimal agent — just `name` and `description` — gets all tools, extensions
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `name` | string | filename | Agent type name (the `agent` tool parameter). Must be unique. |
+| `name` | string | filename | Agent type name (the `agent` tool parameter). Same-name definitions merge according to discovery precedence. |
 | `display_name` | string | `name` | Label in the widget, `/agents` menu, and conversation viewer. |
 | `description` | string | `""` | One-sentence description in the `/agents` list and tool rendering. |
-| `tools` | `true` \| `string[]` \| `false` | `true` | **Tool whitelist** — which tool schemas the LLM sees. Accepts built-in names and extension tool references (see below). Mutually exclusive with `exclude_tools`. |
+| `tools` | `string[]` | all | **Tool whitelist** — which tool schemas the LLM sees. Accepts built-in names and extension tool references (see below). Mutually exclusive with `exclude_tools`. Omit it to expose all available tools. |
 | `exclude_tools` | `string[]` | none | **Tool blacklist** — all tools except these are visible. Supports `ext/*` syntax. Mutually exclusive with `tools` (when `tools` is `string[]`). |
 | `extensions` | `true` \| `string[]` \| `false` | `true` | **Extension loader** — which extensions load (hooks + commands fire). Does NOT control tool visibility. Mutually exclusive with `exclude_extensions`. |
 | `exclude_extensions` | `string[]` | none | **Extension blacklist** — all extensions except these load. Mutually exclusive with `extensions` (when `extensions` is `string[]`). |
@@ -159,20 +175,20 @@ A minimal agent — just `name` and `description` — gets all tools, extensions
 | `preload_skills` | `string[]` \| `false` | `false` | **Full skill injection** — dump complete SKILL.md content into the system prompt instead of metadata-only. |
 | `model` | string | inherit parent | Default model as `"provider/model-id"`. See [Model Resolution](#model-resolution). |
 | `thinking` | string | inherit parent | One of: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
-| `max_turns` | number | unlimited | Soft turn limit. Agent gets a steer at the limit, then `max_turns + graceTurns` before hard abort. |
+| `max_turns` | number | unlimited | Soft turn limit. The agent receives a wrap-up steer at the limit and is hard-aborted after the configured grace turns (`graceTurns: 0` aborts on the next turn). |
 | `max_tokens` | number | unlimited | Max output tokens per LLM response. Injected into provider request payloads. |
-| `hidden` | `true` \| `false` | `false` | `true` removes the type from the automatic catalog and menus; it remains explicitly callable by name. |
+| `hidden` | `true` \| `false` | `false` | `true` removes the type from the parent orchestration catalog and spawn picker. It remains inspectable in catalog/settings views and callable by exact name. |
 
 ### Tool control (`tools` / `exclude_tools`)
 
 Use a whitelist (`tools`) when an agent needs few tools, or a blacklist (`exclude_tools`) when it needs most. You can use **either**, not both; if both are set, the whitelist wins.
 
-Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`.
+Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`.
 
 | Value | Meaning |
 |---|---|
-| `true` / omitted | All tools visible |
-| `false` | No tools visible |
+| omitted | All available tools visible |
+| `[]` | No tools visible |
 | `[read, bash]` | Only listed built-in tools |
 | `[web_search]` | Extension tool by name |
 | `[tavily/*]` | All tools from an extension |
@@ -196,7 +212,7 @@ exclude_tools: [edit, write]
 - **Skills** are reusable instruction files (`SKILL.md`) that teach an agent how to do a task — e.g. `debug`, `tdd`. By default the agent sees only skill metadata (name, description, path) in its system prompt and reads the full content on-demand via `read`.
 - **Extensions** are pi plugins (e.g. `tavily`, `pi-tokf`) that register tools and hooks. Loading one makes its hooks fire and its tools *available* — but those tools still need to pass the `tools` whitelist to be visible.
 
-`extensions` controls which extensions **load** (hooks + tool registration), not tool visibility. `skills` and `preload_skills` control skill availability. Same whitelist/blacklist rules and `ext/*` syntax as `tools`.
+`extensions` controls which extensions **load** (hooks + tool registration), not tool visibility. `skills` and `preload_skills` control skill availability. Extension lists contain extension/package names; tool lists additionally support bare tool names and `extension/*` or `extension/tool` references.
 
 | `extensions` value | Meaning |
 |---|---|
@@ -219,7 +235,7 @@ Model and thinking use the same precedence (highest first):
 
 1. **Manual spawn override** — model or thinking selected through `/agents` for this spawn
 2. **Session-agent override** — `/agents` → Settings → Agent settings, lasts the session
-3. **Persistent agent override** — `~/.pi/agent/subagents-lite.json`
+3. **Persistent agent override** — `~/.pi/agent/subagents-lean.json`
 4. **Agent Markdown** — frontmatter in the selected agent definition
 5. **Global default** — session global first, then persistent global
 6. **Parent value** — inherit from the calling agent
@@ -232,7 +248,7 @@ Control how the subagent system prompt is built via `systemPromptMode` (default:
 
 - **`replace`** — minimal generic prompt plus the agent's own `<agent_instructions>`. Lowest token cost, most isolated.
 - **`inherit`** — parent's system prompt (scaffolding stripped to avoid duplication) plus `<agent_instructions>`. Best when agents need parent context and guidelines.
-- **`custom`** — content of `~/.pi/agent/subagents-lite-prompt.md` plus `<agent_instructions>`. Full control.
+- **`custom`** — content of `~/.pi/agent/subagents-lean-prompt.md` plus `<agent_instructions>`. Full control.
 
 When `includeContextFiles` is `true` (default), AGENTS.md files from the project root and `~/.pi/agent/` load as `<project_context>` before agent-specific instructions — shared static context improves KV cache prefix hit rates. Toggle off to cut token cost.
 
@@ -249,41 +265,60 @@ Management menu with four sections:
   - **Agent settings** — agent availability plus effective model and thinking with global/per-agent session and saved overrides
   - **Execution** — global concurrency, force background, default max turns, and grace turns
   - **Widget** — all appearance, sizing, behavior, and individual usage-stat controls in one menu
-  - **System prompt, context, skills & extensions** — prompt construction and implicit resource loading
+  - **System prompt, context, skills & extensions** — prompt construction, custom prompt-file creation, parent orchestration, context, and implicit resource loading
 
 ## Interface
 
 ### Live widget
 
-Persistent bar above the editor showing running, queued, and completed agents in one newest-first list, updating live. `widgetShowModelThinking` controls one shared model-and-thinking column; when OFF, both values and their column are removed to free space. When `widgetShowStartTime` is ON (the default), every row shows its local creation/start time (`HH:MM`) directly after its status symbol; for queued agents this is the time it entered the queue. Running agents show a spinner, current tool activity, turn count, Pi-compatible token/cache/cost usage, context window utilization, and elapsed time. Completed agents retain their final context and subscription snapshot. Under overflow, running and queued rows take precedence over completed rows, then the visible rows are put back into newest-first order. Click the `tail -f` path to follow output logs.
+Persistent bar above the editor showing running, queued, and completed agents in one newest-first list, updating live. `widgetShowModelThinking` controls one shared model-and-thinking column; when OFF, both values and their column are removed to free space. When `widgetShowStartTime` is ON (the default), every row shows its local creation/start time (`HH:MM`) directly after its status symbol; for queued agents this is the time it entered the queue. Running agents show a spinner, current tool activity, turn count, Pi-compatible token/cache/cost usage, context window utilization, and elapsed time. Completed agents retain their final context and subscription snapshot. Under overflow, running and queued rows take precedence over completed rows, then the visible rows are put back into newest-first order. Full rows show a `tail -f` command path for following the output log.
 
 **Full mode** (header + `tail -f` path + activity):
 ```
-  ⠙ 09:42 Explorer  description  3⚙︎  5≤30⟳ · ↑10k ↓1.8k R85k W3.0k CH89.2% $0.024 45.0%/128k (auto) · 1h 2m 3s
+  ⠙ 09:42 Scout  description  3⚙︎  5≤30⟳ · ↑10k ↓1.8k R85k W3.0k CH89.2% $0.024 45.0%/128k (auto) · 1h 2m 3s
   │ tail -f /tmp/pi-agent-outputs/...
   └ thinking…
 ```
 
 **Compact mode** (single line, description truncated, activity inline):
 ```
-  ⠙ 09:42 Explorer  description trunc…  3⚙︎  5≤30⟳ · ↑10k ↓1.8k R85k W3.0k CH89.2% $0.024 45.0%/128k (auto) · 1h 2m 3s  thinking…
+  ⠙ 09:42 Scout  description trunc…  3⚙︎  5≤30⟳ · ↑10k ↓1.8k R85k W3.0k CH89.2% $0.024 45.0%/128k (auto) · 1h 2m 3s  thinking…
 ```
 
 Turn format uses `≤` and `⟳` (`5≤30⟳` = 5 of 30 turns). Turn count is colored by usage: normal < 80%, warning 80–99%, error at 100%. The max is hidden when well below the limit. The contiguous usage group follows Pi: `↑input ↓output Rcache-read Wcache-write CHhit-rate $cost context/window (auto)`. Input visibility also controls cache fields; output, context, and cost remain independently configurable.
 
 Compact mode is active when **Force compact** is ON, or **ctrl+o shortcut** is ON and the user has collapsed tool expansion. Force compact always wins.
 
-### Conversation viewer
+### Keyboard navigation and conversation viewer
 
-Fullscreen transcript viewer for agent sessions — opens automatically from `/agents`. Streams thinking and response text live as deltas arrive. Tool calls display matching pi's style with collapsible output.
+With an empty editor, press `↓` to enter widget navigation. Use `↑`/`↓` to select an agent, `Enter` to open its conversation, and `Esc` to leave navigation. Any other key returns focus to the editor.
 
-**Navigation:** `↑↓` / `PgUp/PgDn` scroll · `g`/`G` top/bottom · `Home`/`End` jump · `f` fullscreen · `r` refresh · `q`/`Esc` close.
+The conversation viewer streams thinking and response text live as deltas arrive and renders tool calls in pi's style. For tool results over 500 characters, it shows at most the first five newline-delimited source lines plus an overflow note. Its scroll keys follow the configured `tui.select.*` keybindings; `k`/`j` and `Shift+↑`/`Shift+↓` remain available as aliases.
+
+**Viewer controls:** `↑`/`↓` or `k`/`j` scroll · `PgUp`/`PgDn` or `Shift+↑`/`Shift+↓` page · `g`/`G` or `Home`/`End` jump · `Enter` compose steering while running · `s` twice stop/abort · `q`/`Esc` close.
 
 **Stats line:** `15⟳ · ↑12k ↓8.0k R85k W3.0k CH89.2% $0.024 47.0%/128k (auto) · 47s`. Tools and turns form one counter group with two spaces between them; Pi footer metrics remain contiguous, with ` · ` separating the counter, Pi, and duration groups. The configured stats-visibility toggles also apply here, including **Cost display**. The same Pi-compatible usage group is used by foreground and background result cards.
 
 ## Configuration
 
-`~/.pi/agent/subagents-lite.json` — managed via `/agents`, or edit directly. Per-agent model overrides are dynamic keys in `agent`; per-agent thinking overrides live in `thinkingOverrides`.
+`~/.pi/agent/subagents-lean.json` — managed via `/agents`, or edit directly. Per-agent model overrides are dynamic keys in `agent`; per-agent thinking overrides live in `thinkingOverrides`.
+
+### Execution and prompt settings
+
+| Field | Default | Description |
+|---|---:|---|
+| `default` | `null` | Global fallback model as `provider/model-id`; `null` inherits the parent. |
+| `defaultThinking` | parent | Global fallback thinking level. |
+| `defaultMaxTurns` | unlimited | Soft turn limit used when an agent definition does not set `max_turns`. |
+| `forceBackground` | `false` | Run every spawn in the background. |
+| `graceTurns` | `6` | Additional turns after the soft limit before hard abort. |
+| `disableDefaultAgents` | `false` | Exclude bundled types on the next parent turn and during discovery. |
+| `systemPromptMode` | `replace` | `replace`, `inherit`, or `custom`; custom content comes from `~/.pi/agent/subagents-lean-prompt.md`. |
+| `includeContextFiles` | `true` | Include applicable project and user `AGENTS.md` files in subagent context. |
+| `orchestrationPrompt` | `true` | Add bounded parent-only delegation guidance and the visible agent catalog. |
+| `loadSkillsImplicitly` | `true` | Load all skills when agent frontmatter omits `skills`. |
+| `loadExtensionsImplicitly` | `true` | Load all extensions when agent frontmatter omits `extensions`. |
+| `concurrency.default` | `4` | Global running-agent limit; excess spawns queue. |
 
 **Migration from 1.5.x:** Agent selection is now explicit. Calls that omitted `agent` or used `general-purpose` must choose one of `architect`, `scout`, `implementer`, `reviewer`, or `verifier`. The former built-in `Explore` model key is migrated to `scout` unless that key is already configured, including an explicit `null` inheritance value.
 
@@ -291,6 +326,8 @@ Fullscreen transcript viewer for agent sessions — opens automatically from `/a
 {
   "agent": {
     "default": "zai/glm-5.2",
+    "defaultThinking": "medium",
+    "defaultMaxTurns": 40,
     "forceBackground": true,
     "graceTurns": 6,
     "showCost": true,
@@ -349,7 +386,7 @@ Fullscreen transcript viewer for agent sessions — opens automatically from `/a
 | `widgetShortcut` | `false` | When ON, ctrl+o (tool expansion toggle) syncs with widget compact mode. When OFF, compact is manual via `widgetCompact`. |
 | `widgetShowModelThinking` | `true` | Show one model-and-thinking column in every agent row. OFF removes the values and frees its space. |
 | `widgetShowStartTime` | `true` | Show each row's local `HH:MM` creation/start time. Queued rows show their queue-entry time. |
-| `outputThinkingBufferSize` | `0` | Thinking buffer ring size in chars. `0` = OFF. Flushes to output log at sentence boundaries. |
+| `outputThinkingBufferSize` | `0` | Live thinking-log buffer threshold in chars. `0` writes thinking at turn end; positive values flush during streaming near sentence boundaries. |
 | `finishedRetentionMinutes` | `10` | Minutes to retain finished agents in the widget. |
 
 The `↓ to navigate` heading hint is always shown while the widget is visible.
@@ -372,7 +409,7 @@ These toggles apply to the live widget and conversation viewer.
 
 ## Output Logs
 
-`/tmp/pi-agent-outputs/<agentId>.log` — append-only, human-readable, `tail -f` friendly. Every line is ISO-8601 timestamped:
+`/tmp/pi-agent-outputs/<agentId>.log` — append-only, human-readable, and `tail -f` friendly. Log entries are ISO-8601 timestamped; embedded newlines in a prompt can continue on an unprefixed line:
 
 ```
 2026-05-27T12:00:00.000Z [USER] Find all authentication files
@@ -385,8 +422,9 @@ These toggles apply to the live widget and conversation viewer.
 ## Requirements
 
 - Node.js >= 18
+- Bun >= 1.0
 - pi >= 0.82.0
 
-## License
+## Origin and license
 
-MIT
+This fork preserves the project's MIT license and Alexander Paramonov's copyright notice. See [LICENSE](LICENSE). The implementation was originally derived from [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents); thanks to both upstream projects and their contributors.

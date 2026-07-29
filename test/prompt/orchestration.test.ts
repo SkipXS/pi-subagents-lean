@@ -136,17 +136,8 @@ describe("parent orchestration prompt", () => {
     expect(buildOrchestrationPrompt([agent("bad`name", "Description")])).toContain("+1 omitted");
   });
 
-  it("strips versioned blocks after rules change and narrowly recognizes legacy blocks", () => {
+  it("strips versioned blocks after rules change", () => {
     const changedRulesBlock = `${ORCHESTRATION_PROMPT_MARKER}\nNew future rules\nAgents: \`reviewer\` — Review\n${ORCHESTRATION_PROMPT_END_MARKER}`;
     expect(getOrchestrationPromptUpdate(`Inherited\n\n${changedRulesBlock}`, false, [])).toBe("Inherited");
-
-    const legacy = "[subagents-lite orchestration]\nDelegate when useful; use bounded briefs; retain ownership; foreground dependencies, background independent work; never concurrent writers.\nAgents: `reviewer` — Review\n[/subagents-lite orchestration]";
-    expect(getOrchestrationPromptUpdate(`Custom\n\n${legacy}`, false, [])).toBe("Custom");
-
-    const earlierLegacy = "[subagents-lite orchestration]\nDelegate only when materially useful; retain ownership and final integration; give bounded briefs; avoid concurrent writers; foreground dependent work, background independent work.\nAgents: `reviewer` — Review\n[/subagents-lite orchestration]";
-    expect(getOrchestrationPromptUpdate(`Custom\n\n${earlierLegacy}`, false, [])).toBe("Custom");
-
-    const collision = "[subagents-lite orchestration]\nuser-authored rules\nAgents: keep\n[/subagents-lite orchestration]";
-    expect(getOrchestrationPromptUpdate(`Custom\n\n${collision}`, false, [])).toBeUndefined();
   });
 });

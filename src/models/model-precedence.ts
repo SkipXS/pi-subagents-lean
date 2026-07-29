@@ -28,7 +28,7 @@ export interface ResolvedSetting<T> {
   source: SettingSource;
 }
 
-/** Shape of the subagents-lite.json config file. */
+/** Shape of the subagents-lean.json config file. */
 export interface SubagentsConfig {
   agent: {
     default: string | null;

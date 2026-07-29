@@ -145,7 +145,7 @@ export async function executeAgentTool(
       const validation = await validateWorktreePath(getPiInstance(), rawWorktreePath, parentCwd, onWarning);
       if (!validation.ok) {
         for (const msg of warnings) {
-          if (ctx.ui?.notify) ctx.ui.notify(`[pi-subagents-lite] ${msg}`, "warning");
+          if (ctx.ui?.notify) ctx.ui.notify(`[pi-subagents-lean] ${msg}`, "warning");
         }
         return errorResult(validation.error);
       }

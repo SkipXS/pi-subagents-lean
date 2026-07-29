@@ -1,87 +1,113 @@
-# pi-subagents-lite
+# pi-subagents-lean
 
-A lightweight pi extension that lets the LLM spawn autonomous child agents for complex tasks. Focused fork of pi-subagents with reduced surface area — no scheduling, no join modes.
+A lightweight pi extension that lets the parent model spawn autonomous subagents for focused tasks. This repository is the renamed `SkipXS/pi-subagents-lean` successor to `AlexParamonov/pi-subagents-lite`, itself derived from `tintinweb/pi-subagents`. Its scope intentionally excludes scheduling, join modes, and nested subagents.
 
 ## Language
 
 ### Core concepts
 
-**Subagent**:
-An autonomous child agent spawned from the parent conversation via the Agent tool.
-_Avoid_: Child agent, worker, task agent
+**Subagent**
 
-**Agent type**:
-A named configuration (bundled default or custom) defining a subagent's tool set, skills, system prompt, and default model.
-_Avoid_: Agent kind, agent class
+An autonomous agent with an isolated session, spawned from the parent conversation through the `Agent` tool or manually through `/agents`.
 
-**Agent briefing**:
-A user message sent via `/agents` that teaches the LLM about available agent types and how to use the Agent tool. The LLM learns from conversation context, not from the tool schema.
-_Avoid_: Agent documentation, tool description
+**Parent**
 
-**Stealth tool**:
-A tool registered with minimal schema (description ".", no promptSnippet, no promptGuidelines). Usage is taught exclusively through the agent briefing.
-_Avoid_: Hidden tool, minimal tool
+The pi session that owns the extension, delegates work, and receives foreground results or background completion notifications.
+
+**Agent type**
+
+A named configuration defining a subagent's instructions, display name, tools, extensions, skills, model, thinking level, and execution limits. Agent types may be bundled or loaded from Agent Markdown.
+
+**Agent Markdown**
+
+A `.md` agent definition with YAML frontmatter and a system-prompt body. Definitions are discovered from bundled defaults, the user directory, trusted shared/project directories, and an explicitly selected trusted working tree.
+
+**Orchestration prompt**
+
+A compact, bounded, parent-only system-prompt block generated from visible agent definitions before each parent turn. It provides delegation guidance and the current agent catalog without changing the fixed tool schema.
+
+**Schema-first tool**
+
+A tool registered with a fixed, minimal schema and no descriptions, prompt snippets, parameter descriptions, or runtime-generated enum. `Agent`, `StopAgent`, and `AgentStatus` follow this design.
 
 ### Configuration
 
-**Model override**:
-A user-configured model or thinking preference (per-agent or global). Per-agent overrides take precedence over Agent Markdown; global values are fallbacks. Set via `/agents` > Agent settings.
-_Avoid_: Model injection, model preference
+**Model override**
 
-**Grace turns**:
-Additional turns allowed after the soft turn limit steer message before hard abort. Default 6; configure the global value via `/agents` > Settings > Execution or override it for a manual spawn under Spawn options.
-_Avoid_: Grace period, extra turns
+A model selection for a single manual spawn, the current session, persisted per-agent settings, or a global fallback. Resolution order is spawn > session agent override > persisted agent override > Agent Markdown > global fallback > parent.
 
-### Worktrees
+**Thinking override**
 
-**Worktree**:
-A linked git worktree of the same repository as the parent, distinguished by its `--git-dir` pointing outside the worktree root. The target of the `worktree_path` Agent tool param.
-_Avoid_: Git worktree, sibling worktree
+A thinking-level selection resolved through the same precedence chain as the model and normalized to the selected model's supported levels.
 
-**Worktree path**:
-The resolved absolute filesystem path passed to the `worktree_path` param. Used as the subagent's working directory for its session, resource loader, and system prompt.
+**Soft turn limit**
 
-**Worktree label**:
-A short human-readable identifier derived from the worktree path. `basename(root)` when targeting the root, else `basename(root)/<relative subpath>`.
-_Avoid_: Worktree name
+The turn count at which a subagent receives a steer instructing it to wrap up and return a final answer.
+
+**Grace turns**
+
+Additional turns allowed after the soft turn limit before the session is hard-aborted. The default is 6.
+
+### Working trees
+
+**Working tree path**
+
+The canonical absolute directory used as a subagent's working directory after resolving the `worktree_path` argument. Relative input is resolved against the parent cwd. The directory must belong to a working tree that shares the parent's Git common directory; it may be the primary checkout, a linked worktree, or a subdirectory of either.
+
+**Working tree overlay**
+
+An invocation-local `.pi/agents/` layer loaded only from an explicitly selected working tree in a trusted project. It has higher precedence than the parent catalog and never mutates the parent registry.
+
+**Working tree label**
+
+A compact UI label derived from the selected working-tree root and optional relative subdirectory.
 
 ### Runtime
 
-**Activity tracker**:
-Per-agent transient display state (active tools, streaming response text) bridging spawn callbacks and the TUI widget renderer. Accumulated stats live on the AgentRecord, not here.
-_Avoid_: Agent monitor, agent stats
+**Foreground subagent**
 
-**Nudge**:
-A completion notification delivered to the parent session after a background agent finishes. Batched with a 200ms hold to coalesce rapid completions.
-_Avoid_: Callback, notification
+A spawn that blocks its `Agent` tool call until the subagent finishes and then returns the result inline.
+
+**Background subagent**
+
+A spawn that acknowledges immediately, occupies or waits for a global concurrency slot, and delivers its result automatically when complete.
+
+**Nudge**
+
+A completion message delivered to the parent after a background subagent reaches a terminal state. Closely timed nudges are batched.
+
+**Agent record**
+
+The parent-owned runtime record containing lifecycle state, display metadata, execution handles, accumulated usage, and the final result or error.
+
+**Activity tracker**
+
+Transient per-agent display state for active tools and streaming response text. Durable usage totals live on the agent record.
+
+**Output log**
+
+An append-only, human-readable transcript under `/tmp/pi-agent-outputs/`, suitable for `tail -f`.
+
+### Interface
+
+**Live widget**
+
+The persistent status area above the editor showing queued, running, and retained completed subagents, including configured usage statistics and activity.
+
+**Widget navigation**
+
+Keyboard navigation entered with `Down` while the editor is empty. `Up`/`Down` selects an agent, `Enter` opens its conversation, and `Esc` returns to the editor.
+
+**Conversation viewer**
+
+The live transcript overlay for a subagent session. It supports scrolling, steering a running subagent, and a two-step stop action.
 
 ## Relationships
 
-- An **Agent type** has an optional **Model override**
-- A **Subagent** is spawned from one **Agent type**
-- A **Subagent** may run in a **Worktree** of the parent's repo
-- An **Agent briefing** describes all available **Agent types** to the LLM
-- A **Stealth tool** requires an **Agent briefing** before the LLM can use it
-- An **Activity tracker** is created per spawn and cleaned up on completion
-- A **Nudge** is emitted when a background agent completes or errors
-- **Grace turns** are added to the max turns limit to determine when a steered agent is hard-aborted
-- A **Worktree path** is the absolute resolved path passed via `worktree_path`
-- A **Worktree label** is derived from a **Worktree path** for compact display
-- The `worktree_path` tool param is taught to the LLM via the **Agent briefing**
-
-### Navigation
-
-**Navigation mode**:
-Keyboard-driven browsing of agents in the widget (`↑↓` move, `Enter` view, `Esc` back).
-State lives on AgentWidget. Key handler in events.ts delegates via public API.
-_Avoid_: Nav menu, agent selector
-
-**Roster**:
-Ordered list of navigable entries during navigation mode: `main` (virtual) + agents
-in widget render order (finished → running → queued, newest-first within each).
-_Avoid_: Agent list, nav list
-
-**ResultViewer overlay**:
-Read-only markdown viewer showing an agent's conversation snapshot via `buildSnapshotMarkdown`.
-Opened on `Enter` in navigation mode. Overlay owns input while open.
-_Avoid_: Agent viewer, conversation viewer
+- The **parent** spawns a **subagent** from one **agent type**.
+- **Agent Markdown** supplies custom or overriding agent-type configuration.
+- The **orchestration prompt** advertises visible agent types only to the parent.
+- A subagent may run at a validated **working tree path** and use its trusted **working tree overlay**.
+- Foreground results return inline; background results arrive through a **nudge**.
+- The **agent record** owns lifecycle and usage data displayed by the **live widget** and **conversation viewer**.
+- The **soft turn limit** triggers wrap-up guidance; **grace turns** bound the remaining execution.

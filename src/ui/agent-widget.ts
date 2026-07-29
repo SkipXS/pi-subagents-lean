@@ -364,14 +364,14 @@ export class AgentWidget {
     try {
       this.update();
     } catch (err) {
-      getSessionCtx()?.ui?.notify(`[subagents] onTurnStart error: ${err}`, "warning");
+      getSessionCtx()?.ui?.notify(`[pi-subagents-lean] onTurnStart error: ${err}`, "warning");
     }
   }
 
   /** Ensure the widget update timer is running. */
   ensureTimer() {
     if (!this.widgetInterval) {
-      this.widgetInterval = setInterval(() => { try { this.update(); } catch (err) { getSessionCtx()?.ui?.notify(`[subagents] Widget timer error: ${err}`, "warning"); } }, WIDGET_REFRESH_INTERVAL);
+      this.widgetInterval = setInterval(() => { try { this.update(); } catch (err) { getSessionCtx()?.ui?.notify(`[pi-subagents-lean] Widget timer error: ${err}`, "warning"); } }, WIDGET_REFRESH_INTERVAL);
     }
   }
 
@@ -954,7 +954,7 @@ export class AgentWidget {
             try {
               return (this.tui && this.theme) ? this.renderWidget(this.tui, this.theme) : [];
             } catch (err) {
-              getSessionCtx()?.ui?.notify(`[subagents] Widget render error: ${err}`, "warning");
+              getSessionCtx()?.ui?.notify(`[pi-subagents-lean] Widget render error: ${err}`, "warning");
               return [];
             }
           },

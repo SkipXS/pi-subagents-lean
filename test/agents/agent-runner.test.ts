@@ -1742,7 +1742,7 @@ describe("runAgent — custom mode", () => {
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
 
     expect(fsReadFileSyncSpy).toHaveBeenCalledWith(
-      expect.stringContaining("subagents-lite-prompt.md"),
+      expect.stringContaining("subagents-lean-prompt.md"),
       "utf-8",
     );
     expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(

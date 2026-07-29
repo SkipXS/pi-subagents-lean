@@ -716,8 +716,8 @@ async function runAgentImpl(
 
   // Flush buffered warnings now that tool_result is in the session tree.
   for (const msg of warnings) {
-    if (ctx.ui?.notify) ctx.ui.notify(`[pi-subagents-lite] ${msg}`, "warning");
-    else console.warn(`[pi-subagents-lite] ${msg}`);
+    if (ctx.ui?.notify) ctx.ui.notify(`[pi-subagents-lean] ${msg}`, "warning");
+    else console.warn(`[pi-subagents-lean] ${msg}`);
   }
 
   return { responseText, session, aborted: getAborted(), turnLimited: getTurnLimited() };

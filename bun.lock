@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pi-subagents-lite",
+      "name": "pi-subagents-lean",
       "dependencies": {
         "@earendil-works/pi-agent-core": "^0.80.10",
         "@sinclair/typebox": "^0.34.49",

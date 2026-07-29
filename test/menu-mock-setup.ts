@@ -112,7 +112,7 @@ vi.mock("../src/prompt/context.js", () => ({
 vi.mock("../src/config/config-io.js", () => ({
   saveConfigAtomic: vi.fn(),
   DEFAULT_GRACE_TURNS: 6,
-  CUSTOM_PROMPT_PATH: "/home/test/.pi/agent/subagents-lite-prompt.md",
+  CUSTOM_PROMPT_PATH: "/home/test/.pi/agent/subagents-lean-prompt.md",
   DEFAULT_CONFIG: {
     agent: { default: null, forceBackground: false },
     concurrency: { default: 4 },

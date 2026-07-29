@@ -1,37 +1,25 @@
-# Worktree path param naming
+# Worktree path parameter naming
 
-The `Agent` tool exposes a `worktree_path` parameter (a path inside a sibling git
-worktree of the parent) rather than a generic `cwd` parameter. The schema name
-encodes the validation constraint: the path must share `git-common-dir` with
-the parent and must not be the main checkout.
+The `Agent` tool exposes `worktree_path` rather than a generic `cwd` parameter. The name communicates that the target must belong to a working tree of the parent's Git repository.
+
+The value may be absolute or relative to the parent cwd. Runtime validation resolves the canonical path and requires the target and parent to share the same `git-common-dir`. The target may be the primary checkout, a linked worktree, or a subdirectory of either.
 
 ## Why
 
-The general "just add `cwd` and validate at runtime" approach lets the LLM
-discover the constraint by hitting the validator and getting an error. In a
-stealth-tool design (ADR 0001), the param name is the only documentation the
-LLM sees at call time. The first rejected call costs a turn, plus the LLM has
-to learn the rule from the error message.
+A generic `cwd` would imply that agents can run in any directory. That is intentionally not supported: keeping execution within the parent's repository provides a clear trust and discovery boundary.
 
-`worktree_path` is more specific than `cwd` but cheaper than discovery-by-error:
-the LLM reads "this is for worktrees" from the name, not from a failed spawn.
+In the schema-first design described by ADR 0001, parameter names carry most of the tool's semantics. `worktree_path` communicates the restriction before the model has to discover it through a validation error.
+
+The same parameter also identifies when an invocation-local agent overlay may apply. In a trusted project, an explicitly selected target can contribute its `.pi/agents/` definitions for that spawn. Other working trees are never crawled automatically, and an untrusted project cannot supply this overlay.
 
 ## Trade-off
 
-The name is single-purpose. If a future feature needs the LLM to target any
-directory (not just a worktree), the param is taken and a second param would
-be needed. We accept this — the worktree framing is the use case we have, and
-a future escape hatch (e.g. `cwd` as a separate, less-restricted param) is
-cheap to add later.
+The name commonly suggests only a secondary linked worktree, while validation also accepts the primary checkout and subdirectories. This is deliberate: the security boundary is repository identity, not whether `git worktree list` labels the checkout as primary or linked.
 
-Eleven extra characters in the schema per turn. Negligible token cost.
+If a future feature needs arbitrary-directory execution, it should use a separate parameter with an explicit trust model rather than weakening `worktree_path` validation.
 
-## Considered Options
+## Considered options
 
-- **`cwd`** — generic name, validator teaches the constraint on failure. Rejected:
-  contradicts the stealth-tool principle that the schema name is the
-  documentation. LLM pays a discovery turn per mistake.
-- **`path_to_worktree`** — same semantic, more verbose. Rejected: no
-  information gain over `worktree_path`; longer to type and to render.
-- **`worktree_cwd`** — noun-stacked hybrid. Rejected: category mismatch;
-  "worktree" is a path concept, "cwd" is a session concept, they don't compose.
+- **`cwd`** — rejected because it implies unrestricted directory selection.
+- **`path_to_worktree`** — rejected because it adds length without additional meaning.
+- **`worktree_cwd`** — rejected because it mixes a repository concept with session-state terminology.

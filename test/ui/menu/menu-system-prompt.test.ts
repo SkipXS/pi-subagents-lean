@@ -120,7 +120,7 @@ describe("showSystemPromptMenu — Create prompt file", () => {
     const ids = settingsListCalls[0].items.map((i: any) => i.id);
     expect(ids).toContain("createPromptFile");
     const cpf = settingsListCalls[0].items.find((i: any) => i.id === "createPromptFile");
-    expect(cpf.currentValue).toContain("subagents-lite-prompt.md");
+    expect(cpf.currentValue).toContain("subagents-lean-prompt.md");
   });
 
   it("does NOT show 'Create prompt file' when mode is custom and file exists", async () => {

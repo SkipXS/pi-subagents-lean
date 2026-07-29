@@ -12,9 +12,9 @@ import type { SubagentsConfig } from "../models/model-precedence.js";
 import { parseThinkingLevel } from "../utils.js";
 
 const CONFIG_DIR = getAgentDir();
-const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lite.json");
-/** Path to custom prompt file for subagent system prompts. */
-export const CUSTOM_PROMPT_PATH = path.join(CONFIG_DIR, "subagents-lite-prompt.md");
+const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lean.json");
+/** Path to the custom subagent system prompt. */
+export const CUSTOM_PROMPT_PATH = path.join(CONFIG_DIR, "subagents-lean-prompt.md");
 /** Default number of grace turns before an agent is force-stopped. */
 export const DEFAULT_GRACE_TURNS = 6;
 
@@ -93,6 +93,6 @@ export function saveConfigAtomic(config: SubagentsConfig): void {
     fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), "utf-8");
     fs.renameSync(tmpPath, CONFIG_PATH);
   } catch (err) {
-    console.error(`[subagents] Failed to save config: ${err}`);
+    console.error(`[pi-subagents-lean] Failed to save config: ${err}`);
   }
 }

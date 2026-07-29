@@ -21,7 +21,7 @@ vi.mock("node:fs", () => ({
 }));
 
 afterEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   vi.unstubAllEnvs();
 });
 
@@ -112,7 +112,7 @@ describe("config I/O paths", () => {
     });
   });
 
-  it("uses Pi's agent directory for config and custom prompts when HOME is unset", async () => {
+  it("uses Pi's agent directory for renamed config and custom prompts when HOME is unset", async () => {
     const agentDir = "C:\\Users\\Pi User\\.pi\\agent";
     vi.stubEnv("HOME", "");
     mockGetAgentDir.mockReturnValue(agentDir);
@@ -121,9 +121,9 @@ describe("config I/O paths", () => {
     const { CUSTOM_PROMPT_PATH, saveConfigAtomic } = await import("../../src/config/config-io.ts");
     saveConfigAtomic({ agent: {} as any, concurrency: {} as any });
 
-    const configPath = join(agentDir, "subagents-lite.json");
+    const configPath = join(agentDir, "subagents-lean.json");
     expect(mockGetAgentDir).toHaveBeenCalledOnce();
-    expect(CUSTOM_PROMPT_PATH).toBe(join(agentDir, "subagents-lite-prompt.md"));
+    expect(CUSTOM_PROMPT_PATH).toBe(join(agentDir, "subagents-lean-prompt.md"));
     expect(mockMkdirSync).toHaveBeenCalledWith(agentDir, { recursive: true });
     expect(mockWriteFileSync).toHaveBeenCalledWith(`${configPath}.tmp`, expect.any(String), "utf-8");
     expect(mockRenameSync).toHaveBeenCalledWith(`${configPath}.tmp`, configPath);

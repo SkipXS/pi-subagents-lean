@@ -10,7 +10,7 @@
  *   - Model/thinking may be explicit per spawn; otherwise resolved by the tool_call listener/executor
  *
  * Config:
- *   - Loaded from ~/.pi/agent/subagents-lite.json at session_start
+ *   - Loaded from ~/.pi/agent/subagents-lean.json at session_start
  *   - ConfigStore owns config + session overrides + persistence + side effects
  *   - Tool execution and menus read/write through store
  *

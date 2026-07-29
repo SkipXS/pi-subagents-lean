@@ -33,9 +33,9 @@ export interface PromptExtras {
  *   - Skills block (text intro + <available_skills>...</available_skills>)
  *   - Current date: YYYY-MM-DD
  *   - Current working directory: /path
- *   - [subagents-lite orchestration v1]...[/subagents-lite orchestration v1]
+ *   - [subagents-lean orchestration v1]...[/subagents-lean orchestration v1]
  *
- * These are re-added by subagents-lite from the subagent's own config,
+ * These are re-added by subagents-lean from the subagent's own config,
  * except orchestration guidance, which is parent-only,
  * so we strip them to avoid duplication.
  *
@@ -73,7 +73,7 @@ function stripScaffolding(prompt: string): string {
  * Three modes:
  * - replace (default): generic header + env + agent's systemPrompt
  * - inherit: parent's system prompt (stripped of scaffolding) + env + agent's systemPrompt
- * - custom: content of ~/.pi/agent/subagents-lite-prompt.md + env + agent's systemPrompt
+ * - custom: content of ~/.pi/agent/subagents-lean-prompt.md + env + agent's systemPrompt
  *
  * Agent's own systemPrompt is always included in <agent_instructions> tags.
  *

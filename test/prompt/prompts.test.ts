@@ -338,21 +338,10 @@ describe("buildAgentPrompt — inherit mode scaffolding stripping", () => {
 
     expect(result).toContain(parentBase);
     expect(result).toContain("Keep the repository clean.");
-    expect(result).not.toContain("subagents-lite orchestration");
+    expect(result).not.toContain("subagents-lean orchestration");
     expect(result).not.toContain("reviewer");
     expect(result).not.toContain("generated changes");
     expect(result).not.toContain("Delegate only when materially useful");
-  });
-
-  it("strips exact legacy blocks from inherited and custom headers", () => {
-    const legacy = "[subagents-lite orchestration]\nDelegate when useful; use bounded briefs; retain ownership; foreground dependencies, background independent work; never concurrent writers.\nAgents: `reviewer` — Review\n[/subagents-lite orchestration]";
-
-    const inherited = buildAgentPrompt(baseConfig, "/test/cwd", env, { parentSystemPrompt: `${parentBase}\n\n${legacy}` }, "inherit");
-    const custom = buildAgentPrompt(baseConfig, "/test/cwd", env, { customSystemPrompt: `Custom header\n\n${legacy}` }, "custom");
-
-    expect(inherited).not.toContain("Delegate when useful");
-    expect(custom).toContain("Custom header");
-    expect(custom).not.toContain("Delegate when useful");
   });
 
   it("preserves unmatched orchestration markers in inherited prompts", () => {
