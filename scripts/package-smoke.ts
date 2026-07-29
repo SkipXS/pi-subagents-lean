@@ -43,14 +43,22 @@ try {
   execFileSync(bun, ["install", "--ignore-scripts"], { cwd: installDir, stdio: "inherit" });
 
   const smokeScript = `
-    import { mkdtempSync, rmSync } from "node:fs";
+    import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
     import { tmpdir } from "node:os";
     import { join } from "node:path";
     import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
 
     const agentDir = mkdtempSync(join(tmpdir(), "pi-subagents-loader-"));
     try {
-      const extensionPath = join(process.cwd(), "node_modules", "pi-subagents-lean", "src", "index.ts");
+      const packageDir = join(process.cwd(), "node_modules", "pi-subagents-lean");
+      const installedPackage = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+      if (installedPackage.version !== "${rootPackage.version}") {
+        throw new Error("Installed package version does not match the tarball version");
+      }
+      for (const file of ["README.md", "LICENSE", "CHANGELOG.md", "docs/coverage.md", "docs/releasing.md", "src/index.ts"]) {
+        if (!existsSync(join(packageDir, file))) throw new Error("Missing packaged file: " + file);
+      }
+      const extensionPath = join(packageDir, "src", "index.ts");
       const result = await discoverAndLoadExtensions([extensionPath], process.cwd(), agentDir);
       if (result.errors.length > 0) throw new Error(JSON.stringify(result.errors));
       if (result.extensions.length !== 1) throw new Error("Expected exactly one loaded extension");

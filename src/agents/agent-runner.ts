@@ -577,25 +577,30 @@ async function createAndConfigureSession(
   notify: (msg: string) => void,
 ): Promise<AgentSession> {
   const { session } = await initSession(ctx, options, agentConfig, type, cwd, loader, extToolMap);
-  const baseName = agentConfig?.name ?? type;
-  session.setSessionName(
-    options.agentId ? `${baseName}#${options.agentId.slice(0, SHORT_ID_LENGTH)}` : baseName,
-  );
-  await session.bindExtensions({
-    onError: (err) => options.onToolActivity?.({
-      type: "end", toolName: `extension-error:${err.extensionPath}`,
-    }),
-  });
+  try {
+    const baseName = agentConfig?.name ?? type;
+    session.setSessionName(
+      options.agentId ? `${baseName}#${options.agentId.slice(0, SHORT_ID_LENGTH)}` : baseName,
+    );
+    await session.bindExtensions({
+      onError: (err) => options.onToolActivity?.({
+        type: "end", toolName: `extension-error:${err.extensionPath}`,
+      }),
+    });
 
-  const filteredTools = resolveVisibleTools({
-    activeTools: session.getActiveToolNames(),
-    tools: agentConfig?.tools,
-    excludeTools: agentConfig?.excludeTools,
-    extToolMap,
-    notify,
-  });
-  if (filteredTools) session.setActiveToolsByName(filteredTools);
-  return session;
+    const filteredTools = resolveVisibleTools({
+      activeTools: session.getActiveToolNames(),
+      tools: agentConfig?.tools,
+      excludeTools: agentConfig?.excludeTools,
+      extToolMap,
+      notify,
+    });
+    if (filteredTools) session.setActiveToolsByName(filteredTools);
+    return session;
+  } catch (error) {
+    try { session.dispose(); } catch { /* Preserve the setup error. */ }
+    throw error;
+  }
 }
 /**
  * Phase 4: Subscribe to turn_end events for graceful max_turns enforcement.

@@ -440,7 +440,8 @@ bun run test
 ```
 
 See [docs/coverage.md](docs/coverage.md) for coverage thresholds, compatibility
-checks, package smoke testing, and the required CI checks for `main`.
+checks, package smoke testing, and the required CI checks for `main`. Maintainers
+should follow the [release checklist](docs/releasing.md) before creating a tag.
 
 ## Origin and license
 

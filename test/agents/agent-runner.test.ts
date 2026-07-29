@@ -2101,6 +2101,75 @@ describe("runAgent — abort and callback event paths", () => {
     expect(onSessionCreated).not.toHaveBeenCalled();
   });
 
+  it("disposes a created session when extension binding fails", async () => {
+    const session = createMockSession();
+    session.dispose = vi.fn();
+    session.bindExtensions = vi.fn().mockRejectedValue(new Error("extension binding failed")) as any;
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+
+    await expect(runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi }))
+      .rejects.toThrow("extension binding failed");
+
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("reports extension binding errors through tool activity", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    session.bindExtensions = vi.fn(async ({ onError }) => {
+      onError({ extensionPath: "/extensions/failing.ts" });
+    }) as any;
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    const onToolActivity = vi.fn();
+
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, onToolActivity });
+
+    expect(onToolActivity).toHaveBeenCalledWith({
+      type: "end",
+      toolName: "extension-error:/extensions/failing.ts",
+    });
+  });
+
+  it("forwards abort while a prompt is running and removes the listener afterward", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    let resolvePrompt!: () => void;
+    session.prompt = vi.fn(() => new Promise<void>((resolve) => { resolvePrompt = resolve; })) as any;
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    const controller = new AbortController();
+
+    const run = runAgent(fakeCtx(), "test-agent", "do something", {
+      pi: fakePi,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    controller.abort();
+    expect(session.abort).toHaveBeenCalledOnce();
+
+    resolvePrompt();
+    await run;
+    controller.abort();
+    expect(session.abort).toHaveBeenCalledOnce();
+  });
+
+  it("cleans session listeners and abort forwarding when prompt fails", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    session.prompt = vi.fn().mockRejectedValue(new Error("prompt failed")) as any;
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    const controller = new AbortController();
+
+    await expect(runAgent(fakeCtx(), "test-agent", "do something", {
+      pi: fakePi,
+      signal: controller.signal,
+    })).rejects.toThrow("prompt failed");
+
+    expect(session._getListeners()).toHaveLength(0);
+    controller.abort();
+    expect(session.abort).not.toHaveBeenCalled();
+  });
+
   it("forwards session-created, text-delta, and tool activity callbacks", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue(["read"]);

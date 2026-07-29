@@ -41,6 +41,7 @@
   "files": [
     "src/",
     "docs/coverage.md",
+    "docs/releasing.md",
     "CHANGELOG.md",
     "README.md",
     "LICENSE"
@@ -50,6 +51,7 @@
     "typecheck:test": "tsc -p tsconfig.test.json",
     "pack:check": "bun pm pack --dry-run",
     "package:smoke": "bun scripts/package-smoke.ts",
+    "release:validate": "bun scripts/release-validate.ts",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage --maxWorkers=1",
     "test:watch": "vitest"
