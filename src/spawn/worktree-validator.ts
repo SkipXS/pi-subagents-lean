@@ -50,7 +50,7 @@ interface PiExec {
 }
 
 /**
- * Run `git rev-parse --git-common-dir` and return the trimmed result.
+ * Run `git rev-parse --path-format=absolute --git-common-dir` and return the trimmed result.
  * Returns a failure result if the command fails or git is unavailable.
  */
 async function getGitCommonDir(
@@ -60,7 +60,7 @@ async function getGitCommonDir(
   onWarning?: (msg: string) => void,
 ): Promise<{ ok: true; commonDir: string } | { ok: false; error: string }> {
   try {
-    const result = await pi.exec("git", ["rev-parse", "--git-common-dir"], { cwd, timeout: GIT_EXEC_TIMEOUT_MS });
+    const result = await pi.exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, timeout: GIT_EXEC_TIMEOUT_MS });
     if (result.code !== 0) return { ok: false, error: notInRepoError };
     const commonDir = result.stdout.trim();
     if (!commonDir) return { ok: false, error: notInRepoError };
@@ -73,7 +73,7 @@ async function getGitCommonDir(
     if (msg.includes("timed out") || msg.includes("timeout")) {
       return { ok: false, error: WORKTREE_VALIDATION_ERRORS.GIT_TIMEOUT };
     }
-    onWarning?.(`git rev-parse --git-common-dir failed in ${cwd}: ${msg}`);
+    onWarning?.(`git rev-parse --path-format=absolute --git-common-dir failed in ${cwd}: ${msg}`);
     return { ok: false, error: `worktree_path validation failed: git rev-parse failed: ${msg}` };
   }
 }

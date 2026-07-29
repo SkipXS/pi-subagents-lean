@@ -9,7 +9,7 @@ import { normalizeThinkingLevel, supportedThinkingLevels } from "../../models/th
 import type { SettingSource } from "../../models/model-precedence.js";
 import type { Theme } from "../types.js";
 import { CONFIG_AGENT_NON_MODEL_KEYS } from "../../config/types.js";
-import { buildSettingsListTheme } from "./helpers.js";
+import { applyPersistedSetting, buildSettingsListTheme } from "./helpers.js";
 import { createModelSelectSubmenu } from "./submenus/model-select.js";
 import { createThinkingSelectSubmenu } from "./submenus/thinking-select.js";
 import { createConfirmSubmenu } from "./submenus/confirm.js";
@@ -38,44 +38,52 @@ export async function showModelSettingsMenu(
     const items: SettingItem[] = [];
 
     const modelOverride = (key: string, label: string) =>
-      (mode: "session" | "permanent" | "clear", model: string | null): void => {
+      (mode: "session" | "permanent" | "clear", model: string | null): boolean | void => {
         if (mode === "clear") {
+          if (!applyPersistedSetting(ctx, () => {
+            if (key === "default") store.mutate.agent.setDefaultModel(null);
+            else store.mutate.agent.clearModelOverride(key);
+          }, `${label} model updated`)) return false;
           store.mutate.session.clearOverride(key);
-          if (key === "default") store.mutate.agent.setDefaultModel(null);
-          else store.mutate.agent.clearModelOverride(key);
+          return true;
         } else {
           const value = model === "(inherits parent)" ? null : model;
           if (mode === "session") {
             if (value === null) store.mutate.session.clearOverride(key);
             else store.mutate.session.setOverride(key, value);
-          } else if (key === "default") {
-            store.mutate.agent.setDefaultModel(value);
-          } else if (value === null) {
-            store.mutate.agent.clearModelOverride(key);
+            ctx.ui.notify(`${label} model updated`, "info");
+            return true;
           } else {
-            store.mutate.agent.setModelOverride(key, value);
+            return applyPersistedSetting(ctx, () => {
+              if (key === "default") store.mutate.agent.setDefaultModel(value);
+              else if (value === null) store.mutate.agent.clearModelOverride(key);
+              else store.mutate.agent.setModelOverride(key, value);
+            }, `${label} model updated`);
           }
         }
-        ctx.ui.notify(`${label} model updated`, "info");
       };
 
     const thinkingOverride = (key: string, label: string) =>
-      (mode: "session" | "permanent" | "clear", level: ThinkingLevel | undefined): void => {
+      (mode: "session" | "permanent" | "clear", level: ThinkingLevel | undefined): boolean | void => {
         if (mode === "clear") {
+          if (!applyPersistedSetting(ctx, () => {
+            if (key === "default") store.mutate.agent.setDefaultThinking(undefined);
+            else store.mutate.agent.clearThinkingOverride(key);
+          }, `${label} thinking updated`)) return false;
           store.mutate.session.clearThinkingOverride(key);
-          if (key === "default") store.mutate.agent.setDefaultThinking(undefined);
-          else store.mutate.agent.clearThinkingOverride(key);
+          return true;
         } else if (mode === "session") {
           if (level === undefined) store.mutate.session.clearThinkingOverride(key);
           else store.mutate.session.setThinkingOverride(key, level);
-        } else if (key === "default") {
-          store.mutate.agent.setDefaultThinking(level);
-        } else if (level === undefined) {
-          store.mutate.agent.clearThinkingOverride(key);
+          ctx.ui.notify(`${label} thinking updated`, "info");
+          return true;
         } else {
-          store.mutate.agent.setThinkingOverride(key, level);
+          return applyPersistedSetting(ctx, () => {
+            if (key === "default") store.mutate.agent.setDefaultThinking(level);
+            else if (level === undefined) store.mutate.agent.clearThinkingOverride(key);
+            else store.mutate.agent.setThinkingOverride(key, level);
+          }, `${label} thinking updated`);
         }
-        ctx.ui.notify(`${label} thinking updated`, "info");
       };
 
     const globalModel = store.sessionDefaultModel ?? store.agent.defaultModel;
@@ -208,12 +216,13 @@ export async function showModelSettingsMenu(
             ctx.ui.notify("No overrides to clear", "info");
             return;
           }
-          store.mutate.session.clearAll();
-          store.mutate.agent.clearAllModelOverrides();
-          store.mutate.agent.clearAllThinkingOverrides();
-          store.mutate.agent.setDefaultModel(null);
-          store.mutate.agent.setDefaultThinking(undefined);
-          ctx.ui.notify("All agent settings reset", "info");
+          if (applyPersistedSetting(
+            ctx,
+            () => store.mutate.agent.resetAllModelAndThinkingOverrides(),
+            "All agent settings reset",
+          )) {
+            store.mutate.session.clearAll();
+          }
         },
       }),
     });
@@ -224,14 +233,21 @@ export async function showModelSettingsMenu(
   let rebuild: ((items: SettingItem[]) => void) | undefined;
   await ctx.ui.custom((_tui, theme, _kb, done) => {
     const items = buildItems(getStore(), theme);
-    const settingsList = new SettingsList(
+    let settingsList: SettingsList;
+    settingsList = new SettingsList(
       items,
       18,
       buildSettingsListTheme(theme),
       (id, value) => {
         if (id === "disableDefaultAgents") {
-          getStore().mutate.agent.setDisableDefaultAgents(value === "ON");
-          ctx.ui.notify(`Disable default agents set to ${value} (takes effect on next parent turn)`, "info");
+          const store = getStore();
+          const previous = store.agent.disableDefaultAgents ? "ON" : "OFF";
+          applyPersistedSetting(
+            ctx,
+            () => store.mutate.agent.setDisableDefaultAgents(value === "ON"),
+            `Disable default agents set to ${value} (takes effect on next parent turn)`,
+            () => settingsList.updateValue(id, previous),
+          );
           return;
         }
         rebuild?.(buildItems(getStore(), theme));

@@ -14,7 +14,7 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { SettingsList, type SettingItem } from "@earendil-works/pi-tui";
-import { buildSettingsListTheme } from "./helpers.js";
+import { applyPersistedSetting, buildSettingsListTheme } from "./helpers.js";
 import { createNumericSubmenu } from "./submenus/numeric-input.js";
 import { SettingsListWrapper } from "./wrappers/settings-list.js";
 import { getStore } from "../../shell.js";
@@ -36,34 +36,36 @@ export async function showWidgetSettingsMenu(ctx: ExtensionCommandContext): Prom
   const store = getStore();
   const statConfig = buildStatConfig(store);
 
+  let settingsList: SettingsList;
+  const restoreValue = (id: string, value: string) => () => settingsList.updateValue(id, value);
   const onChange = (id: string, newValue: string) => {
     const stat = statConfig.get(id);
     if (stat) {
-      stat.set(newValue === "ON");
-      ctx.ui.notify(`${stat.label} ${newValue}`, "info");
+      applyPersistedSetting(ctx, () => stat.set(newValue === "ON"), `${stat.label} ${newValue}`,
+        restoreValue(id, stat.get() ? "ON" : "OFF"));
       return;
     }
 
     switch (id) {
       case "compact":
-        store.mutate.widget.setCompact(newValue === "ON");
-        ctx.ui.notify(`Force compact mode ${newValue}`, "info");
+        applyPersistedSetting(ctx, () => store.mutate.widget.setCompact(newValue === "ON"), `Force compact mode ${newValue}`,
+          restoreValue(id, store.agent.widgetCompact ? "ON" : "OFF"));
         break;
       case "showModelThinking":
-        store.mutate.widget.setShowModelThinking(newValue === "ON");
-        ctx.ui.notify(`Show model & thinking ${newValue}`, "info");
+        applyPersistedSetting(ctx, () => store.mutate.widget.setShowModelThinking(newValue === "ON"), `Show model & thinking ${newValue}`,
+          restoreValue(id, store.agent.widgetShowModelThinking ? "ON" : "OFF"));
         break;
       case "shortcut":
-        store.mutate.widget.setShortcut(newValue === "ON");
-        ctx.ui.notify(`Ctrl+o shortcut ${newValue}`, "info");
+        applyPersistedSetting(ctx, () => store.mutate.widget.setShortcut(newValue === "ON"), `Ctrl+o shortcut ${newValue}`,
+          restoreValue(id, store.agent.widgetShortcut ? "ON" : "OFF"));
         break;
       case "thinkingBuffer":
-        store.mutate.agent.setOutputThinkingBufferSize(newValue === "OFF" ? 0 : Number(newValue));
-        ctx.ui.notify(`Thinking buffer ${newValue}`, "info");
+        applyPersistedSetting(ctx, () => store.mutate.agent.setOutputThinkingBufferSize(newValue === "OFF" ? 0 : Number(newValue)), `Thinking buffer ${newValue}`,
+          restoreValue(id, store.agent.outputThinkingBufferSize === 0 ? "OFF" : String(store.agent.outputThinkingBufferSize)));
         break;
       case "showStartTime":
-        store.mutate.widget.setShowStartTime(newValue === "ON");
-        ctx.ui.notify(`Show local start time ${newValue}`, "info");
+        applyPersistedSetting(ctx, () => store.mutate.widget.setShowStartTime(newValue === "ON"), `Show local start time ${newValue}`,
+          restoreValue(id, store.agent.widgetShowStartTime ? "ON" : "OFF"));
         break;
     }
   };
@@ -105,40 +107,36 @@ export async function showWidgetSettingsMenu(ctx: ExtensionCommandContext): Prom
         id: "maxLines",
         label: "Max lines (full)",
         currentValue: String(store.agent.widgetMaxLines),
-        submenu: createNumericSubmenu(ctx, { min: 2 }, (parsed) => {
-          store.mutate.widget.setMaxLines(parsed);
-          ctx.ui.notify(`Max lines (full) set to ${parsed}`, "info");
-        }),
+        submenu: createNumericSubmenu(ctx, { min: 2 }, (parsed) =>
+          applyPersistedSetting(ctx, () => store.mutate.widget.setMaxLines(parsed), `Max lines (full) set to ${parsed}`),
+        ),
         description: "Maximum body lines in the full widget, excluding its heading.",
       },
       {
         id: "maxLinesCompact",
         label: "Max lines (compact)",
         currentValue: String(store.agent.widgetMaxLinesCompact),
-        submenu: createNumericSubmenu(ctx, { min: 2 }, (parsed) => {
-          store.mutate.widget.setMaxLinesCompact(parsed);
-          ctx.ui.notify(`Max lines (compact) set to ${parsed}`, "info");
-        }),
+        submenu: createNumericSubmenu(ctx, { min: 2 }, (parsed) =>
+          applyPersistedSetting(ctx, () => store.mutate.widget.setMaxLinesCompact(parsed), `Max lines (compact) set to ${parsed}`),
+        ),
         description: "Max total lines in compact widget mode, including the heading.",
       },
       {
         id: "descLengthFull",
         label: "Description length (full)",
         currentValue: String(store.agent.widgetDescLengthFull),
-        submenu: createNumericSubmenu(ctx, { min: 5 }, (parsed) => {
-          store.mutate.widget.setDescLengthFull(parsed);
-          ctx.ui.notify(`Description length (full) set to ${parsed}`, "info");
-        }),
+        submenu: createNumericSubmenu(ctx, { min: 5 }, (parsed) =>
+          applyPersistedSetting(ctx, () => store.mutate.widget.setDescLengthFull(parsed), `Description length (full) set to ${parsed}`),
+        ),
         description: "Max description length shown in full widget mode.",
       },
       {
         id: "descLengthCompact",
         label: "Description length (compact)",
         currentValue: String(store.agent.widgetDescLengthCompact),
-        submenu: createNumericSubmenu(ctx, { min: 5 }, (parsed) => {
-          store.mutate.widget.setDescLengthCompact(parsed);
-          ctx.ui.notify(`Description length (compact) set to ${parsed}`, "info");
-        }),
+        submenu: createNumericSubmenu(ctx, { min: 5 }, (parsed) =>
+          applyPersistedSetting(ctx, () => store.mutate.widget.setDescLengthCompact(parsed), `Description length (compact) set to ${parsed}`),
+        ),
         description: "Max description length shown in compact widget mode.",
       },
       {
@@ -162,10 +160,9 @@ export async function showWidgetSettingsMenu(ctx: ExtensionCommandContext): Prom
         id: "finishedRetention",
         label: "Finished agent retention",
         currentValue: String(store.agent.finishedRetentionMinutes),
-        submenu: createNumericSubmenu(ctx, { min: 1 }, (parsed) => {
-          store.mutate.agent.setFinishedRetentionMinutes(parsed);
-          ctx.ui.notify(`Finished agent retention set to ${parsed} min`, "info");
-        }),
+        submenu: createNumericSubmenu(ctx, { min: 1 }, (parsed) =>
+          applyPersistedSetting(ctx, () => store.mutate.agent.setFinishedRetentionMinutes(parsed), `Finished agent retention set to ${parsed} min`),
+        ),
         description: "Minutes to keep finished agents visible in the widget before cleanup.",
       },
       {
@@ -177,7 +174,7 @@ export async function showWidgetSettingsMenu(ctx: ExtensionCommandContext): Prom
       },
     ];
 
-    const settingsList = new SettingsList(items, 16, buildSettingsListTheme(theme), onChange, () => done(undefined));
+    settingsList = new SettingsList(items, 16, buildSettingsListTheme(theme), onChange, () => done(undefined));
     return new SettingsListWrapper(settingsList, { title: "Widget Settings", theme, onCancel: () => done(undefined) });
   });
 }

@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { SettingsList, type SettingItem } from "@earendil-works/pi-tui";
-import { buildSettingsListTheme } from "./helpers.js";
+import { applyPersistedSetting, buildSettingsListTheme } from "./helpers.js";
 import { SettingsListWrapper } from "./wrappers/settings-list.js";
 import type { SystemPromptMode } from "../../agents/types.js";
 import { getStore } from "../../shell.js";
@@ -80,14 +80,17 @@ export async function showSystemPromptMenu(ctx: ExtensionCommandContext): Promis
   let items = buildItems();
   let rebuild: ((newItems: SettingItem[]) => void) | null = null;
 
+  let settingsList: SettingsList;
+  const restoreValue = (id: string, value: string) => () => settingsList.updateValue(id, value);
   const onChange = (id: string, newValue: string) => {
     switch (id) {
       case "systemPromptMode":
-        store.mutate.agent.setSystemPromptMode(newValue as SystemPromptMode);
-        ctx.ui.notify(`System prompt mode set to ${newValue}`, "info");
-        // Rebuild: "custom" adds the create prompt file item, other modes remove it.
-        items = buildItems();
-        rebuild?.(items);
+        if (applyPersistedSetting(ctx, () => store.mutate.agent.setSystemPromptMode(newValue as SystemPromptMode), `System prompt mode set to ${newValue}`,
+          restoreValue(id, store.agent.systemPromptMode))) {
+          // Rebuild: "custom" adds the create prompt file item, other modes remove it.
+          items = buildItems();
+          rebuild?.(items);
+        }
         break;
       case "createPromptFile":
         try {
@@ -99,26 +102,26 @@ export async function showSystemPromptMenu(ctx: ExtensionCommandContext): Promis
         }
         return;
       case "includeContextFiles":
-        store.mutate.agent.setIncludeContextFiles(newValue === "ON");
-        ctx.ui.notify(`Include AGENTS.md set to ${newValue}`, "info");
+        applyPersistedSetting(ctx, () => store.mutate.agent.setIncludeContextFiles(newValue === "ON"), `Include AGENTS.md set to ${newValue}`,
+          restoreValue(id, store.agent.includeContextFiles ? "ON" : "OFF"));
         break;
       case "orchestrationPrompt":
-        store.mutate.agent.setOrchestrationPrompt(newValue === "ON");
-        ctx.ui.notify(`Parent orchestration prompt set to ${newValue}`, "info");
+        applyPersistedSetting(ctx, () => store.mutate.agent.setOrchestrationPrompt(newValue === "ON"), `Parent orchestration prompt set to ${newValue}`,
+          restoreValue(id, store.agent.orchestrationPrompt ? "ON" : "OFF"));
         break;
       case "loadSkillsImplicitly":
-        store.mutate.agent.setLoadSkillsImplicitly(newValue === "ON");
-        ctx.ui.notify(`Load skills implicitly set to ${newValue}`, "info");
+        applyPersistedSetting(ctx, () => store.mutate.agent.setLoadSkillsImplicitly(newValue === "ON"), `Load skills implicitly set to ${newValue}`,
+          restoreValue(id, store.agent.loadSkillsImplicitly ? "ON" : "OFF"));
         break;
       case "loadExtensionsImplicitly":
-        store.mutate.agent.setLoadExtensionsImplicitly(newValue === "ON");
-        ctx.ui.notify(`Load extensions implicitly set to ${newValue}`, "info");
+        applyPersistedSetting(ctx, () => store.mutate.agent.setLoadExtensionsImplicitly(newValue === "ON"), `Load extensions implicitly set to ${newValue}`,
+          restoreValue(id, store.agent.loadExtensionsImplicitly ? "ON" : "OFF"));
         break;
     }
   };
 
   await ctx.ui.custom((_tui, theme, _kb, done) => {
-    const settingsList = new SettingsList(items, 10, buildSettingsListTheme(theme), onChange, () => done(undefined));
+    settingsList = new SettingsList(items, 10, buildSettingsListTheme(theme), onChange, () => done(undefined));
     return new SettingsListWrapper(settingsList, { title: "System Prompt", theme, onCancel: () => done(undefined), onRebuild: (r) => { rebuild = r; } });
   });
 }

@@ -335,6 +335,63 @@ describe("executeAgentTool — worktree_path validation", () => {
     expect(mockSpawn.mock.calls[0][4].signal).toBe(signal);
   });
 
+  it("returns a cancellation error when the parent aborts after foreground start", async () => {
+    const parent = new AbortController();
+    const record = {
+      id: "agent-cancelled",
+      display: { type: "general-purpose", description: "Test agent" },
+      lifecycle: { status: "stopped", startedAt: Date.now(), completedAt: Date.now(), resultConsumed: true },
+      execution: {},
+      stats: {
+        lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+        toolUses: 0,
+        compactionCount: 0,
+      },
+    };
+    mockCoordinatorSpawn.mockImplementationOnce(async () => {
+      // The real manager bridges this signal to its own child controller; this
+      // boundary test observes the foreground tool contract after that start.
+      parent.abort();
+      return { agentId: record.id, record };
+    });
+
+    const result = await executeAgentTool("tc-abort-after-start", makeParams(), parent.signal, undefined, ctx);
+
+    expect(mockCoordinatorSpawn).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+  });
+
+  it("returns a cancellation error when the parent aborts during a background spawn", async () => {
+    const parent = new AbortController();
+    const record = {
+      id: "agent-background-cancelled",
+      display: { type: "general-purpose", description: "Test agent" },
+      lifecycle: { status: "stopped", startedAt: Date.now(), completedAt: Date.now(), resultConsumed: true },
+      execution: {},
+      stats: {
+        lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+        toolUses: 0,
+        compactionCount: 0,
+      },
+    };
+    mockCoordinatorSpawn.mockImplementationOnce(async () => {
+      parent.abort();
+      return { agentId: record.id, record };
+    });
+
+    const result = await executeAgentTool(
+      "tc-background-abort-during-spawn",
+      makeParams({ run_in_background: true }),
+      parent.signal,
+      undefined,
+      ctx,
+    );
+
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+  });
+
   it("rejects an unknown explicit model instead of silently using the parent", async () => {
     (utils.parseModelKey as any).mockReturnValueOnce({ provider: "unknown", modelId: "model" });
     ctx.modelRegistry.find.mockReturnValueOnce(undefined);
@@ -413,7 +470,7 @@ describe("executeAgentTool — worktree_path validation", () => {
   it("flushes validator warnings via ctx.ui.notify on validation failure", async () => {
     // Mock validateWorktreePath to invoke the onWarning callback before returning failure
     mockValidateWorktreePath.mockImplementation((_pi, _path, _cwd, onWarning) => {
-      onWarning?.("git rev-parse --git-common-dir failed in /etc: EACCES permission denied");
+      onWarning?.("git rev-parse --path-format=absolute --git-common-dir failed in /etc: EACCES permission denied");
       return Promise.resolve({ ok: false, error: "worktree_path validation failed: git rev-parse failed: EACCES permission denied" });
     });
 
@@ -429,7 +486,7 @@ describe("executeAgentTool — worktree_path validation", () => {
     expect(result.isError).toBe(true);
     expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
     expect(ctx.ui.notify).toHaveBeenCalledWith(
-      "[pi-subagents-lean] git rev-parse --git-common-dir failed in /etc: EACCES permission denied",
+      "[pi-subagents-lean] git rev-parse --path-format=absolute --git-common-dir failed in /etc: EACCES permission denied",
       "warning",
     );
   });

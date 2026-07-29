@@ -117,6 +117,12 @@ export interface AgentLifecycle {
    * its nudge can be delivered.
    */
   resultConsumed?: boolean;
+  /**
+   * True only after all runner/queue work has settled. A stopped running agent is
+   * terminal for display purposes before its runner has actually released its
+   * session, so retention must not release execution handles until this is true.
+   */
+  settled?: boolean;
 }
 
 /**

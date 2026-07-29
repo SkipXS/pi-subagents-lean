@@ -40,6 +40,11 @@ function errorResult(text: string, details?: Record<string, unknown>) {
   return { content: [{ type: "text", text }], isError: true as const, details };
 }
 
+/** Cancellation has a distinct tool contract; it is never reported as success. */
+function cancelledResult(details?: Record<string, unknown>) {
+  return errorResult("Agent execution cancelled", details);
+}
+
 // ============================================================================
 // Activity tracking
 // ============================================================================
@@ -133,6 +138,9 @@ export async function executeAgentTool(
   _onUpdate: ((update: any) => void) | undefined,
   ctx: ExtensionContext,
 ): Promise<any> {
+  // Do not start preflight work for a tool call Pi has already cancelled.
+  if (signal?.aborted) return cancelledResult();
+
   // Validate worktree_path early — needed for on-demand agent discovery
   const rawWorktreePath = params.worktree_path as string | undefined;
   let validatedWorktreePath: string | undefined;
@@ -143,6 +151,7 @@ export async function executeAgentTool(
       const warnings: string[] = [];
       const onWarning = (msg: string) => { warnings.push(msg); };
       const validation = await validateWorktreePath(getPiInstance(), rawWorktreePath, parentCwd, onWarning);
+      if (signal?.aborted) return cancelledResult();
       if (!validation.ok) {
         for (const msg of warnings) {
           if (ctx.ui?.notify) ctx.ui.notify(`[pi-subagents-lean] ${msg}`, "warning");
@@ -152,6 +161,7 @@ export async function executeAgentTool(
       validatedWorktreePath = validation.resolvedPath;
       worktreeLabel = validation.label;
     } catch (err: unknown) {
+      if (signal?.aborted) return cancelledResult();
       const msg = err instanceof Error ? err.message : String(err);
       return errorResult(`worktree_path validation failed: ${msg}`);
     }
@@ -174,12 +184,14 @@ export async function executeAgentTool(
     const catalog = await resolveAgentCatalog(trustedWorktreeDir, {
       disableDefaultAgents: getStore().agent.disableDefaultAgents,
     });
+    if (signal?.aborted) return cancelledResult();
     resolvedType = resolveTypeInCatalog(catalog, type);
     agentConfig = resolvedType ? catalog.get(resolvedType) : undefined;
   } else {
     resolvedType = resolveType(type);
     if (!resolvedType) {
       await discoverNewAgents({ disableDefaultAgents: getStore().agent.disableDefaultAgents });
+      if (signal?.aborted) return cancelledResult();
       resolvedType = resolveType(type);
     }
     agentConfig = resolvedType ? getAgentConfig(resolvedType) : undefined;
@@ -218,6 +230,10 @@ export async function executeAgentTool(
     explicitThinking,
   ).value;
 
+  // No spawn may begin after cancellation, including cancellation during
+  // asynchronous catalog/worktree preflight.
+  if (signal?.aborted) return cancelledResult();
+
   // Use SpawnCoordinator for unified spawn path
   const coordinator = getCoordinator()!;
   const result = await coordinator.spawn(getPiInstance(), ctx, {
@@ -239,6 +255,12 @@ export async function executeAgentTool(
 
   const { agentId, record } = result;
 
+  // A background spawn may complete its abort path while coordinator.spawn()
+  // is still pending. Its stopped record is not a successful tool result.
+  if (signal?.aborted) {
+    return cancelledResult(buildAgentDetails(record, { includeStatus: true }));
+  }
+
   if (runInBackground || getStore().agent.forceBackground) {
     const isActive = record.lifecycle.status === "queued" || record.lifecycle.status === "running";
     const details = buildAgentDetails(record, isActive ? undefined : { includeStatus: true });
@@ -254,6 +276,13 @@ export async function executeAgentTool(
 
   // Foreground: record.execution.promise is already awaited by coordinator.spawn()
   const details = buildAgentDetails(record, { includeStats: true });
+
+  // The manager bridges the parent signal to its own child controller. Once
+  // the foreground tool call is cancelled, never turn its partial response
+  // into a misleading successful Agent result.
+  if (signal?.aborted || record.lifecycle.status === "aborted") {
+    return cancelledResult(details);
+  }
 
   if (record.lifecycle.status === "error") {
     return errorResult(`Agent failed: ${record.error || "unknown error"}`, details);

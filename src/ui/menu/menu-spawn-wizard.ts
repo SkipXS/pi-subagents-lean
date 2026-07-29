@@ -103,7 +103,7 @@ async function listWorktrees(cwd: string): Promise<WorktreeEntry[] | null> {
 
 /**
  * Check whether a directory is inside a git repository.
- * Uses `git rev-parse --git-common-dir` — the same strategy as the worktree validator.
+ * Uses `git rev-parse --git-common-dir` to check Git repository membership.
  */
 async function isInGitRepo(cwd: string): Promise<boolean> {
   try {

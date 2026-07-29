@@ -82,6 +82,9 @@ export class SpawnCoordinator {
   /** Captured ExtensionContext per background agent, bound to the spawning session. */
   private backgroundContexts = new Map<string, ExtensionContext>();
 
+  /** Parent cancellation listeners for background delivery tracking. */
+  private backgroundParentAborts = new Map<string, { signal: AbortSignal; listener: () => void }>();
+
   /** Pending nudge agent IDs, batched within the delay window. */
   private pendingNudges = new Set<string>();
 
@@ -151,7 +154,10 @@ export class SpawnCoordinator {
       } else if (intent.runInBackground) {
         // Reconcile any other synchronous terminal completion that occurred
         // before onAgentComplete could observe the background registration.
+        // It still needs parent-abort tracking throughout the delivery delay.
+        this.backgroundAgentIds.add(agentId);
         this.backgroundContexts.set(agentId, ctx);
+        this.trackBackgroundParentAbort(agentId, intent.signal);
         this.scheduleNudge(agentId);
       } else {
         record.lifecycle.resultConsumed = true;
@@ -173,6 +179,7 @@ export class SpawnCoordinator {
     if (intent.runInBackground) {
       this.backgroundAgentIds.add(agentId);
       this.backgroundContexts.set(agentId, ctx);
+      this.trackBackgroundParentAbort(agentId, intent.signal);
     }
 
     if (!intent.runInBackground) {
@@ -225,6 +232,16 @@ export class SpawnCoordinator {
    * Owns the completion side-effects: nudge scheduling, live-view cleanup.
    */
   onAgentComplete(record: AgentRecord): void {
+    // A parent abort has no remaining LLM delivery route. Do not schedule a
+    // stale follow-up nudge; the result is objectively consumed by cancellation.
+    if (this.backgroundParentAborts.get(record.id)?.signal.aborted) {
+      this.abandonBackgroundDelivery(record.id, record);
+      return;
+    }
+    // Keep the listener through the delayed nudge window. The parent can end
+    // after completion but before delivery, in which case it must suppress the
+    // nudge and consume the otherwise-undeliverable result.
+
     // Schedule nudge for background agents
     if (this.backgroundAgentIds.has(record.id)) {
       this.scheduleNudge(record.id);
@@ -245,6 +262,7 @@ export class SpawnCoordinator {
     this.liveViews.clear();
     this.backgroundAgentIds.clear();
     this.backgroundContexts.clear();
+    for (const id of this.backgroundParentAborts.keys()) this.clearBackgroundParentAbort(id);
     this.disposed = true;
   }
 
@@ -268,17 +286,66 @@ export class SpawnCoordinator {
     };
   }
 
+  /** Track parent cancellation so a background result cannot nudge an aborted turn. */
+  private trackBackgroundParentAbort(agentId: string, signal?: AbortSignal): void {
+    if (!signal) return;
+    const listener = () => {
+      const record = this.manager.getRecord(agentId);
+      this.abandonBackgroundDelivery(agentId, record);
+    };
+    this.backgroundParentAborts.set(agentId, { signal, listener });
+    signal.addEventListener("abort", listener, { once: true });
+    if (signal.aborted && this.backgroundParentAborts.has(agentId)) listener();
+  }
+
+  private clearBackgroundParentAbort(agentId: string): void {
+    const entry = this.backgroundParentAborts.get(agentId);
+    if (!entry) return;
+    entry.signal.removeEventListener("abort", entry.listener);
+    this.backgroundParentAborts.delete(agentId);
+  }
+
+  /** Remove background delivery state when its parent no longer exists. */
+  private abandonBackgroundDelivery(agentId: string, record?: AgentRecord): void {
+    record && (record.lifecycle.resultConsumed = true);
+    this.pendingNudges.delete(agentId);
+    this.backgroundAgentIds.delete(agentId);
+    this.backgroundContexts.delete(agentId);
+    this.liveViews.delete(agentId);
+    this.clearBackgroundParentAbort(agentId);
+  }
+
+  /** Clear coordinator-only state after any terminal delivery attempt. */
+  private clearBackgroundDeliveryTracking(agentId: string): void {
+    this.pendingNudges.delete(agentId);
+    this.backgroundAgentIds.delete(agentId);
+    this.backgroundContexts.delete(agentId);
+    this.liveViews.delete(agentId);
+    this.clearBackgroundParentAbort(agentId);
+  }
+
   /** Emit an individual nudge for a completed background agent. */
   private emitIndividualNudge(agentId: string): void {
+    // An abort can happen after completion, while this nudge was waiting.
+    if (this.backgroundParentAborts.get(agentId)?.signal.aborted) {
+      this.abandonBackgroundDelivery(agentId, this.manager.getRecord(agentId));
+      return;
+    }
+
     // Skip if disposed — prevents stale pi usage after session replacement
-    if (this.disposed) return;
+    if (this.disposed) {
+      this.clearBackgroundDeliveryTracking(agentId);
+      return;
+    }
 
-    // Read pi from shell at call time so we get a fresh reference after reload.
+    // Read pi and record before delivery. These are terminal delivery attempts:
+    // without either, leave the result unconsumed and never retain stale ctx.
     const pi = getPiInstance();
-    if (!pi) return;
-
     const record = this.manager.getRecord(agentId);
-    if (!record) return;
+    if (!pi || !record) {
+      this.clearBackgroundDeliveryTracking(agentId);
+      return;
+    }
 
     const details = buildAgentDetails(record, {
       includeStats: true,
@@ -324,7 +391,9 @@ export class SpawnCoordinator {
         }
       }
     } finally {
-      this.backgroundContexts.delete(agentId);
+      // Context is only a best-effort UI fallback and must never outlive a
+      // delivery attempt. A failed/no-Pi delivery deliberately stays unconsumed.
+      this.clearBackgroundDeliveryTracking(agentId);
     }
   }
 }

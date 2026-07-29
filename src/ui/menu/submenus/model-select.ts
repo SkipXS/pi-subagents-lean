@@ -16,7 +16,7 @@ export interface ModelSelectSubmenuOptions {
   modelOptions: string[];
   showClear: boolean;
   theme: Theme;
-  onSelect: (mode: "session" | "permanent" | "clear", model: string | null) => void;
+  onSelect: (mode: "session" | "permanent" | "clear", model: string | null) => boolean | void;
 }
 
 /**
@@ -43,8 +43,7 @@ export function createModelSelectSubmenu(
 
     modeList.onSelect = (item) => {
       if (item.value === "clear") {
-        options.onSelect("clear", null);
-        done("clear");
+        if (options.onSelect("clear", null) !== false) done("clear");
         return;
       }
       selectedMode = item.value as "session" | "permanent";
@@ -58,8 +57,7 @@ export function createModelSelectSubmenu(
       _currentValue === "(inherits parent)" ? null : _currentValue,
       {
         onSelect: (modelValue) => {
-          options.onSelect(selectedMode, modelValue);
-          done(modelValue);
+          if (options.onSelect(selectedMode, modelValue) !== false) done(modelValue);
         },
         onCancel: () => done(),
       },
