@@ -54,7 +54,7 @@ pi -e git:github.com/SkipXS/pi-subagents-lean           # try without installing
 
 ## Quick Start
 
-The LLM calls `Agent` like any other tool. Foreground agents return inline with stats; background agents acknowledge immediately and auto-deliver on completion. On parent turns, the extension also adds a compact orchestration section generated from visible agent frontmatter, so agent definitions alone are enough for basic delegation—no separate `APPEND_SYSTEM.md` is needed. Set `agent.orchestrationPrompt` to `false` to disable it.
+The LLM calls `Agent` like any other tool. Foreground agents return inline with stats; background agents acknowledge immediately and auto-deliver on completion. On parent turns, the extension also adds a compact orchestration section generated from visible agent frontmatter, so agent definitions alone are enough for basic delegation. Set `agent.orchestrationPrompt` to `false` to disable it.
 
 Agents appear in the live widget:
 
@@ -72,7 +72,7 @@ Background agents deliver a result notification when done:
 ```
  Subagent Result
 
- ✓ Scout (model-name) · 13⚙︎  5⟳ · ↑25.9k ↓4.9k 15% · 21s
+ ✓ Scout (model-name) · 13⚙︎  5⟳ · ↑25.9k ↓4.9k 15.0%/128k · 21s
    Explore codebase architecture
    tail -f /tmp/pi-agent-outputs/4f6b0f08-7a9a-419.log
 ```
@@ -81,7 +81,7 @@ Foreground results land inline:
 
 ```
  ▸ Scout
- ✓ 31⚙︎  6⟳ · ↑48.1k ↓9.2k 28% · 39s
+ ✓ Scout · 31⚙︎  6⟳ · ↑48.1k ↓9.2k 28.0%/128k · 39s
    Explore project directory structure
 ```
 
@@ -295,11 +295,11 @@ Compact mode is active when **Force compact** is ON, or **ctrl+o shortcut** is O
 
 With an empty editor, press `↓` to enter widget navigation. Use `↑`/`↓` to select an agent, `Enter` to open its conversation, and `Esc` to leave navigation. Any other key returns focus to the editor.
 
-The conversation viewer streams thinking and response text live as deltas arrive and renders tool calls in pi's style. For tool results over 500 characters, it shows at most the first five newline-delimited source lines plus an overflow note. Its scroll keys follow the configured `tui.select.*` keybindings; `k`/`j` and `Shift+↑`/`Shift+↓` remain available as aliases.
+The conversation viewer streams thinking and response text live as deltas arrive and renders tool calls in pi's style. For tool results over 500 characters, it shows up to the first five newline-delimited source lines; when additional source lines are omitted, an overflow note reports their count. Long individual lines wrap to the viewport. Its scroll keys follow the configured `tui.select.*` keybindings; `k`/`j` and `Shift+↑`/`Shift+↓` remain available as aliases.
 
 **Viewer controls:** `↑`/`↓` or `k`/`j` scroll · `PgUp`/`PgDn` or `Shift+↑`/`Shift+↓` page · `g`/`G` or `Home`/`End` jump · `Enter` compose steering while running · `s` twice stop/abort · `q`/`Esc` close.
 
-**Stats line:** `15⟳ · ↑12k ↓8.0k R85k W3.0k CH89.2% $0.024 47.0%/128k (auto) · 47s`. Tools and turns form one counter group with two spaces between them; Pi footer metrics remain contiguous, with ` · ` separating the counter, Pi, and duration groups. The configured stats-visibility toggles also apply here, including **Cost display**. The same Pi-compatible usage group is used by foreground and background result cards.
+**Stats line:** `15⟳ · ↑12k ↓8.0k R85k W3.0k CH89.2% $0.024 47.0%/128k (auto) · 47s`. Tools and turns form one counter group with two spaces between them; Pi footer metrics remain contiguous, with ` · ` separating the counter, Pi, and duration groups. The configured stats-visibility toggles also apply here, including **Cost display**. Foreground and background result cards use the same Pi-compatible usage group; `showCost` also controls their cost field, while the other visibility toggles are scoped to the widget and conversation viewer.
 
 ## Configuration
 
@@ -374,8 +374,6 @@ The conversation viewer streams thinking and response text live as deltas arrive
 
 `orchestrationPrompt` defaults to `true`. It appends a parent-only, cache-stable catalog of visible global/trusted-current-project agents; subagents never inherit it. Visible descriptions should be concise. Only exact representable names of at most 64 UTF-8 bytes are advertised; descriptions are capped at 160 UTF-8 bytes, the catalog at 24 agents/3,879 UTF-8 bytes, and the full generated block at 4,096 UTF-8 bytes; a deterministic `… +N omitted` marker reports overflow. Toggle it in `/agents` → **Settings** → **System prompt, context, skills & extensions**, or set `"orchestrationPrompt": false` under `agent` in config. Opt-out intentionally provides no automatic catalog.
 
-**APPEND_SYSTEM.md migration:** remove only static subagent delegation rules and agent catalogs from existing `APPEND_SYSTEM.md`; retain unrelated global instructions. The generated block supplies delegation guidance and the live catalog when enabled.
-
 ### Widget settings
 
 | Field | Default | Description |
@@ -395,7 +393,7 @@ The `↓ to navigate` heading hint is always shown while the widget is visible.
 
 ### Stats visibility
 
-These toggles apply to the live widget and conversation viewer.
+These toggles apply to the live widget and conversation viewer. Model and thinking metadata are separate from usage stats: `widgetShowModelThinking` controls them in widget rows, while the conversation viewer and result cards show invocation metadata when available.
 
 | Field | Default | Description |
 |---|---|---|
@@ -405,7 +403,9 @@ These toggles apply to the live widget and conversation viewer.
 | `showOutput` | `true` | Output tokens (↓). |
 | `showContext` | `true` | Context-fill percent (%). |
 | `showCost` | `false` | Dollar cost ($). |
-| `showTime` | `true` | Elapsed time. |
+| `showTime` | `true` | Elapsed time in the widget and conversation viewer. |
+
+Result cards always include elapsed time; among these visibility settings, only `showCost` also applies to result cards.
 
 > **Reload safety:** if a session reload (`/reload`, extension reload) kills running agents, the UI reports the count lost. Output logs and completed results are preserved on disk.
 
