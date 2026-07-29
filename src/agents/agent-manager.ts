@@ -151,6 +151,7 @@ export class AgentManager {
       lifecycle: {
         status: queued ? "queued" : "running",
         startedAt: Date.now(),
+        settled: false,
       },
       display: {
         type,
@@ -188,6 +189,7 @@ export class AgentManager {
     // stops an already-aborted parent synchronously. Do not start it afterwards.
     if (record.lifecycle.status !== "running") {
       // No runner was created to reach startAgent's completion handler.
+      record.lifecycle.settled = true;
       this.safeNotifyComplete(record);
       this.totalAgentCount++;
       return id;
@@ -311,6 +313,10 @@ export class AgentManager {
           record.execution.outputLog = undefined;
         }
 
+        // The runner has now fully settled, including after a prior stop().
+        // Retention may safely release its execution handles from this point.
+        record.lifecycle.settled = true;
+
         // Decrement global concurrency count
         concurrencySlot.running--;
         this.clearParentAbortSignal(id);
@@ -402,6 +408,7 @@ export class AgentManager {
         record.lifecycle.status = "error";
         record.error = errorMessage(err);
         record.lifecycle.completedAt = Date.now();
+        record.lifecycle.settled = true;
         entry.resolve("");
         started.add(entry.id);
         this.clearParentAbortSignal(entry.id);
@@ -492,16 +499,28 @@ export class AgentManager {
     record.lifecycle.status = "stopped";
     record.lifecycle.stoppedBy = stoppedBy;
     record.lifecycle.completedAt = Date.now();
+    // Queued work has no runner to settle. A running agent remains unsettled
+    // until startAgent's finally block has observed the runner completion.
+    if (wasQueued) record.lifecycle.settled = true;
     this.clearParentAbortSignal(record.id);
     if (wasQueued) this.safeNotifyComplete(record);
     return true;
   }
 
-  /** Dispose a record's session and remove it from the map. */
-  private removeRecord(id: string, record: AgentRecord): void {
-    this.clearParentAbortSignal(id);
+  /** Release execution-only handles while preserving result, lifecycle, and display metadata. */
+  private releaseExecution(record: AgentRecord): void {
+    this.clearParentAbortSignal(record.id);
     record.execution.session?.dispose();
     record.execution.session = undefined;
+    record.execution.abortController = undefined;
+    record.execution.promise = undefined;
+    record.execution.pendingSteers = undefined;
+    record.execution.outputLog = undefined;
+  }
+
+  /** Dispose a record's session and remove it from the map. */
+  private removeRecord(id: string, record: AgentRecord): void {
+    this.releaseExecution(record);
     this.agents.delete(id);
   }
 
@@ -510,11 +529,17 @@ export class AgentManager {
     for (const [id, record] of this.agents) {
       if (!isTerminalStatus(record.lifecycle.status)) continue;
       if ((record.lifecycle.completedAt ?? 0) >= cutoff) continue;
-      // Keep the record until the LLM has read the result (foreground return or
-      // background nudge). Otherwise a completed background agent can be wiped
-      // before its nudge is emitted.
-      if (!record.lifecycle.resultConsumed) continue;
-      this.removeRecord(id, record);
+      // A stopped runner is terminal before runAgent settles. Never dispose its
+      // session or promise early: it still owns the concurrency slot and may be
+      // executing final callbacks.
+      if (!record.lifecycle.settled) continue;
+      // Keep an undelivered result available, but release the heavy execution
+      // handles after retention. Consumed records can be fully evicted.
+      if (record.lifecycle.resultConsumed) {
+        this.removeRecord(id, record);
+      } else {
+        this.releaseExecution(record);
+      }
     }
   }
 

@@ -336,6 +336,30 @@ describe("ConfigStore persisted mutations", () => {
     expect(retentions).toEqual([15]);
   });
 
+  it("rolls back RAM and suppresses widget and manager effects when saving fails", () => {
+    const disk = defaultConfig();
+    const io: ConfigIO = {
+      load: () => structuredClone(disk),
+      save: () => { throw new Error("disk full"); },
+    };
+    const { w, calls } = widgetStub();
+    const { m, concurrencies } = managerStub();
+    const store = new ConfigStore(io);
+    store.setDeps({ widget: w, manager: m });
+    calls.length = 0;
+    concurrencies.length = 0;
+
+    expect(() => store.mutate.widget.setCompact(true)).toThrow("disk full");
+    expect(store.agent.widgetCompact).toBe(false);
+    expect(disk.agent.widgetCompact).toBe(false);
+    expect(calls).toHaveLength(0);
+
+    expect(() => store.mutate.concurrency.setDefault(8)).toThrow("disk full");
+    expect(store.concurrency).toEqual({ default: 4 });
+    expect(disk.concurrency).toEqual({ default: 4 });
+    expect(concurrencies).toHaveLength(0);
+  });
+
   it("setFinishedRetentionMinutes clamps to minimum 1", () => {
     const { io, saves } = memIO();
     const { m, retentions } = managerStub();
@@ -362,6 +386,48 @@ describe("ConfigStore model-override clearing", () => {
     expect(store.agentConfigSnapshot().Explore).toBeUndefined();
     expect(store.agentConfigSnapshot().general).toBe("m2");
     expect(saves).toHaveLength(1);
+  });
+
+  it("resetAllModelAndThinkingOverrides commits the complete reset in one save", () => {
+    const { io, saves } = memIO({
+      agent: {
+        default: "global-model", defaultThinking: "high", forceBackground: true,
+        widgetMaxLines: 14, Explore: "explore-model",
+      },
+      thinkingOverrides: { Explore: "low", "removed-agent": "high" },
+      concurrency: { default: 4 },
+    });
+    const store = new ConfigStore(io);
+
+    store.mutate.agent.resetAllModelAndThinkingOverrides();
+
+    expect(saves).toHaveLength(1);
+    expect(saves[0].agent).toMatchObject({ default: null, forceBackground: true, widgetMaxLines: 14 });
+    expect(saves[0].agent.Explore).toBeUndefined();
+    expect(saves[0].agent.defaultThinking).toBeUndefined();
+    expect(saves[0].thinkingOverrides).toEqual({});
+  });
+
+  it("does not leave the partial state that a later reset save failure would expose", () => {
+    const initial = {
+      ...defaultConfig(),
+      agent: { ...defaultConfig().agent, default: "global-model", defaultThinking: "high" as const, Explore: "explore-model" },
+      thinkingOverrides: { Explore: "low" as const },
+    };
+    let saves = 0;
+    const io: ConfigIO = {
+      load: () => structuredClone(initial),
+      save: () => { saves++; throw new Error("disk full"); },
+    };
+    const store = new ConfigStore(io);
+
+    expect(() => store.mutate.agent.resetAllModelAndThinkingOverrides()).toThrow("disk full");
+
+    expect(saves).toBe(1);
+    expect(store.agent.defaultModel).toBe("global-model");
+    expect(store.agent.defaultThinking).toBe("high");
+    expect(store.agentConfigSnapshot().Explore).toBe("explore-model");
+    expect(store.persistedThinkingOverride("Explore")).toBe("low");
   });
 
   it("clearAllModelOverrides preserves non-model settings, drops per-type overrides", () => {

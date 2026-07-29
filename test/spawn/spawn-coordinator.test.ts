@@ -13,8 +13,9 @@ import { buildInvocationTags } from "../../src/ui/format.js";
 
 // --- Mock modules ---
 
-const { mockAgentConfig } = vi.hoisted(() => ({
+const { mockAgentConfig, mockRunAgent } = vi.hoisted(() => ({
   mockAgentConfig: vi.fn(() => undefined),
+  mockRunAgent: vi.fn(),
 }));
 
 vi.mock("../../src/agents/agent-types.js", () => ({
@@ -25,6 +26,10 @@ vi.mock("../../src/agents/agent-types.js", () => ({
 
 vi.mock("../../src/spawn/worktree-validator.js", () => ({
   validateWorktreePath: vi.fn(async () => ({ ok: true, resolvedPath: "/wt", label: "wt" })),
+}));
+
+vi.mock("../../src/agents/agent-runner.js", () => ({
+  runAgent: mockRunAgent,
 }));
 
 vi.mock("../../src/utils.js", () => ({
@@ -106,6 +111,7 @@ describe("SpawnCoordinator", () => {
     manager = makeMockManager();
     ctx = makeMockCtx();
     mockPi.sendMessage.mockClear();
+    mockRunAgent.mockReset();
     mockAgentConfig.mockReset().mockReturnValue(undefined);
     mockGetPiInstance.mockReturnValue(mockPi);
     mockIsIdle.mockReturnValue(true);
@@ -361,14 +367,16 @@ describe("SpawnCoordinator", () => {
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
     });
 
-    it("does not emit nudge for agent without record", () => {
+    it("does not retain context or emit a nudge for an agent without a record", () => {
       const coordinator = new SpawnCoordinator(manager as any);
       // agent-999 doesn't exist in the mock manager
+      (coordinator as any).backgroundContexts.set("agent-999", ctx);
       coordinator.scheduleNudge("agent-999");
 
       vi.advanceTimersByTime(200);
 
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
+      expect((coordinator as any).backgroundContexts.has("agent-999")).toBe(false);
     });
 
     it("starts new batch window for nudges arriving after the previous window", async () => {
@@ -635,7 +643,23 @@ describe("SpawnCoordinator", () => {
       expect(record.lifecycle.resultConsumed).toBe(true);
     });
 
-    it("does not mark consumed when nudge delivery fails", async () => {
+    it("does not retain a background context when Pi is unavailable", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const result = await coordinator.spawn(mockPi, ctx, {
+        type: "builder", prompt: "task", description: "No Pi", graceTurns: 6, runInBackground: true,
+      });
+      const record = manager.getRecord(result.agentId);
+      mockGetPiInstance.mockReturnValue(null);
+
+      coordinator.scheduleNudge(result.agentId);
+      vi.advanceTimersByTime(200);
+
+      expect(record.lifecycle.resultConsumed).toBeUndefined();
+      expect((coordinator as any).backgroundContexts.has(result.agentId)).toBe(false);
+      expect(coordinator.isBackground(result.agentId)).toBe(false);
+    });
+
+    it("does not retain a background context or consume when nudge delivery fails", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const result = await coordinator.spawn(mockPi, ctx, {
         type: "builder", prompt: "task", description: "Test bg", graceTurns: 6, runInBackground: true,
@@ -650,6 +674,54 @@ describe("SpawnCoordinator", () => {
 
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
       expect(record.lifecycle.resultConsumed).toBeUndefined();
+      expect((coordinator as any).backgroundContexts.has(result.agentId)).toBe(false);
+      expect(coordinator.isBackground(result.agentId)).toBe(false);
+    });
+
+    it("suppresses a delayed nudge when the parent aborts after onAgentComplete", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const parent = new AbortController();
+      const result = await coordinator.spawn(mockPi, ctx, {
+        type: "builder", prompt: "task", description: "Parent abort after complete", graceTurns: 6,
+        runInBackground: true, signal: parent.signal,
+      });
+
+      coordinator.onAgentComplete(result.record);
+      expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(true);
+
+      parent.abort();
+      expect(result.record.lifecycle.resultConsumed).toBe(true);
+      expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(false);
+
+      vi.advanceTimersByTime(200);
+      expect(mockPi.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("abandons background delivery without a nudge after its parent aborts", async () => {
+      const realManager = new AgentManager(undefined, { default: 1 });
+      const coordinator = new SpawnCoordinator(realManager);
+      realManager.setOnComplete((record) => coordinator.onAgentComplete(record));
+      const parent = new AbortController();
+      const runner = new Promise<any>(() => {});
+      mockRunAgent.mockReturnValue(runner);
+
+      try {
+        const result = await coordinator.spawn(mockPi, ctx, {
+          type: "builder", prompt: "task", description: "Parent abort", graceTurns: 6,
+          runInBackground: true, signal: parent.signal,
+        });
+        parent.abort();
+
+        expect(result.record.lifecycle).toMatchObject({ status: "stopped", resultConsumed: true });
+        expect(coordinator.isBackground(result.agentId)).toBe(false);
+        expect((coordinator as any).backgroundContexts.has(result.agentId)).toBe(false);
+        expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(false);
+
+        vi.advanceTimersByTime(200);
+        expect(mockPi.sendMessage).not.toHaveBeenCalled();
+      } finally {
+        realManager.dispose();
+      }
     });
   });
 });

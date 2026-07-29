@@ -226,6 +226,12 @@ vi.mock("../src/shell.js", () => {
         setThinkingOverride(type: string, level: string) { mockModules.mockConfig.thinkingOverrides[type] = level; },
         clearThinkingOverride(type: string) { delete mockModules.mockConfig.thinkingOverrides[type]; },
         clearAllThinkingOverrides() { mockModules.mockConfig.thinkingOverrides = {}; },
+        resetAllModelAndThinkingOverrides() {
+          this.clearAllModelOverrides();
+          mockModules.mockConfig.agent.default = null;
+          delete mockModules.mockConfig.agent.defaultThinking;
+          mockModules.mockConfig.thinkingOverrides = {};
+        },
         clearAllModelOverrides() {
           const preserved: Record<string, unknown> = {};
           for (const key of ['default', 'forceBackground', 'graceTurns', 'showCost', 'showTools', 'showTurns', 'showInput', 'showOutput', 'showContext', 'showTime', 'widgetMaxLines', 'widgetMaxLinesCompact', 'widgetDescLengthFull', 'widgetDescLengthCompact', 'widgetCompact', 'widgetShortcut', 'systemPromptMode', 'includeContextFiles', 'defaultThinking', 'defaultMaxTurns', 'loadSkillsImplicitly', 'loadExtensionsImplicitly', 'disableDefaultAgents']) {

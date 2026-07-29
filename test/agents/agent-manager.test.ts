@@ -490,6 +490,50 @@ describe("AgentManager", () => {
       expect(manager.getRecord(id)).toBeDefined();
     });
 
+    it("releases execution handles but preserves old unconsumed settled results", async () => {
+      manager = new AgentManager(onComplete);
+      const session = mockAgentSession();
+      mockModules.mockRunAgent.mockResolvedValue(mockRunResult({ session }));
+
+      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
+      const record = manager.getRecord(id)!;
+      await record.execution.promise;
+      record.lifecycle.completedAt = Date.now() - 20 * 60_000;
+
+      (manager as any).cleanup();
+
+      expect(manager.getRecord(id)).toBe(record);
+      expect(record.lifecycle.settled).toBe(true);
+      expect(record.result).toBe("done");
+      expect(record.lifecycle.status).toBe("completed");
+      expect(record.display.description).toBe("task");
+      expect(session.dispose).toHaveBeenCalledOnce();
+      expect(record.execution).toEqual({});
+    });
+
+    it("does not release a stopped runner before it has actually settled", async () => {
+      manager = new AgentManager(onComplete);
+      const deferred = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+
+      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
+      const record = manager.getRecord(id)!;
+      const session = mockAgentSession();
+      record.execution.session = session;
+      record.lifecycle.completedAt = Date.now() - 20 * 60_000;
+
+      manager.abort(id, "agent");
+      (manager as any).cleanup();
+
+      expect(record.lifecycle).toMatchObject({ status: "stopped", settled: false });
+      expect(session.dispose).not.toHaveBeenCalled();
+      expect(record.execution.abortController).toBeDefined();
+      expect(record.execution.promise).toBeDefined();
+
+      deferred.resolve(mockRunResult({ session, aborted: true }));
+      await record.execution.promise;
+    });
+
     it("evicts consumed completed records older than the cutoff", async () => {
       manager = new AgentManager(onComplete);
       mockModules.mockRunAgent.mockResolvedValue(mockRunResult());

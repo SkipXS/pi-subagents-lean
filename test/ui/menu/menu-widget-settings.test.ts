@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mockModules } from "../../menu-mock-setup.js";
 import { createMockCtx } from "../../menu-test-helpers.js";
 import { getAgentConfig } from "../../../src/agents/agent-types.js";
+import { getStore } from "../../../src/shell.js";
 
 // Capture SettingsList constructor calls from pi-tui
 let settingsListCalls: Array<{
@@ -18,6 +19,7 @@ let settingsListCalls: Array<{
   onChange: (id: string, newValue: string) => void;
   onCancel: () => void;
   options?: any;
+  list?: { updateValue: (id: string, value: string) => void };
 }> = [];
 
 let inputInstances: Array<{
@@ -33,7 +35,11 @@ vi.mock("@earendil-works/pi-tui", () => ({
     items: any[];
     constructor(items: any[], maxVisible: number, theme: any, onChange: any, onCancel: any, options?: any) {
       this.items = items;
-      settingsListCalls.push({ items, maxVisible, theme, onChange, onCancel, options });
+      settingsListCalls.push({ items, maxVisible, theme, onChange, onCancel, options, list: this });
+    }
+    updateValue(id: string, value: string) {
+      const item = this.items.find((entry) => entry.id === id);
+      if (item) item.currentValue = value;
     }
   },
   Input: class MockInput {
@@ -132,6 +138,27 @@ describe("showWidgetSettingsMenu — toggle onChange", () => {
     expect(mockModules.mockConfig.agent.widgetShowModelThinking).toBe(false);
   });
 
+  it("shows an error instead of success when saving a setting fails", async () => {
+    const store = getStore() as any;
+    const setCompact = mockModules.mockConfig.agent.widgetCompact;
+    const mutator = store.mutate.widget.setCompact;
+    store.mutate.widget.setCompact = () => { throw new Error("disk full"); };
+    try {
+      const ctx = createMockCtx();
+      await showWidgetSettingsMenu(ctx);
+      // SettingsList changes this optimistically before calling onChange.
+      const item = settingsListCalls[0].items.find((entry: any) => entry.id === "compact");
+      item.currentValue = "ON";
+      settingsListCalls[0].onChange("compact", "ON");
+      expect(ctx.ui.notify).toHaveBeenCalledWith("Failed to save setting: disk full", "error");
+      expect(ctx.ui.notify).not.toHaveBeenCalledWith("Force compact mode ON", "info");
+      expect(mockModules.mockConfig.agent.widgetCompact).toBe(setCompact);
+      expect(item.currentValue).toBe("OFF");
+    } finally {
+      store.mutate.widget.setCompact = mutator;
+    }
+  });
+
   it("toggles shortcut via onChange", async () => {
     mockModules.mockConfig.agent.widgetShortcut = false;
     const ctx = createMockCtx();
@@ -166,6 +193,25 @@ describe("showWidgetSettingsMenu — numeric submenu", () => {
     settingsListCalls = [];
     inputInstances = [];
     (getAgentConfig as any).mockImplementation(() => undefined);
+  });
+
+  it("keeps a numeric submenu open when persistence fails", async () => {
+    const store = getStore() as any;
+    const mutator = store.mutate.widget.setMaxLines;
+    store.mutate.widget.setMaxLines = () => { throw new Error("disk full"); };
+    try {
+      const ctx = createMockCtx();
+      await showWidgetSettingsMenu(ctx);
+      const item = settingsListCalls[0].items.find((entry: any) => entry.id === "maxLines");
+      const done = vi.fn();
+      item.submenu("12", done);
+      inputInstances[0].onSubmit!("18");
+
+      expect(done).not.toHaveBeenCalled();
+      expect(ctx.ui.notify).toHaveBeenCalledWith("Failed to save setting: disk full", "error");
+    } finally {
+      store.mutate.widget.setMaxLines = mutator;
+    }
   });
 
   it("full-mode max lines is editable here", async () => {

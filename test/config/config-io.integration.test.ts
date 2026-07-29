@@ -66,13 +66,24 @@ describe("config I/O with the real filesystem", () => {
     expect(configIo.loadConfig().agent.defaultThinking).toBeUndefined();
   });
 
-  it("reports a failed rename and removes the temporary file", async () => {
+  it.each(["{broken", "42", "null", "[]"]) ("reads corrupt config %j as defaults without overwriting its bytes", async (contents) => {
     const configIo = await loadConfigModule();
+    const configPath = join(testDir!, "subagents-lean.json");
+    writeFileSync(configPath, contents, "utf8");
+
+    expect(configIo.loadConfig()).toMatchObject({ concurrency: { default: 4 }, thinkingOverrides: {} });
+    expect(() => configIo.saveConfigAtomic(configIo.loadConfig())).toThrow("primary config is corrupt");
+    expect(readFileSync(configPath, "utf8")).toBe(contents);
+  });
+
+  it("throws for a failed rename and removes only its unique temporary file", async () => {
+    const configIo = await loadConfigModule();
+    const config = configIo.loadConfig();
     const configPath = join(testDir!, "subagents-lean.json");
     mkdirSync(configPath);
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    configIo.saveConfigAtomic(configIo.loadConfig());
+    expect(() => configIo.saveConfigAtomic(config)).toThrow();
 
     expect(error).toHaveBeenCalledWith(expect.stringContaining("Failed to save config"));
     expect(existsSync(configPath)).toBe(true);

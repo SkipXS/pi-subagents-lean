@@ -5,6 +5,7 @@
  * searchable pick-list submenu factory.
  */
 import type { Component, SettingsListTheme } from "@earendil-works/pi-tui";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Theme } from "../types.js";
 import { SearchableSelectDialog, type SelectOption } from "../searchable-select.js";
 import { parseModelKey } from "../../utils.js";
@@ -49,6 +50,27 @@ export function validateNumeric(value: string, min: number): number | undefined 
   const parsed = parseInt(value.trim(), 10);
   if (isNaN(parsed) || parsed < min) return undefined;
   return parsed;
+}
+
+/** Run a persistent setting change and expose failed writes to the menu user. */
+export function applyPersistedSetting(
+  ctx: ExtensionCommandContext,
+  mutate: () => void,
+  successMessage: string,
+  restoreUi?: () => void,
+): boolean {
+  try {
+    mutate();
+    ctx.ui.notify(successMessage, "info");
+    return true;
+  } catch (err) {
+    // SettingsList cycles its value before invoking onChange. Restore it only
+    // after ConfigStore has rolled the durable value back.
+    restoreUi?.();
+    const message = err instanceof Error ? err.message : String(err);
+    ctx.ui.notify(`Failed to save setting: ${message}`, "error");
+    return false;
+  }
 }
 
 /**

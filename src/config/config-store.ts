@@ -98,6 +98,8 @@ export interface ConfigStoreDeps {
 
 export class ConfigStore {
   private config: SubagentsConfig;
+  /** Last successfully loaded or saved config; used to roll back failed writes. */
+  private persistedConfig: SubagentsConfig;
   private sessionOverrides: SessionModelOverrides = { default: null };
   private sessionThinkingOverrides: SessionThinkingOverrides = {};
   private sessionShowCost: boolean | undefined;
@@ -108,6 +110,7 @@ export class ConfigStore {
 
   constructor(private readonly io: ConfigIO = fileConfigIO) {
     this.config = this.io.load();
+    this.persistedConfig = structuredClone(this.config);
   }
 
   // ── Reads ──────────────────────────────────────────────────────
@@ -267,14 +270,32 @@ export class ConfigStore {
         this.config.thinkingOverrides = {};
         this.persist();
       },
+      /** Atomically clear saved model/thinking overrides and global defaults. */
+      resetAllModelAndThinkingOverrides: (): void => {
+        const preserved: Record<string, unknown> = {};
+        for (const key of CONFIG_AGENT_NON_MODEL_KEYS) {
+          const val = this.config.agent[key];
+          if (val != null || key === "default" || key === "forceBackground") {
+            preserved[key] = val;
+          }
+        }
+        // The preserved list includes these fields for clearAllModelOverrides;
+        // reset-all deliberately clears both global defaults too.
+        preserved.default = null;
+        delete preserved.defaultThinking;
+        this.config.agent = preserved as SubagentsConfig["agent"];
+        this.config.thinkingOverrides = {};
+        this.persist();
+        this.syncWidgetSettings();
+      },
       setForceBackground: (enabled: boolean): void => {
         this.config.agent.forceBackground = enabled;
         this.persist();
       },
       setShowCost: (enabled: boolean): void => {
         this.config.agent.showCost = enabled;
-        this.sessionShowCost = undefined;
         this.persist();
+        this.sessionShowCost = undefined;
         this.widget?.setShowCost(enabled);
         this.syncWidgetStatsVisibility();
       },
@@ -450,6 +471,7 @@ export class ConfigStore {
   /** Re-read disk, reset session overrides + toggle state, re-sync deps. Called at session_start. */
   reload(): void {
     this.config = this.io.load();
+    this.persistedConfig = structuredClone(this.config);
     this.sessionOverrides = { default: null };
     this.sessionThinkingOverrides = {};
     this.sessionShowCost = undefined;
@@ -472,8 +494,15 @@ export class ConfigStore {
 
   // ── Private helpers ────────────────────────────────────────────
 
+  /** Save current config, restoring the last durable state if the write fails. */
   private persist(): void {
-    this.io.save(this.config);
+    try {
+      this.io.save(this.config);
+      this.persistedConfig = structuredClone(this.config);
+    } catch (err) {
+      this.config = structuredClone(this.persistedConfig);
+      throw err;
+    }
   }
 
   /** Apply the last known tool-expansion state while shortcut coupling is active. */

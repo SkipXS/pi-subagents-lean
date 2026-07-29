@@ -13,7 +13,7 @@ export interface ThinkingSelectSubmenuOptions {
   onSelect: (
     mode: "session" | "permanent" | "clear",
     thinking: ThinkingLevel | undefined,
-  ) => void;
+  ) => boolean | void;
 }
 
 export function createThinkingSelectSubmenu(
@@ -39,8 +39,7 @@ export function createThinkingSelectSubmenu(
 
     modeList.onSelect = (item) => {
       if (item.value === "clear") {
-        options.onSelect("clear", undefined);
-        done("clear");
+        if (options.onSelect("clear", undefined) !== false) done("clear");
         return;
       }
       selectedMode = item.value as "session" | "permanent";
@@ -50,8 +49,7 @@ export function createThinkingSelectSubmenu(
 
     levelList.onSelect = (item) => {
       const value = item.value === "inherit" ? undefined : item.value as ThinkingLevel;
-      options.onSelect(selectedMode, value);
-      done(item.value);
+      if (options.onSelect(selectedMode, value) !== false) done(item.value);
     };
     levelList.onCancel = () => done();
 

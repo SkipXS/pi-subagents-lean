@@ -127,13 +127,25 @@ describe("config I/O paths", () => {
     expect(mockGetAgentDir).toHaveBeenCalledOnce();
     expect(CUSTOM_PROMPT_PATH).toBe(join(agentDir, "subagents-lean-prompt.md"));
     expect(mockMkdirSync).toHaveBeenCalledWith(agentDir, { recursive: true });
-    expect(mockWriteFileSync).toHaveBeenCalledWith(`${configPath}.tmp`, expect.any(String), "utf-8");
-    expect(mockRenameSync).toHaveBeenCalledWith(`${configPath}.tmp`, configPath);
+    const tmpPath = mockWriteFileSync.mock.calls[0]![0] as string;
+    expect(tmpPath.startsWith(`${configPath}.`)).toBe(true);
+    expect(tmpPath.endsWith(".tmp")).toBe(true);
+    expect(mockRenameSync).toHaveBeenCalledWith(tmpPath, configPath);
+  });
+
+  it("uses a distinct temporary file for each save", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    vi.resetModules();
+
+    const { saveConfigAtomic } = await import("../../src/config/config-io.ts");
+    saveConfigAtomic({ agent: {} as any, concurrency: {} as any });
+    saveConfigAtomic({ agent: {} as any, concurrency: {} as any });
+
+    expect(mockWriteFileSync.mock.calls[0]![0]).not.toBe(mockWriteFileSync.mock.calls[1]![0]);
   });
 
   it("reports rename failures and removes the temporary config file", async () => {
     const agentDir = "/tmp/pi-agent";
-    const configPath = join(agentDir, "subagents-lean.json");
     const renameError = new Error("simulated rename failure");
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     mockGetAgentDir.mockReturnValue(agentDir);
@@ -142,11 +154,24 @@ describe("config I/O paths", () => {
 
     try {
       const { saveConfigAtomic } = await import("../../src/config/config-io.ts");
-      expect(() => saveConfigAtomic({ agent: {} as any, concurrency: {} as any })).not.toThrow();
-      expect(mockUnlinkSync).toHaveBeenCalledWith(`${configPath}.tmp`);
+      expect(() => saveConfigAtomic({ agent: {} as any, concurrency: {} as any })).toThrow(renameError);
+      const tmpPath = mockWriteFileSync.mock.calls[0]![0];
+      expect(mockUnlinkSync).toHaveBeenCalledWith(tmpPath);
       expect(error).toHaveBeenCalledWith(expect.stringContaining("simulated rename failure"));
     } finally {
       error.mockRestore();
     }
+  });
+
+  it.each(["{broken", "null", "42", "[]", JSON.stringify({ agent: "not-an-object" })])("uses defaults and blocks saves for corrupt primary config %j", async (contents) => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(contents);
+    vi.resetModules();
+
+    const { loadConfig, saveConfigAtomic } = await import("../../src/config/config-io.ts");
+    expect(loadConfig()).toMatchObject({ concurrency: { default: 4 }, thinkingOverrides: {} });
+    expect(() => saveConfigAtomic({ agent: {} as any, concurrency: {} as any }))
+      .toThrow("primary config is corrupt");
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
   });
 });
