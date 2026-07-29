@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-29
+
 ### Changed
 - **Project renamed to `pi-subagents-lean`.** Package metadata, GitHub links, diagnostics, persisted filenames, custom prompt filenames, and orchestration markers now use the Lean identity.
 - **Bundled agent catalog now uses inspectable Markdown.** `architect`, `scout`, `implementer`, `reviewer`, and `verifier` replace the embedded `general-purpose`/`Explore` pair; agent selection is explicit and silent general-purpose fallbacks are removed.
