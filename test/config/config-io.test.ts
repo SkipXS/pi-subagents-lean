@@ -43,6 +43,36 @@ describe("config I/O paths", () => {
     expect(loadConfig().agent.explorer).toBe(expected);
   });
 
+  it("defaults global concurrency to four", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(JSON.stringify({ agent: { default: null, forceBackground: false } }));
+    vi.resetModules();
+
+    const { loadConfig } = await import("../../src/config/config-io.ts");
+    expect(loadConfig().concurrency).toEqual({ default: 4 });
+  });
+
+  it("normalizes legacy provider and model limits out of saved config", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      agent: { default: null, forceBackground: false },
+      concurrency: {
+        default: 2,
+        providers: { llamacpp: 1 },
+        models: { "llamacpp/4b": 1 },
+      },
+    }));
+    vi.resetModules();
+
+    const { loadConfig, saveConfigAtomic } = await import("../../src/config/config-io.ts");
+    const config = loadConfig();
+    expect(config.concurrency).toEqual({ default: 2 });
+
+    saveConfigAtomic(config);
+    const saved = JSON.parse(mockWriteFileSync.mock.calls[0]![1]);
+    expect(saved.concurrency).toEqual({ default: 2 });
+  });
+
   it("drops an invalid global thinking value while loading config", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({

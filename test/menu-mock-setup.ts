@@ -153,11 +153,7 @@ vi.mock("../src/shell.js", () => {
       };
     },
     get concurrency() {
-      return {
-        default: mockModules.mockConfig.concurrency.default,
-        providers: mockModules.mockConfig.concurrency.providers ?? {},
-        models: mockModules.mockConfig.concurrency.models ?? {},
-      };
+      return { default: mockModules.mockConfig.concurrency.default };
     },
     get sessionDefaultModel() {
       return mockModules.mockSessionOverrides.default ?? null;
@@ -263,26 +259,7 @@ vi.mock("../src/shell.js", () => {
       },
       concurrency: {
         setDefault(n: number) { mockModules.mockConfig.concurrency.default = n; },
-        setProvider(key: string, n: number) {
-          if (!mockModules.mockConfig.concurrency.providers) mockModules.mockConfig.concurrency.providers = {};
-          mockModules.mockConfig.concurrency.providers[key] = n;
-        },
-        setModel(key: string, n: number) {
-          if (!mockModules.mockConfig.concurrency.models) mockModules.mockConfig.concurrency.models = {};
-          mockModules.mockConfig.concurrency.models[key] = n;
-        },
-        removeProvider(key: string) {
-          if (mockModules.mockConfig.concurrency.providers) delete mockModules.mockConfig.concurrency.providers[key];
-        },
-        removeModel(key: string) {
-          if (mockModules.mockConfig.concurrency.models) delete mockModules.mockConfig.concurrency.models[key];
-        },
-        reset() {
-          mockModules.mockConfig.concurrency = { default: 4 };
-        },
-        resetOverrides() {
-          mockModules.mockConfig.concurrency = { default: mockModules.mockConfig.concurrency.default };
-        },
+        reset() { mockModules.mockConfig.concurrency = { default: 4 }; },
       },
       session: {
         setOverride(type: string, model: string) { mockModules.mockSessionOverrides[type] = model; },

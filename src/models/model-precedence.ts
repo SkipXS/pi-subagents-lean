@@ -67,9 +67,8 @@ export interface SubagentsConfig {
   /** Persisted per-agent thinking overrides. */
   thinkingOverrides?: Record<string, ThinkingLevel | null | undefined>;
   concurrency: {
+    /** Global maximum number of agents that may run at once. */
     default: number;
-    providers?: Record<string, number>;
-    models?: Record<string, number>;
   };
 }
 

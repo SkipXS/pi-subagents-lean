@@ -1,8 +1,7 @@
 /**
  * agent-manager.test.ts — Tests for AgentManager.
  *
- * Covers: concurrency limits (per-model, per-provider, default),
- * queue draining, config updates, cost accumulation.
+ * Covers: global concurrency limits, queue draining, config updates, and cost accumulation.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -70,253 +69,107 @@ describe("AgentManager", () => {
   // ── Concurrency ──
 
   describe("concurrency", () => {
-    it("starts all agents when under per-model limit", () => {
-      const config: ConcurrencyConfig = { default: 4, models: {} };
+    it("uses the default global limit for agents with every model key, including none", () => {
+      const config: ConcurrencyConfig = { default: 2 };
       manager = new AgentManager(onComplete, config);
-      mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
+      const first = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValue(first.promise);
 
-      const ctx = fakeCtx();
       const pi = fakePi();
-
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "task 1", { description: "task 1", modelKey: "llamacpp/4b_small", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "task 2", { description: "task 2", modelKey: "llamacpp/4b_small", isBackground: true });
-      const id3 = manager.spawn(pi, ctx, "general-purpose", "task 3", { description: "task 3", modelKey: "llamacpp/4b_small", isBackground: true });
+      const ctx = fakeCtx();
+      const id1 = manager.spawn(pi, ctx, "general-purpose", "one", { description: "one", modelKey: "llamacpp/4b", isBackground: true });
+      const id2 = manager.spawn(pi, ctx, "general-purpose", "two", { description: "two", modelKey: "anthropic/claude", isBackground: true });
+      const id3 = manager.spawn(pi, ctx, "general-purpose", "three", { description: "three", isBackground: false });
 
       expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
       expect(manager.getRecord(id2)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id3)?.lifecycle.status).toBe("running");
-      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(3);
+      expect(manager.getRecord(id3)?.lifecycle.status).toBe("queued");
+      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2);
+      first.resolve(mockRunResult());
     });
 
-    it("queues agents when per-model limit is reached", () => {
-      const config: ConcurrencyConfig = { default: 1, models: { "llamacpp/4b_small": 1 } };
-      manager = new AgentManager(onComplete, config);
+    it("starts queued agents when a global slot frees", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const first = makeResolvablePromise();
+      const second = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 
+      const id1 = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", modelKey: "provider/first", isBackground: true });
+      const id2 = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", modelKey: "other/second", isBackground: true });
+      expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
+      expect(manager.getRecord(id2)?.lifecycle.status).toBe("queued");
+
+      first.resolve(mockRunResult());
+      await vi.waitFor(() => expect(manager.getRecord(id2)?.lifecycle.status).toBe("running"));
+      second.resolve(mockRunResult());
+    });
+
+    it("keeps foreground waiters pending until their queued agent completes", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const first = makeResolvablePromise();
+      const second = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", isBackground: true });
+      const queuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", isBackground: false });
+      const queuedPromise = manager.getRecord(queuedId)!.execution.promise!;
+      let settled = false;
+      void queuedPromise.then(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      first.resolve(mockRunResult());
+      await vi.waitFor(() => expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("running"));
+      expect(settled).toBe(false);
+
+      second.resolve(mockRunResult({ responseText: "queued done" }));
+      await expect(queuedPromise).resolves.toBe("queued done");
+    });
+
+    it("settles and reports a queued agent when it is stopped", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const first = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValue(first.promise);
+
+      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", isBackground: true });
+      const queuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", isBackground: true });
+      const queuedRecord = manager.getRecord(queuedId)!;
+
+      expect(manager.abort(queuedId, "user")).toBe(true);
+      await expect(queuedRecord.execution.promise).resolves.toBe("");
+      expect(queuedRecord.lifecycle.status).toBe("stopped");
+      expect(onComplete).toHaveBeenCalledWith(queuedRecord);
+      first.resolve(mockRunResult());
+    });
+
+    it("applies an expanded global limit immediately", () => {
+      manager = new AgentManager(onComplete, { default: 1 });
       const deferred = makeResolvablePromise();
       mockModules.mockRunAgent.mockReturnValue(deferred.promise);
 
-      const ctx = fakeCtx();
-      const pi = fakePi();
+      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", modelKey: "provider/one", isBackground: true });
+      const queued = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", modelKey: "other/two", isBackground: true });
+      manager.setConcurrency({ default: 2 });
 
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "task 1", { description: "task 1", modelKey: "llamacpp/4b_small", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "task 2", { description: "task 2", modelKey: "llamacpp/4b_small", isBackground: true });
-
-      expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("queued");
-      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(1);
-
+      expect(manager.getRecord(queued)?.lifecycle.status).toBe("running");
+      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2);
       deferred.resolve(mockRunResult());
     });
 
     it("keeps a queued resolved config snapshot across registry-style mutation", async () => {
-      manager = new AgentManager(onComplete, { default: 1, models: { "test/model": 1 } });
+      manager = new AgentManager(onComplete, { default: 1 });
       const first = makeResolvablePromise();
       const second = makeResolvablePromise();
       mockModules.mockRunAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
       const config = { name: "review", description: "worktree", systemPrompt: "frozen prompt", tools: ["read"] };
-      const ctx = fakeCtx();
-      const pi = fakePi();
-      manager.spawn(pi, ctx, "review", "first", { description: "first", modelKey: "test/model", isBackground: true });
-      manager.spawn(pi, ctx, "review", "queued", { description: "queued", modelKey: "test/model", isBackground: true, agentConfig: config });
-      // Simulate the live parent registry/config object being refreshed.
+      manager.spawn(fakePi(), fakeCtx(), "review", "first", { description: "first", modelKey: "test/model", isBackground: true });
+      manager.spawn(fakePi(), fakeCtx(), "review", "queued", { description: "queued", agentConfig: config, isBackground: true });
       config.systemPrompt = "refreshed parent prompt";
       config.tools[0] = "bash";
       first.resolve(mockRunResult());
       await vi.waitFor(() => expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2));
       expect(mockModules.mockRunAgent.mock.calls[1]?.[3].agentConfig).toMatchObject({ systemPrompt: "frozen prompt", tools: ["read"] });
       second.resolve(mockRunResult());
-    });
-
-    it("starts queued agent when running agent completes", async () => {
-      const config: ConcurrencyConfig = { default: 1, models: { "llamacpp/4b_small": 1 } };
-      manager = new AgentManager(onComplete, config);
-
-      const deferred1 = makeResolvablePromise();
-      const deferred2 = makeResolvablePromise();
-      mockModules.mockRunAgent
-        .mockReturnValueOnce(deferred1.promise)
-        .mockReturnValueOnce(deferred2.promise);
-
-      const ctx = fakeCtx();
-      const pi = fakePi();
-
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "task 1", { description: "task 1", modelKey: "llamacpp/4b_small", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "task 2", { description: "task 2", modelKey: "llamacpp/4b_small", isBackground: true });
-
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("queued");
-
-      deferred1.resolve(mockRunResult());
-      await new Promise((r) => setTimeout(r, 10));
-
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("running");
-      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2);
-
-      deferred2.resolve(mockRunResult());
-    });
-
-    it("queues agents per-model independently", () => {
-      const config: ConcurrencyConfig = {
-        default: 4,
-        models: { "llamacpp/27b": 1, "llamacpp/4b": 4 },
-      };
-      manager = new AgentManager(onComplete, config);
-
-      const deferred1 = makeResolvablePromise();
-      const deferred2 = makeResolvablePromise();
-      const deferred3 = makeResolvablePromise();
-      mockModules.mockRunAgent
-        .mockReturnValueOnce(deferred1.promise)
-        .mockReturnValueOnce(deferred2.promise)
-        .mockReturnValueOnce(deferred3.promise);
-
-      const ctx = fakeCtx();
-      const pi = fakePi();
-
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "task 1", { description: "task 1", modelKey: "llamacpp/27b", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "task 2", { description: "task 2", modelKey: "llamacpp/4b", isBackground: true });
-      const id3 = manager.spawn(pi, ctx, "general-purpose", "task 3", { description: "task 3", modelKey: "llamacpp/27b", isBackground: true });
-
-      expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id3)?.lifecycle.status).toBe("queued");
-      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2);
-
-      deferred1.resolve(mockRunResult());
-      deferred2.resolve(mockRunResult());
-      deferred3.resolve(mockRunResult());
-    });
-
-    it("applies default limit for unknown models", () => {
-      const config: ConcurrencyConfig = { default: 2, models: {} };
-      manager = new AgentManager(onComplete, config);
-
-      const deferred1 = makeResolvablePromise();
-      mockModules.mockRunAgent.mockReturnValue(deferred1.promise);
-
-      const ctx = fakeCtx();
-      const pi = fakePi();
-
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "task 1", { description: "task 1", modelKey: "claude/sonnet", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "task 2", { description: "task 2", modelKey: "claude/sonnet", isBackground: true });
-      const id3 = manager.spawn(pi, ctx, "general-purpose", "task 3", { description: "task 3", modelKey: "claude/sonnet", isBackground: true });
-
-      expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id3)?.lifecycle.status).toBe("queued");
-      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2);
-
-      deferred1.resolve(mockRunResult());
-    });
-
-    it("applies per-provider limit to all models from that provider", () => {
-      const config: ConcurrencyConfig = {
-        default: 4,
-        providers: { llamacpp: 2 },
-        models: {},
-      };
-      manager = new AgentManager(onComplete, config);
-
-      const deferred1 = makeResolvablePromise();
-      const deferred2 = makeResolvablePromise();
-      const deferred3 = makeResolvablePromise();
-      mockModules.mockRunAgent
-        .mockReturnValueOnce(deferred1.promise)
-        .mockReturnValueOnce(deferred2.promise)
-        .mockReturnValueOnce(deferred3.promise);
-
-      const ctx = fakeCtx();
-      const pi = fakePi();
-
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "task 1", { description: "task 1", modelKey: "llamacpp/4b", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "task 2", { description: "task 2", modelKey: "llamacpp/27b", isBackground: true });
-      const id3 = manager.spawn(pi, ctx, "general-purpose", "task 3", { description: "task 3", modelKey: "llamacpp/3b", isBackground: true });
-      const id4 = manager.spawn(pi, ctx, "general-purpose", "task 4", { description: "task 4", modelKey: "claude/sonnet", isBackground: true });
-
-      expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id3)?.lifecycle.status).toBe("queued");
-      expect(manager.getRecord(id4)?.lifecycle.status).toBe("running");
-      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(3);
-
-      deferred1.resolve(mockRunResult());
-      deferred2.resolve(mockRunResult());
-      deferred3.resolve(mockRunResult());
-    });
-
-    it("per-model limit overrides per-provider limit", () => {
-      const config: ConcurrencyConfig = {
-        default: 4,
-        providers: { llamacpp: 2 },
-        models: { "llamacpp/4b": 1 },
-      };
-      manager = new AgentManager(onComplete, config);
-
-      const deferred = makeResolvablePromise();
-      mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-
-      const ctx = fakeCtx();
-      const pi = fakePi();
-
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "task 1", { description: "task 1", modelKey: "llamacpp/4b", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "task 2", { description: "task 2", modelKey: "llamacpp/4b", isBackground: true });
-
-      expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("queued");
-      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(1);
-
-      deferred.resolve(mockRunResult());
-    });
-
-    it("applies new limit when setConcurrency is called", () => {
-      const config: ConcurrencyConfig = { default: 1, models: { "llamacpp/4b": 1 } };
-      manager = new AgentManager(onComplete, config);
-
-      const deferred = makeResolvablePromise();
-      mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-
-      const ctx = fakeCtx();
-      const pi = fakePi();
-
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "task 1", { description: "task 1", modelKey: "llamacpp/4b", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "task 2", { description: "task 2", modelKey: "llamacpp/4b", isBackground: true });
-
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("queued");
-
-      manager.setConcurrency({ default: 1, models: { "llamacpp/4b": 2 } });
-
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("running");
-      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2);
-
-      deferred.resolve(mockRunResult());
-    });
-
-    it("queues foreground agent when limit is reached", () => {
-      const config: ConcurrencyConfig = { default: 1, models: { "llamacpp/4b": 1 } };
-      manager = new AgentManager(onComplete, config);
-
-      const deferred1 = makeResolvablePromise();
-      const deferred2 = makeResolvablePromise();
-      mockModules.mockRunAgent
-        .mockReturnValueOnce(deferred1.promise)
-        .mockReturnValueOnce(deferred2.promise);
-
-      const ctx = fakeCtx();
-      const pi = fakePi();
-
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "bg task", { description: "bg task", modelKey: "llamacpp/4b", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "fg task", { description: "fg task", modelKey: "llamacpp/4b", isBackground: false });
-
-      expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
-      expect(manager.getRecord(id2)?.lifecycle.status).toBe("queued");
-      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(1);
-
-      deferred1.resolve(mockRunResult());
-
-      return new Promise((r) => setTimeout(r, 10)).then(() => {
-        expect(manager.getRecord(id2)?.lifecycle.status).toBe("running");
-        expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2);
-        deferred2.resolve(mockRunResult());
-      });
     });
   });
 
@@ -429,7 +282,7 @@ describe("AgentManager", () => {
 
   describe("totalAgentCount", () => {
     it("counts accepted running and queued spawns exactly once", async () => {
-      const config: ConcurrencyConfig = { default: 1, models: { "test/model": 1 } };
+      const config: ConcurrencyConfig = { default: 1 };
       manager = new AgentManager(onComplete, config);
       const first = makeResolvablePromise();
       const second = makeResolvablePromise();
@@ -453,14 +306,18 @@ describe("AgentManager", () => {
       await manager.getRecord(id1)!.execution.promise;
     });
 
-    it("does not count a synchronously failed start", () => {
-      manager = new AgentManager(onComplete);
-      mockModules.mockRunAgent.mockImplementationOnce(() => {
-        throw new Error("start failed");
-      });
+    it("releases global capacity after a synchronously failed start", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      mockModules.mockRunAgent
+        .mockImplementationOnce(() => { throw new Error("start failed"); })
+        .mockResolvedValueOnce(mockRunResult());
 
       expect(() => manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" })).toThrow("start failed");
       expect(manager.getTotalAgentCount()).toBe(0);
+
+      const nextId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "next", { description: "next" });
+      expect(manager.getRecord(nextId)?.lifecycle.status).toBe("running");
+      await manager.getRecord(nextId)!.execution.promise;
     });
 
     it("persists after an agent is evicted", async () => {

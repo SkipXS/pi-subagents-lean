@@ -154,16 +154,8 @@ export class ConfigStore {
     };
   }
 
-  get concurrency(): {
-    default: number;
-    providers: Record<string, number>;
-    models: Record<string, number>;
-  } {
-    return {
-      default: this.config.concurrency.default,
-      providers: this.config.concurrency.providers ?? {},
-      models: this.config.concurrency.models ?? {},
-    };
+  get concurrency(): { default: number } {
+    return { default: this.config.concurrency.default };
   }
 
   get sessionDefaultModel(): string | null {
@@ -401,33 +393,8 @@ export class ConfigStore {
         this.persist();
         this.applyConcurrency();
       },
-      setProvider: (key: string, n: number): void => {
-        this.config.concurrency.providers = { ...(this.config.concurrency.providers ?? {}), [key]: n };
-        this.persist();
-        this.applyConcurrency();
-      },
-      setModel: (key: string, n: number): void => {
-        this.config.concurrency.models = { ...(this.config.concurrency.models ?? {}), [key]: n };
-        this.persist();
-        this.applyConcurrency();
-      },
-      removeProvider: (key: string): void => {
-        if (this.config.concurrency.providers) delete this.config.concurrency.providers[key];
-        this.persist();
-        this.applyConcurrency();
-      },
-      removeModel: (key: string): void => {
-        if (this.config.concurrency.models) delete this.config.concurrency.models[key];
-        this.persist();
-        this.applyConcurrency();
-      },
       reset: (): void => {
         this.config.concurrency = { ...DEFAULT_CONCURRENCY };
-        this.persist();
-        this.applyConcurrency();
-      },
-      resetOverrides: (): void => {
-        this.config.concurrency = { default: this.config.concurrency.default };
         this.persist();
         this.applyConcurrency();
       },

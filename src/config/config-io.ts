@@ -63,8 +63,11 @@ export function loadConfig(): SubagentsConfig {
     raw = {} as SubagentsConfig;
   }
 
-  // @ts-expect-error TS2783: spread may override 'default', which is intentional (loaded value wins)
-  const concurrency = { default: 4, ...(raw.concurrency ?? {}) } as SubagentsConfig["concurrency"];
+  // Legacy provider/model limits are intentionally discarded. Saving this
+  // normalized config after any mutation removes them from disk.
+  const concurrency: SubagentsConfig["concurrency"] = {
+    default: raw.concurrency?.default ?? DEFAULT_CONCURRENCY.default,
+  };
   const agent = { ...DEFAULT_AGENT, ...raw.agent };
   // v1.5 and earlier shipped `Explore`; retain its model selection for the new
   // lowercase `explorer` default only when the user did not configure that key.

@@ -8,7 +8,6 @@
  * Module structure:
  *   - helpers.ts: shared helpers (buildSettingsListTheme, buildSelectListTheme, validateNumeric)
  *   - menu-model-settings.ts: showModelSettingsMenu
- *   - menu-concurrency.ts: showConcurrencySettingsMenu
  *   - menu-execution.ts: showExecutionMenu
  *   - menu-widget-settings.ts: showWidgetSettingsMenu
  *   - menu-running-agents.ts: showRunningAgentsMenu
@@ -23,7 +22,6 @@ import { SelectList, type SelectItem } from "@earendil-works/pi-tui";
 import { buildSelectListTheme } from "./helpers.js";
 import { SettingsListWrapper } from "./wrappers/settings-list.js";
 import { showModelSettingsMenu } from "./menu-model-settings.js";
-import { showConcurrencySettingsMenu } from "./menu-concurrency.js";
 import { showExecutionMenu } from "./menu-execution.js";
 import { showWidgetSettingsMenu } from "./menu-widget-settings.js";
 import { showRunningAgentsMenu } from "./menu-running-agents.js";
@@ -64,9 +62,9 @@ export async function showSettingsMenu(
 ): Promise<void> {
   const items: SelectItem[] = [
     { value: "models", label: "Agent settings", description: "Set global and per-agent model/thinking overrides" },
-    { value: "execution", label: "Execution", description: "Default concurrency, background mode, and max turns" },
+    { value: "execution", label: "Execution", description: "Global concurrency, background mode, and max turns" },
     { value: "widget", label: "Widget", description: "Appearance, sizing, behavior, and usage stats" },
-    { value: "advanced", label: "Advanced", description: "Limits, prompts, agent behavior, and diagnostics" },
+    { value: "advanced", label: "Advanced", description: "Prompts, agent behavior, and diagnostics" },
   ];
 
   await runSelectMenu(ctx, "Settings", items, async (choice) => {
@@ -74,17 +72,13 @@ export async function showSettingsMenu(
       case "models": await showModelSettingsMenu(ctx, modelOptions); break;
       case "execution": await showExecutionMenu(ctx); break;
       case "widget": await showWidgetSettingsMenu(ctx); break;
-      case "advanced": await showAdvancedMenu(ctx, modelOptions); break;
+      case "advanced": await showAdvancedMenu(ctx); break;
     }
   });
 }
 
-async function showAdvancedMenu(
-  ctx: ExtensionCommandContext,
-  modelOptions: string[],
-): Promise<void> {
+async function showAdvancedMenu(ctx: ExtensionCommandContext): Promise<void> {
   const items: SelectItem[] = [
-    { value: "concurrency", label: "Concurrency limits", description: "Per-provider and per-model agent slot limits" },
     { value: "systemprompt", label: "System prompt, context, skills & extensions", description: "Prompt mode and implicit loading defaults" },
     { value: "behavior", label: "Agent behavior & discovery", description: "Grace turns and built-in agent discovery" },
     { value: "diagnostics", label: "Diagnostics", description: "Inspect discovered agent types" },
@@ -92,11 +86,6 @@ async function showAdvancedMenu(
 
   await runSelectMenu(ctx, "Advanced", items, async (choice) => {
     switch (choice) {
-      case "concurrency": await showConcurrencySettingsMenu(ctx, modelOptions, {
-        includeDefault: false,
-        resetDefault: false,
-        title: "Concurrency Limits",
-      }); break;
       case "systemprompt": await showSystemPromptMenu(ctx); break;
       case "behavior": await showSpawnOptionsMenu(ctx, "behavior"); break;
       case "diagnostics": await showDiagnosticsMenu(ctx); break;

@@ -2,16 +2,29 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { SettingsList, type SettingItem } from "@earendil-works/pi-tui";
-import { createDefaultConcurrencySetting } from "./menu-concurrency.js";
 import { buildSettingsListTheme } from "./helpers.js";
 import { createNumericSubmenu } from "./submenus/numeric-input.js";
 import { SettingsListWrapper } from "./wrappers/settings-list.js";
 import { getStore } from "../../shell.js";
 
+function createConcurrencySetting(ctx: ExtensionCommandContext): SettingItem {
+  const store = getStore();
+  return {
+    id: "defaultConcurrency",
+    label: "Concurrency limit",
+    currentValue: String(store.concurrency.default),
+    description: "Maximum number of agents that run at once; additional agents queue automatically.",
+    submenu: createNumericSubmenu(ctx, (parsed) => {
+      store.mutate.concurrency.setDefault(parsed);
+      ctx.ui.notify(`Concurrency limit set to ${parsed}`, "info");
+    }),
+  };
+}
+
 export async function showExecutionMenu(ctx: ExtensionCommandContext): Promise<void> {
   const store = getStore();
   const items: SettingItem[] = [
-    createDefaultConcurrencySetting(ctx),
+    createConcurrencySetting(ctx),
     {
       id: "forceBackground",
       label: "Force background",

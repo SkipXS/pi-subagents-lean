@@ -20,7 +20,7 @@ Every tool the LLM sees costs tokens — in the system prompt and in every turn.
 
 Names like `Agent`, `StopAgent`, `AgentStatus`, `run_in_background`, `worktree_path` are self-documenting. Results reinforce correct usage with clear success/error messages.
 
-**Result:** foreground and background agents, custom agent types, per-model concurrency, cost tracking, steering, model overrides, and agent status — all with minimal token overhead.
+**Result:** foreground and background agents, custom agent types, global concurrency, cost tracking, steering, model overrides, and agent status — all with minimal token overhead.
 
 ## Features
 
@@ -29,7 +29,7 @@ Names like `Agent`, `StopAgent`, `AgentStatus`, `run_in_background`, `worktree_p
 - **Custom agent types** — `.md` files with YAML frontmatter (tools, model, thinking, turn/token limits)
 - **Manual spawn** — from `/agents`, no LLM round-trip; full control over model, thinking, turns, tokens, background
 - **Model & thinking resolution** — shared 6-level precedence chain; set once, forget
-- **Concurrency** — per-model and per-provider slot limits with automatic queuing
+- **Concurrency** — global agent slot limit with automatic queuing
 - **Steering** — inject mid-execution guidance into running agents
 - **Cost & usage tracking** — input/output/cache tokens and dollar cost per agent (toggle in stats)
 - **Live widget** — persistent status bar with running/completed agents, full and compact modes
@@ -246,9 +246,9 @@ Management menu with three sections:
 - **Spawn agent** — manually spawn without the LLM. Pick a type, enter a prompt, then set model/background or open Advanced options for worktree, type, thinking, limits, grace turns, and description.
 - **Settings**
   - **Agent settings** — effective model and thinking with source; global and per-agent session/saved overrides
-  - **Execution** — default concurrency, force background, default max turns
+  - **Execution** — global concurrency, force background, default max turns
   - **Widget** — all appearance, sizing, behavior, and individual usage-stat controls in one menu
-  - **Advanced** — provider/model concurrency limits, system prompt/context/skills/extensions, agent behavior/discovery, and diagnostics
+  - **Advanced** — system prompt/context/skills/extensions, agent behavior/discovery, and diagnostics
 
 ## Interface
 
@@ -325,12 +325,7 @@ Fullscreen transcript viewer for agent sessions — opens automatically from `/a
     "reviewer": "high"
   },
   "concurrency": {
-    "default": 4,
-    "providers": {
-      "llamacpp": 1,
-      "ai.lan": 2
-    },
-    "models": {}
+    "default": 4
   }
 }
 ```

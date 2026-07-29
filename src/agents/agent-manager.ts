@@ -1,7 +1,5 @@
 /**
- * agent-manager.ts — Tracks agents, per-model concurrency, background execution.
- *
- * Supports per-model and per-provider concurrency limits with queuing.
+ * agent-manager.ts — Tracks agents, global concurrency, background execution.
  */
 
 import { randomUUID } from "node:crypto";
@@ -34,7 +32,7 @@ const AGENT_ID_PREFIX_LENGTH = 17;
 
 
 
-/** Default per-model concurrency limit when not specified in config. */
+/** Default global concurrency limit when not specified in config. */
 const DEFAULT_CONCURRENCY_LIMIT = 4;
 
 /** Whether the agent status is terminal (no longer running or queued). */
@@ -42,20 +40,15 @@ function isTerminalStatus(status: AgentStatus): boolean {
   return status !== "running" && status !== "queued";
 }
 
-/** Configuration for per-model concurrency limits. */
+/** Configuration for the global concurrency limit. */
 export interface ConcurrencyConfig {
-  /** Default concurrency limit for models not in the models or providers map. */
   default: number;
-  /** Per-provider concurrency limits keyed by provider name (e.g. "llamacpp"). */
-  providers?: Record<string, number>;
-  /** Per-model concurrency limits keyed by "provider/modelId". */
-  models?: Record<string, number>;
 }
 
 type OnAgentComplete = (record: AgentRecord) => void;
 type OnAgentStart = (record: AgentRecord) => void;
 
-/** Internal per-model concurrency state. */
+/** Internal global concurrency state. */
 interface ConcurrencySlot {
   limit: number;
   running: number;
@@ -90,17 +83,11 @@ export class AgentManager {
   /** Retention cutoff in minutes for finished agents. Updated at runtime via setRetentionMinutes. */
   private retentionMinutes = DEFAULT_RETENTION_MINUTES;
 
-  /** Per-model concurrency slots keyed by "provider/modelId". */
-  private concurrencySlots = new Map<string, ConcurrencySlot>();
+  /** All agents share one concurrency slot, regardless of model. */
+  private concurrencySlot: ConcurrencySlot;
 
-  /** Per-provider concurrency slots — shared pool for all models from a provider. */
-  private providerSlots = new Map<string, ConcurrencySlot>();
-
-  /** Default concurrency limit for models not in the slots map. */
-  private defaultConcurrency: number;
-
-  /** Queue of agents waiting to start, keyed by modelKey. */
-  private queue: { id: string; modelKey: string; args: SpawnArgs }[] = [];
+  /** Queue of agents waiting to start, including completion for foreground waiters. */
+  private queue: { id: string; args: SpawnArgs; resolve: (result: string) => void }[] = [];
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -110,17 +97,10 @@ export class AgentManager {
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
-    this.defaultConcurrency = concurrency?.default ?? DEFAULT_CONCURRENCY_LIMIT;
-
-    // Initialize per-provider slots from config (shared pool)
-    for (const [provider, limit] of Object.entries(concurrency?.providers ?? {})) {
-      this.applyConcurrencyEntry(this.providerSlots, provider, limit);
-    }
-
-    // Initialize per-model slots from config
-    for (const [modelKey, limit] of Object.entries(concurrency?.models ?? {})) {
-      this.applyConcurrencyEntry(this.concurrencySlots, modelKey, limit);
-    }
+    this.concurrencySlot = {
+      limit: Math.max(1, concurrency?.default ?? DEFAULT_CONCURRENCY_LIMIT),
+      running: 0,
+    };
 
     this.cleanupInterval = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
     this.cleanupInterval.unref();
@@ -131,67 +111,15 @@ export class AgentManager {
     this.retentionMinutes = Math.max(1, minutes);
   }
 
-  /**
-   * Update the concurrency configuration.
-   * Existing slots are updated; new slots are created; removed slots stay
-   * (their running count will drain naturally). The queue is drained after
-   * update so newly expanded limits take effect immediately.
-   */
+  /** Update the global concurrency limit and immediately drain the queue. */
   setConcurrency(config: ConcurrencyConfig): void {
-    this.defaultConcurrency = config.default;
-
-    // Update per-provider slots (shared pool)
-    for (const [provider, limit] of Object.entries(config.providers ?? {})) {
-      this.applyConcurrencyEntry(this.providerSlots, provider, limit);
-    }
-
-    // Update existing slots and create new ones
-    for (const [modelKey, limit] of Object.entries(config.models ?? {})) {
-      this.applyConcurrencyEntry(this.concurrencySlots, modelKey, limit);
-    }
-
-    // Start queued agents if the new limits allow
+    this.concurrencySlot.limit = Math.max(1, config.default);
     this.drainQueue();
   }
 
   /**
-   * Update or create a concurrency slot entry.
-   * If the key already exists in the map, updates its limit.
-   * Otherwise, creates a new slot with the given limit and running=0.
-   */
-  private applyConcurrencyEntry(map: Map<string, ConcurrencySlot>, key: string, limit: number): void {
-    const safeLimit = Math.max(1, limit);
-    const existing = map.get(key);
-    if (existing) {
-      existing.limit = safeLimit;
-    } else {
-      map.set(key, { limit: safeLimit, running: 0 });
-    }
-  }
-
-  /**
-   * Get or create a concurrency slot for a model key.
-   * Precedence: per-model slot > per-provider shared slot > default (per-model).
-   */
-  private getSlot(modelKey: string): ConcurrencySlot {
-    // 1. Check per-model slot
-    let slot = this.concurrencySlots.get(modelKey);
-    if (slot) return slot;
-
-    // 2. Check per-provider shared slot
-    const provider = modelKey.split("/")[0];
-    const providerSlot = this.providerSlots.get(provider);
-    if (providerSlot) return providerSlot;
-
-    // 3. Create per-model slot with default limit
-    slot = { limit: Math.max(1, this.defaultConcurrency), running: 0 };
-    this.concurrencySlots.set(modelKey, slot);
-    return slot;
-  }
-
-  /**
    * Spawn an agent and return its ID immediately (for background use).
-   * If the per-model concurrency limit is reached, the agent is queued.
+   * If the global concurrency limit is reached, the agent is queued.
    */
   spawn(
     pi: ExtensionAPI,
@@ -208,18 +136,12 @@ export class AgentManager {
       : options;
     const args: SpawnArgs = { pi, ctx, type, prompt, options: frozenOptions };
 
-    // Check concurrency — applies to both foreground and background agents
-    let queued = false;
-    let concurrencySlot: ConcurrencySlot | undefined;
-    if (options.modelKey) {
-      const slot = this.getSlot(options.modelKey);
-      if (slot.running >= slot.limit) {
-        queued = true;
-        this.queue.push({ id, modelKey: options.modelKey, args });
-      } else {
-        concurrencySlot = slot;
-      }
-    }
+    // Check global concurrency — applies to every foreground and background agent.
+    const queued = this.concurrencySlot.running >= this.concurrencySlot.limit;
+    let resolveQueued: ((result: string) => void) | undefined;
+    const queuedPromise = queued
+      ? new Promise<string>((resolve) => { resolveQueued = resolve; })
+      : undefined;
 
     const record: AgentRecord = {
       id,
@@ -236,6 +158,7 @@ export class AgentManager {
       },
       execution: {
         abortController,
+        promise: queuedPromise,
       },
       stats: {
         lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
@@ -250,6 +173,7 @@ export class AgentManager {
 
     // Queued agents have been successfully accepted even though their start is deferred.
     if (queued) {
+      this.queue.push({ id, args, resolve: resolveQueued! });
       this.totalAgentCount++;
       return id;
     }
@@ -257,9 +181,11 @@ export class AgentManager {
     // startAgent can throw — clean up record so callers don't see an orphan.
     // Count only after a synchronous start succeeds.
     try {
-      this.startAgent(id, record, args, concurrencySlot);
+      this.startAgent(id, record, args, this.concurrencySlot);
     } catch (err) {
+      this.concurrencySlot.running--;
       this.agents.delete(id);
+      this.drainQueue();
       throw err;
     }
     this.totalAgentCount++;
@@ -268,16 +194,15 @@ export class AgentManager {
 
   /**
    * Actually start an agent (called immediately or from queue drain).
-   * When concurrencySlot is provided, the slot's running count is managed
-   * (incremented on start, decremented in finally).
+   * The global slot's running count is incremented on start and decremented in finally.
    */
   private startAgent(
     id: string,
     record: AgentRecord,
     { pi, ctx, type, prompt, options }: SpawnArgs,
-    concurrencySlot?: ConcurrencySlot,
+    concurrencySlot: ConcurrencySlot,
   ) {
-    if (concurrencySlot) concurrencySlot.running++;
+    concurrencySlot.running++;
 
     record.lifecycle.status = "running";
     record.lifecycle.startedAt = Date.now();
@@ -372,14 +297,15 @@ export class AgentManager {
           record.execution.outputLog = undefined;
         }
 
-        // Decrement per-model concurrency count
-        if (concurrencySlot) concurrencySlot.running--;
+        // Decrement global concurrency count
+        concurrencySlot.running--;
 
         this.safeNotifyComplete(record);
         this.drainQueue();
       });
 
     record.execution.promise = promise;
+    return promise;
   }
 
   /** Notify completion callback, ignoring any errors. */
@@ -443,24 +369,25 @@ export class AgentManager {
     };
   }
 
-  /** Start queued agents up to the per-model concurrency limits. */
+  /** Start queued agents while global capacity is available. */
   private drainQueue() {
     const started = new Set<string>();
     for (const entry of this.queue) {
+      if (this.concurrencySlot.running >= this.concurrencySlot.limit) break;
       const record = this.agents.get(entry.id);
       if (!record || record.lifecycle.status !== "queued") continue;
 
-      const slot = this.getSlot(entry.modelKey);
-      if (slot.running >= slot.limit) continue;
-
       try {
-        this.startAgent(entry.id, record, entry.args, slot);
+        const promise = this.startAgent(entry.id, record, entry.args, this.concurrencySlot);
+        promise.then(entry.resolve);
         started.add(entry.id);
       } catch (err) {
         // Late failure — surface on the record so the user can see it
+        this.concurrencySlot.running--;
         record.lifecycle.status = "error";
         record.error = errorMessage(err);
         record.lifecycle.completedAt = Date.now();
+        entry.resolve("");
         started.add(entry.id);
         this.safeNotifyComplete(record);
       }
@@ -517,7 +444,10 @@ export class AgentManager {
    * Returns true if the agent was stopped, false if it wasn't running/queued.
    */
   private stopAgent(record: AgentRecord, stoppedBy?: StopInitiator): boolean {
-    if (record.lifecycle.status === "queued") {
+    const wasQueued = record.lifecycle.status === "queued";
+    if (wasQueued) {
+      const queuedEntry = this.queue.find(q => q.id === record.id);
+      queuedEntry?.resolve("");
       this.queue = this.queue.filter(q => q.id !== record.id);
     } else if (record.lifecycle.status !== "running") {
       return false;
@@ -527,6 +457,7 @@ export class AgentManager {
     record.lifecycle.status = "stopped";
     record.lifecycle.stoppedBy = stoppedBy;
     record.lifecycle.completedAt = Date.now();
+    if (wasQueued) this.safeNotifyComplete(record);
     return true;
   }
 
@@ -552,6 +483,7 @@ export class AgentManager {
 
   dispose() {
     clearInterval(this.cleanupInterval);
+    for (const entry of this.queue) entry.resolve("");
     this.queue = [];
     for (const record of this.agents.values()) {
       record.execution.session?.dispose();

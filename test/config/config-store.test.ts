@@ -130,10 +130,9 @@ describe("ConfigStore reads", () => {
     expect(new ConfigStore(io).agent.defaultThinking).toBeUndefined();
   });
 
-  it("concurrency providers/models default to {}", () => {
+  it("exposes only the global concurrency limit", () => {
     const store = new ConfigStore(memIO().io);
-    expect(store.concurrency.providers).toEqual({});
-    expect(store.concurrency.models).toEqual({});
+    expect(store.concurrency).toEqual({ default: 4 });
   });
 });
 
@@ -302,7 +301,7 @@ describe("ConfigStore persisted mutations", () => {
     expect(calls.some((c) => c.startsWith("setWidgetShortcut"))).toBe(true);
   });
 
-  it("concurrency setters persist and call manager.setConcurrency", () => {
+  it("global concurrency setter persists and calls manager.setConcurrency", () => {
     const { io, saves } = memIO();
     const { m, concurrencies } = managerStub();
     const store = new ConfigStore(io);
@@ -310,33 +309,17 @@ describe("ConfigStore persisted mutations", () => {
     concurrencies.length = 0;
 
     store.mutate.concurrency.setDefault(8);
-    store.mutate.concurrency.setProvider("llamacpp", 2);
-    store.mutate.concurrency.setModel("anthropic/claude", 3);
 
-    expect(store.concurrency.default).toBe(8);
-    expect(store.concurrency.providers).toEqual({ llamacpp: 2 });
-    expect(store.concurrency.models).toEqual({ "anthropic/claude": 3 });
-    expect(saves).toHaveLength(3);
-    expect(concurrencies).toHaveLength(3);
+    expect(store.concurrency).toEqual({ default: 8 });
+    expect(saves).toHaveLength(1);
+    expect(concurrencies).toEqual([{ default: 8 }]);
   });
 
-  it("removeProvider / removeModel delete and re-sync", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false }, concurrency: { default: 4, providers: { llamacpp: 2 }, models: { "a/b": 1 } } });
-    const { m } = managerStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ manager: m });
-    store.mutate.concurrency.removeProvider("llamacpp");
-    store.mutate.concurrency.removeModel("a/b");
-    expect(store.concurrency.providers).toEqual({});
-    expect(store.concurrency.models).toEqual({});
-  });
-
-  it("resetConcurrency restores defaults and re-syncs", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false }, concurrency: { default: 4, providers: { x: 1 } } });
+  it("resetConcurrency restores the global default", () => {
+    const { io } = memIO({ agent: { default: null, forceBackground: false }, concurrency: { default: 8 } });
     const store = new ConfigStore(io);
     store.mutate.concurrency.reset();
-    expect(store.concurrency.default).toBe(4);
-    expect(store.concurrency.providers).toEqual({});
+    expect(store.concurrency).toEqual({ default: 4 });
   });
 
   it("setFinishedRetentionMinutes persists and calls manager", () => {
