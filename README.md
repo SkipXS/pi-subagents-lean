@@ -2,33 +2,35 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Sub-agents for [pi](https://pi.dev) — schema-first, zero-fluff.**
+**Sub-agents for [pi](https://pi.dev) — schema-first, minimal-fluff.**
 
-Spawn specialized agents with isolated sessions, custom tools, and per-type models at minimal token cost.
+Spawn specialized agents with isolated sessions, controlled tool access, and per-type models with low baseline token overhead.
 
 > [!NOTE]
 > This repository is the actively developed [`SkipXS/pi-subagents-lean`](https://github.com/SkipXS/pi-subagents-lean) fork and renamed successor of [`AlexParamonov/pi-subagents-lite`](https://github.com/AlexParamonov/pi-subagents-lite), which originated as a focused fork of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents). It deliberately keeps a smaller scope: immediate foreground/background execution, without scheduling or join modes. Subagents cannot spawn further subagents.
 
-## Schema-First Design
+## Minimal-Fluff, Schema-First Design
 
-Every tool the LLM sees costs tokens — in the system prompt and in every turn. Most extensions layer on descriptions, prompt snippets, and usage guidelines that compound across the session. This extension takes a **schema-first** approach: the fixed, bare tool name and parameter names *are* the schema. No bloated descriptions, no prose or runtime-generated type metadata.
+Every tool the LLM sees adds recurring schema tokens. This extension therefore keeps its three tool registrations deliberately bare: stable names and parameters, no tool descriptions, no parameter descriptions, and no extra prompt snippets or tool-specific guidelines.
 
-| Standard | Schema-first |
+| Verbose registration | Lean registration |
 |---|---|
 | `description: "Spawn a sub-agent"` | _(removed)_ |
 | `promptSnippet` with usage examples | _(none)_ |
 | `promptGuidelines` with rules | _(none)_ |
 | Parameters with `.description()` | Bare `Type.String()` |
 
-Names like `Agent`, `StopAgent`, `AgentStatus`, `run_in_background`, `worktree_path` are self-documenting. Results reinforce correct usage with clear success/error messages.
+Names like `Agent`, `StopAgent`, `AgentStatus`, `run_in_background`, and `worktree_path` carry most of the interface. Clear success and error results provide the remaining runtime guidance.
 
-**Result:** foreground and background agents, custom agent types, global concurrency, cost tracking, steering, model overrides, and agent status — all with minimal token overhead.
+It is intentionally **minimal fluff**, not zero context: by default, parent turns receive one small, bounded orchestration block with delegation rules and the visible agent catalog. This makes the required explicit `agent` selection practical without inflating every tool schema. Set `agent.orchestrationPrompt` to `false` to remove that block. Agent Markdown instructions and applicable context files are loaded only into spawned sessions according to their configuration.
+
+**Result:** foreground and background agents, custom agent types, global concurrency, cost tracking, steering, model overrides, and status visibility with a lean parent-session footprint.
 
 ## Features
 
-- **Three tools** — `Agent` (spawn), `StopAgent` (stop), `AgentStatus` (list)
+- **Three lean tool schemas** — `Agent` (spawn), `StopAgent` (stop), `AgentStatus` (list)
 - **Foreground & background** — block, or fire-and-forget with auto-delivered results
-- **Custom agent types** — `.md` files with YAML frontmatter (tools, model, thinking, turn/token limits)
+- **Custom agent types** — `.md` files with flat YAML-style frontmatter (tools, model, thinking, turn/token limits)
 - **Manual spawn** — from `/agents`, no LLM round-trip; full control over model, thinking, turns, tokens, background
 - **Model & thinking resolution** — shared 6-level precedence chain; set once, forget
 - **Concurrency** — global agent slot limit with automatic queuing
@@ -125,7 +127,7 @@ The result nudges the LLM to wait for automatic notifications instead of polling
 
 ## Custom Agent Types
 
-Drop a `.md` file into `.pi/agents/` (project), `.agents/agents/` (shared workspace), or `~/.pi/agent/agents/` (global). Frontmatter configures the agent; the body is its system prompt. The `name` field, or the filename without `.md`, becomes the agent type. Project files are read only after project trust.
+Drop a `.md` file into `.pi/agents/` (project), `.agents/agents/` (shared workspace), or `~/.pi/agent/agents/` (global). Flat frontmatter configures the agent; the body is its system prompt. The supported frontmatter subset is simple `key: value` pairs plus inline comma-separated lists (`[read, bash]`) or `- item` lists—not nested YAML, multiline scalars, or other advanced YAML features. The `name` field, or the filename without `.md`, becomes the agent type. Project and shared-workspace files are read only after project trust.
 
 Bundled defaults ship as inspectable Markdown definitions and are enabled by default:
 
@@ -158,7 +160,7 @@ You are a security review specialist. Analyze code for vulnerabilities,
 focusing on injection flaws, auth bypasses, and insecure defaults.
 ```
 
-A minimal agent — just `name` and `description` — gets all tools, extensions, and skills (subject to the global implicit-loading settings). Set restrictions only when you want them.
+A minimal agent — just `name` and `description` — gets all currently active tools plus implicitly loaded extensions and skills (subject to the global implicit-loading settings). Pi initially activates `read`, `bash`, `edit`, and `write`; `grep` and `find` are available built-ins but must be selected explicitly through `tools`. Set restrictions only when you want them.
 
 ### Frontmatter reference
 
@@ -167,7 +169,7 @@ A minimal agent — just `name` and `description` — gets all tools, extensions
 | `name` | string | filename | Agent type name (the `agent` tool parameter). Same-name definitions merge according to discovery precedence. |
 | `display_name` | string | `name` | Label in the widget, `/agents` menu, and conversation viewer. |
 | `description` | string | `""` | One-sentence description in the `/agents` list and tool rendering. |
-| `tools` | `string[]` | all | **Tool whitelist** — which tool schemas the LLM sees. Accepts built-in names and extension tool references (see below). Mutually exclusive with `exclude_tools`. Omit it to expose all available tools. |
+| `tools` | `string[]` | all active | **Tool whitelist** — which tool schemas the LLM sees. Accepts built-in names and extension tool references (see below). Mutually exclusive with `exclude_tools`. Omit it to expose all currently active tools. |
 | `exclude_tools` | `string[]` | none | **Tool blacklist** — all tools except these are visible. Supports `ext/*` syntax. Mutually exclusive with `tools` (when `tools` is `string[]`). |
 | `extensions` | `true` \| `string[]` \| `false` | `true` | **Extension loader** — which extensions load (hooks + commands fire). Does NOT control tool visibility. Mutually exclusive with `exclude_extensions`. |
 | `exclude_extensions` | `string[]` | none | **Extension blacklist** — all extensions except these load. Mutually exclusive with `extensions` (when `extensions` is `string[]`). |
@@ -187,7 +189,7 @@ Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`.
 
 | Value | Meaning |
 |---|---|
-| omitted | All available tools visible |
+| omitted | All currently active tools visible |
 | `[]` | No tools visible |
 | `[read, bash]` | Only listed built-in tools |
 | `[web_search]` | Extension tool by name |
@@ -208,7 +210,7 @@ exclude_tools: [edit, write]
 ### Extensions & skills
 
 **What they are:**
-- **Tools** are callable functions — `read`, `bash`, `edit`, `write`, `grep` (built-in), or `web_search` / `tavily/*` (from extensions). The `tools` whitelist controls which tool schemas the LLM sees.
+- **Tools** are callable functions — `read`, `bash`, `edit`, `write`, `grep`, `find` (built-in), or `web_search` / `tavily/*` (from extensions). The `tools` whitelist controls which tool schemas the LLM sees.
 - **Skills** are reusable instruction files (`SKILL.md`) that teach an agent how to do a task — e.g. `debug`, `tdd`. By default the agent sees only skill metadata (name, description, path) in its system prompt and reads the full content on-demand via `read`.
 - **Extensions** are pi plugins (e.g. `tavily`, `pi-tokf`) that register tools and hooks. Loading one makes its hooks fire and its tools *available* — but those tools still need to pass the `tools` whitelist to be visible.
 
