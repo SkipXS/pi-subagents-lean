@@ -226,11 +226,13 @@ describe("widget rendering format", () => {
       (manager as any).listAgents = () => [a1, a2];
 
       const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
-      // a1: header[1], outputFile[2], activity[3]; a2: header[4], outputFile[5], activity[6]
-      expect(lines[2]).toContain("out1.log");
-      expect(lines[3]).toContain("reading");
-      expect(lines[5]).toContain("out2.log");
-      expect(lines[6]).toContain("reading");
+      // Equal timestamps may preserve either manager order. In both cases each
+      // output-file row must immediately precede that agent's activity row.
+      for (const file of ["out1.log", "out2.log"]) {
+        const outputIndex = lines.findIndex((line: string) => line.includes(file));
+        expect(outputIndex).toBeGreaterThan(0);
+        expect(lines[outputIndex + 1]).toContain("reading");
+      }
     });
   });
 
