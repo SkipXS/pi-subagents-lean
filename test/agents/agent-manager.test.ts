@@ -879,22 +879,22 @@ describe("usage accounting", () => {
     expect(record.stats.lifetimeUsage.output).toBe(80);
   });
 
-  it("accumulates cache reads and retains only the newest cache-hit rate", () => {
+  it("retains the cumulative cache-hit rate after a high-hit request is followed by a miss", () => {
     manager = new AgentManager(onComplete);
     mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
     const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
     const onUsage = getOnAssistantUsage();
 
-    onUsage({ input: 100, output: 10, cacheRead: 80, cacheWrite: 20, cost: 0 });
-    onUsage({ input: 200, output: 10, cacheRead: 150, cacheWrite: 50, cost: 0 });
+    onUsage({ input: 20, output: 10, cacheRead: 80, cacheWrite: 0, cost: 0 });
+    onUsage({ input: 100, output: 10, cacheRead: 0, cacheWrite: 0, cost: 0 });
 
     const stats = manager.getRecord(id)!.stats;
-    expect(stats.cacheRead).toBe(230);
-    expect(stats.latestCacheHitRate).toBeCloseTo((150 / 400) * 100);
-    expect(stats.lifetimeUsage.cacheWrite).toBe(70);
+    expect(stats.cacheRead).toBe(80);
+    expect(stats.lifetimeUsage.input).toBe(120);
+    expect(stats.latestCacheHitRate).toBeCloseTo((80 / 200) * 100);
   });
 
-  it("counts supplemental usage without changing assistant cache-hit state", () => {
+  it("updates the cumulative cache-hit rate for supplemental usage", () => {
     manager = new AgentManager(onComplete);
     mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
     const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
@@ -903,16 +903,43 @@ describe("usage accounting", () => {
 
     onAssistantUsage({ input: 100, output: 10, cacheRead: 80, cacheWrite: 20, cost: 0.01 });
     const stats = manager.getRecord(id)!.stats;
-    const assistantCacheHitRate = stats.latestCacheHitRate;
-
     onSupplementalUsage({ input: 400, output: 50, cacheRead: 300, cacheWrite: 25, cost: 0.12 });
 
     expect(stats.lifetimeUsage).toEqual({ input: 500, output: 60, cacheWrite: 45, cost: 0.13 });
     expect(stats.cacheRead).toBe(380);
-    expect(stats.latestCacheHitRate).toBe(assistantCacheHitRate);
+    expect(stats.latestCacheHitRate).toBeCloseTo((380 / 925) * 100);
 
     onAssistantUsage({ input: 200, output: 10, cacheRead: 0, cacheWrite: 0, cost: 0 });
     expect(stats.lifetimeUsage.input).toBe(700);
+    expect(stats.latestCacheHitRate).toBeCloseTo((380 / 1125) * 100);
+  });
+
+  it("keeps parent and nested-agent cache-hit rates session-local", async () => {
+    const parentRun = makeResolvablePromise();
+    const childRun = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+    manager = new AgentManager(onComplete, { default: 1 });
+    const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+      description: "parent",
+      agentConfig: { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 },
+    });
+    const parentOnUsage = mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage;
+    parentOnUsage({ input: 20, output: 0, cacheRead: 80, cacheWrite: 0, cost: 0 });
+
+    const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", { description: "child" });
+    const childOnUsage = mockModules.mockRunAgent.mock.calls[1]![3].onAssistantUsage;
+    childOnUsage({ input: 50, output: 0, cacheRead: 50, cacheWrite: 0, cost: 0 });
+    parentOnUsage({ input: 100, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
+
+    expect(manager.getRecord(parentId)!.stats.latestCacheHitRate).toBeCloseTo((80 / 200) * 100);
+    expect(manager.getRecord(childId)!.stats.latestCacheHitRate).toBeCloseTo((50 / 100) * 100);
+
+    childRun.resolve(mockRunResult());
+    parentRun.resolve(mockRunResult());
+    await Promise.all([
+      manager.getRecord(parentId)!.execution.promise,
+      manager.getRecord(childId)!.execution.promise,
+    ]);
   });
 
   it("persists final context, auto-compaction, and subscription snapshots", async () => {

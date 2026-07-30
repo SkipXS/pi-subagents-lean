@@ -125,6 +125,15 @@ function nestedDepthLimit(value: unknown): number {
   return Math.min(HARD_MAX_NESTING_DEPTH, Math.max(1, Math.floor(numberValue)));
 }
 
+/** Update the session-level cache hit rate retained for the UI. */
+function updateCumulativeCacheHitRate(record: ManagedAgentRecord): void {
+  const { lifetimeUsage, cacheRead } = record.stats;
+  const promptTokens = lifetimeUsage.input + cacheRead + lifetimeUsage.cacheWrite;
+  record.stats.latestCacheHitRate = promptTokens > 0
+    ? (cacheRead / promptTokens) * 100
+    : undefined;
+}
+
 export class AgentManager {
   private agents = new Map<string, ManagedAgentRecord>();
   /** Authoritative control ledger, deliberately separate from public records. */
@@ -652,17 +661,15 @@ export class AgentManager {
       onAssistantUsage: (usage) => {
         addUsage(record.stats.lifetimeUsage, usage);
         record.stats.cacheRead += usage.cacheRead;
-        const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-        record.stats.latestCacheHitRate = promptTokens > 0
-          ? (usage.cacheRead / promptTokens) * 100
-          : undefined;
+        updateCumulativeCacheHitRate(record);
         options?.onAssistantUsage?.(usage);
       },
-      // Compaction and tool-result usage is billable but is not an assistant
-      // request, so it bypasses assistant-request cache-hit calculations.
+      // Compaction and tool-result usage contributes to the same session-level
+      // usage totals displayed by the UI, including its cache hit rate.
       onSupplementalUsage: (usage) => {
         addUsage(record.stats.lifetimeUsage, usage);
         record.stats.cacheRead += usage.cacheRead;
+        updateCumulativeCacheHitRate(record);
       },
       onCompaction: (info) => {
         record.stats.compactionCount++;

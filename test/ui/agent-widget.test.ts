@@ -916,7 +916,7 @@ describe("Pi usage display", () => {
     };
     const live = makeRunningAgent("live");
     live.stats = {
-      ...live.stats, lifetimeUsage: usage, cacheRead: 1300000, latestCacheHitRate: 99.1,
+      ...live.stats, lifetimeUsage: usage, cacheRead: 1300000, latestCacheHitRate: 93.2,
     };
     live.execution.session = {
       getContextUsage: () => ({ percent: 23.4, contextWindow: 272000 }),
@@ -925,14 +925,15 @@ describe("Pi usage display", () => {
     };
     const finished = makeFinishedAgent("finished");
     finished.stats = {
-      ...finished.stats, lifetimeUsage: usage, cacheRead: 1300000, latestCacheHitRate: 99.1,
+      ...finished.stats, lifetimeUsage: usage, cacheRead: 1300000, latestCacheHitRate: 93.2,
       contextPercent: 23.4, contextWindow: 272000, autoCompactionEnabled: true, usingSubscription: true,
     };
     (manager as any).listAgents = () => [live, finished];
 
     widget.setShowCost(true);
     const lines = (widget as any).renderWidget(makeMockTUI(), makePlainTheme()).join("\n");
-    const expected = "↑83k ↓7.1k R1.3M W12k CH99.1% $1.262 (sub) 23.4%/272k (auto)";
+    // CH is the cumulative value for the displayed R/input/W totals.
+    const expected = "↑83k ↓7.1k R1.3M W12k CH93.2% $1.262 (sub) 23.4%/272k (auto)";
     expect(lines.split(expected)).toHaveLength(3);
   });
 });
