@@ -77,6 +77,8 @@ Background agents deliver a result notification when done:
    output log: <temporary-directory>/pi-agent-outputs/4f6b0f08-7a9a-419.log
 ```
 
+While a background agent runs, continue only with independent useful work. Wait for its automatic result notification before dependent work; do not poll its status or use sleep/no-op commands to wait.
+
 Foreground results land inline:
 
 ```

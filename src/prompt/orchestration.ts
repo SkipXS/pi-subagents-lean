@@ -20,6 +20,8 @@ Use only the roles required for the task. Do not force an unnecessary full agent
 
 Run dependent work in the foreground. Independent read-only work may run in the background. Never run concurrent writers or allow overlapping repository changes.
 
+After starting a background agent, continue only with independent useful work; never poll its status or run sleep/no-op commands to wait. Resume dependent work only after its automatic completion notification.
+
 Retain responsibility for the overall task and final answer. Delegate the substantial specialist work, but directly complete trivial or tightly bounded work when delegation would add more overhead than value.`;
 
 /** All limits are UTF-8 bytes, not JavaScript UTF-16 code units. */
