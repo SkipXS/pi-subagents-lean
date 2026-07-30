@@ -197,6 +197,25 @@ describe("Agent tool registration", () => {
     expect(state.showAgentsMainMenu).toHaveBeenCalledWith(ctx, ["openai/gpt-4o"]);
   });
 
+  it("reads showCost when each renderer runs instead of at registration", () => {
+    const api = createApi();
+    extension(api.api as any);
+    const theme = { name: "theme" };
+    const result = { content: [{ type: "text", text: "done" }] };
+    const messageRenderer = api.messageRenderers.find(({ type }) => type === "subagent-result")!;
+
+    state.store.agent.showCost = false;
+    agentTool(api).renderResult(result, {}, theme);
+    state.store.agent.showCost = true;
+    agentTool(api).renderResult(result, {}, theme);
+    messageRenderer.renderer({ content: "done" }, {}, theme);
+    state.store.agent.showCost = false;
+    messageRenderer.renderer({ content: "done" }, {}, theme);
+
+    expect(state.renderAgentToolResult.mock.calls.map((call) => call[3])).toEqual([false, true]);
+    expect(state.renderSubagentResult.mock.calls.map((call) => call[3])).toEqual([true, false]);
+  });
+
   it("wires StopAgent and AgentStatus to constrained schema executors", () => {
     const api = createApi();
     extension(api.api as any);

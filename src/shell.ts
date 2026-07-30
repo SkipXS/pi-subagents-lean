@@ -23,7 +23,7 @@ import { ConfigStore, type SubagentRuntimeSettings } from "./config/config-store
 
 interface Shell {
   pi: ExtensionAPI;
-  sessionCtx: ExtensionContext;
+  sessionCtx: ExtensionContext | null;
   manager: AgentManager | null;
   widget: AgentWidget | null;
   store: ConfigStore;
@@ -58,7 +58,7 @@ export function getPiInstance(): ExtensionAPI {
 }
 
 /** The current session context. Set at session_start. */
-export function getSessionCtx(): ExtensionContext {
+export function getSessionCtx(): ExtensionContext | null {
   if (subagentRuntime.getStore()) denyRootAccess("Root session context");
   return shell.sessionCtx;
 }
@@ -93,7 +93,7 @@ export function setPiInstance(pi: ExtensionAPI): void {
   shell.pi = pi;
 }
 
-export function setSessionCtx(ctx: ExtensionContext): void {
+export function setSessionCtx(ctx: ExtensionContext | null): void {
   if (subagentRuntime.getStore()) denyRootAccess("Root session context setter");
   shell.sessionCtx = ctx;
 }

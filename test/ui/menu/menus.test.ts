@@ -122,6 +122,34 @@ describe("showSettingsMenu — SelectList dispatcher", () => {
     expect(component.settingsList.items.map((item: any) => item.value)).toEqual(["recovery"]);
   });
 
+  it("dispatches recovery and rebuilds settings from the current health on return", async () => {
+    mockModules.mockConfigHealth = "using-backup";
+    const ctx = createMockCtx();
+    let refreshedComponent: any;
+    (showConfigRecoveryMenu as any).mockImplementationOnce(async () => {
+      mockModules.mockConfigHealth = "healthy";
+      return true;
+    });
+    ctx.ui.custom
+      .mockResolvedValueOnce("recovery")
+      .mockImplementationOnce(async (factory: any) => {
+        refreshedComponent = factory(
+          { terminal: { rows: 40 } },
+          { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+          null,
+          () => {},
+        );
+        return undefined;
+      });
+
+    await showSettingsMenu(ctx, []);
+
+    expect(showConfigRecoveryMenu).toHaveBeenCalledWith(ctx);
+    expect(refreshedComponent.settingsList.items.map((item: any) => item.value)).toEqual([
+      "models", "execution", "widget", "systemprompt",
+    ]);
+  });
+
   it("Escape closes the menu", async () => {
     const ctx = createMockCtx();
     await showSettingsMenu(ctx, ["anthropic/claude-sonnet-4-20250514"]);

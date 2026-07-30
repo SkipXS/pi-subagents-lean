@@ -80,7 +80,10 @@ export function ensureManagerAndWidget(): void {
  * Scan agent files from user, shared, and project directories, merge with defaults,
  * and register into the type registry.
  */
-export async function scanAndRegisterAgents(ctx: ExtensionContext): Promise<void> {
+export async function scanAndRegisterAgents(
+  ctx: ExtensionContext,
+  shouldRegister: () => boolean = () => true,
+): Promise<void> {
   const userAgentDir = path.join(getAgentDir(), "agents");
   // Agent descriptions become parent system instructions, so never discover
   // project-controlled definitions unless Pi has established project trust.
@@ -97,15 +100,23 @@ export async function scanAndRegisterAgents(ctx: ExtensionContext): Promise<void
   // (skip defaults when disableDefaultAgents is on)
   const merged = await scanAndMerge({ disableDefaultAgents: disableDefaults });
 
-  registerAgents(merged, { disableDefaultAgents: disableDefaults });
+  // A session can be shut down while its scan is pending. The catalog is a
+  // shared registry, so a stale scan must not overwrite a newer session's
+  // published definitions after it eventually resolves.
+  if (shouldRegister()) {
+    registerAgents(merged, { disableDefaultAgents: disableDefaults });
+  }
 }
 
-export async function loadConfigAndRegisterAgents(ctx: ExtensionContext): Promise<void> {
+export async function loadConfigAndRegisterAgents(
+  ctx: ExtensionContext,
+  shouldRegister?: () => boolean,
+): Promise<void> {
   // ConfigStore is authoritative for config + session overrides + widget/manager
   // side effects.
   getStore().reload();
   ensureManagerAndWidget();
-  await scanAndRegisterAgents(ctx);
+  await scanAndRegisterAgents(ctx, shouldRegister);
 }
 
 // ============================================================================
@@ -246,22 +257,123 @@ export function setupEventListeners(pi: ExtensionAPI): void {
   // session_start — load config, scan agents, and initialise the parent runtime.
   // Listen for ctrl+o keypress to sync compact mode (push-based, no polling)
   let unregisterTerminalInput: (() => void) | undefined;
+  // Invalidates an in-flight startup before its asynchronous scan can publish
+  // listeners or other session-visible state after shutdown.
+  let sessionEpoch = 0;
+  // A new session waits for the latest shutdown handler. A separate tail
+  // serializes cleanup that can mutate global UI/configuration state.
+  let cleanupPromise: Promise<void> | undefined;
+  let globalCleanupPromise: Promise<void> | undefined;
+
+  /**
+   * Tear down every per-session collaborator, including partially initialized
+   * ones. This is shared by normal shutdown and failed startup so a retry
+   * never inherits stale listeners, store deps, or shell references.
+   */
+  const cleanupSessionRuntime = async (cleanupEpoch: number): Promise<void> => {
+    let cleanupError: unknown;
+    const attempt = async (work: () => void | Promise<void>) => {
+      try {
+        await work();
+      } catch (err) {
+        cleanupError ??= err;
+      }
+    };
+
+    // Claim the coordinator before awaiting its disposal. A second shutdown
+    // can clean the remaining global collaborators while this one is blocked.
+    const terminalInput = unregisterTerminalInput;
+    unregisterTerminalInput = undefined;
+    const coordinator = getCoordinator();
+    setCoordinator(null);
+
+    if (terminalInput) await attempt(() => terminalInput());
+    if (coordinator) await attempt(() => coordinator.dispose());
+
+    // ConfigStore, AgentWidget, AgentManager, and sessionCtx are global or
+    // affect global UI state. Serialize this part independently: a newer
+    // shutdown waits for an older global cleanup before claiming its runtime,
+    // while an old cleanup that was delayed in coordinator.dispose() observes
+    // its stale generation and leaves the newer runtime alone.
+    const previousGlobalCleanup = globalCleanupPromise;
+    const globalCleanup = (async () => {
+      if (previousGlobalCleanup) {
+        try {
+          await previousGlobalCleanup;
+        } catch {
+          // Each shutdown reports its own first disposal error.
+        }
+      }
+      if (sessionEpoch !== cleanupEpoch) return;
+
+      await attempt(() => getStore().dispose());
+      if (sessionEpoch !== cleanupEpoch) return;
+
+      const widget = getWidget();
+      setWidget(null);
+      if (widget) await attempt(() => widget.dispose());
+      if (sessionEpoch !== cleanupEpoch) return;
+
+      const manager = getManager();
+      setManager(null);
+      if (manager) await attempt(() => manager.dispose());
+      if (sessionEpoch === cleanupEpoch) {
+        setSessionCtx(null);
+      }
+    })();
+    // Preserve this handler's rejection for its caller while allowing a newer
+    // generation to wait for completion before mutating global state itself.
+    globalCleanupPromise = globalCleanup.catch(() => undefined);
+    await globalCleanup;
+    if (cleanupError !== undefined) throw cleanupError;
+  };
+
+  const beginCleanup = (): Promise<void> => {
+    const cleanup = cleanupSessionRuntime(sessionEpoch);
+    // Future starts wait for the most recent cleanup even if shutdown reports
+    // a disposal error; cleanupSessionRuntime already attempts every claimed
+    // collaborator before rejecting. Older overlapping cleanups are scoped to
+    // their captured objects and cannot dispose a runtime started afterwards.
+    cleanupPromise = cleanup.catch(() => undefined);
+    return cleanup;
+  };
 
   pi.on("session_start", async (_event: unknown, ctx: ExtensionContext) => {
+    if (cleanupPromise) await cleanupPromise;
+    const startupEpoch = ++sessionEpoch;
     setSessionCtx(ctx);
-    await loadConfigAndRegisterAgents(ctx);
-    // Register ctrl+o listener
-    if (ctx.hasUI && !unregisterTerminalInput) {
-      unregisterTerminalInput = ctx.ui.onTerminalInput(createNavInputHandler(ctx));
+    try {
+      await loadConfigAndRegisterAgents(ctx, () => sessionEpoch === startupEpoch);
+      // session_shutdown may have run while scanAndMerge() was pending. Its
+      // cleanup owns the runtime, so this stale startup must not publish a
+      // terminal listener or block the next session from registering one.
+      if (sessionEpoch !== startupEpoch) return;
+
+      // Register ctrl+o listener
+      if (ctx.hasUI && !unregisterTerminalInput) {
+        unregisterTerminalInput = ctx.ui.onTerminalInput(createNavInputHandler(ctx));
+      }
+      // Sync compact mode with initial tool expansion state
+      getStore().notifyToolsExpanded(false);
+    } catch (err) {
+      // A newer shutdown/startup owns cleanup; it must not be torn down by a
+      // stale failed scan.
+      if (sessionEpoch === startupEpoch) {
+        // Preserve the startup error even if disposal itself encounters a fault.
+        try {
+          await beginCleanup();
+        } catch {
+          // The initialization failure is the actionable error for callers.
+        }
+      }
+      throw err;
     }
-    // Sync compact mode with initial tool expansion state
-    getStore().notifyToolsExpanded(false);
   });
 
   // session_shutdown — abort all, dispose manager
   pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
-    unregisterTerminalInput?.();
-    unregisterTerminalInput = undefined;
+    // Invalidate a pending session_start before beginning asynchronous cleanup.
+    ++sessionEpoch;
 
     // Warn if agents were killed
     const currentManager = getManager();
@@ -272,16 +384,6 @@ export function setupEventListeners(pi: ExtensionAPI): void {
         ctx.ui.notify(`${active.length} agent(s) killed by reload`, "warning");
       }
     }
-    // Dispose coordinator, store, widget, then manager
-    getCoordinator()?.dispose();
-    setCoordinator(null);
-    getStore().dispose();
-    getWidget()?.dispose();
-    setWidget(null);
-    const mgr = getManager();
-    if (mgr) {
-      await mgr.dispose();
-      setManager(null);
-    }
+    await beginCleanup();
   });
 }

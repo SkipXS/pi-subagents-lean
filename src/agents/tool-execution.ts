@@ -151,6 +151,14 @@ export async function executeAgentTool(
   // Do not start preflight work for a tool call Pi has already cancelled.
   if (signal?.aborted) return cancelledResult();
 
+  // Tools are registered before session_start, so Pi can invoke this callback
+  // while the root runtime is not yet available (or after it was disposed).
+  // Keep cancellation's established contract ahead of this readiness check.
+  const coordinator = getCoordinator();
+  if (!coordinator || !getManager()) {
+    return errorResult("Agent execution is unavailable until the root session is ready");
+  }
+
   // Validate worktree_path early — needed for on-demand agent discovery
   const rawWorktreePath = params.worktree_path as string | undefined;
   let validatedWorktreePath: string | undefined;
@@ -248,8 +256,13 @@ export async function executeAgentTool(
   // asynchronous catalog/worktree preflight.
   if (signal?.aborted) return cancelledResult();
 
+  // Preflight may have awaited while session_shutdown ran. Do not let a
+  // captured, now-disposed coordinator spawn against a stale root runtime.
+  if (getCoordinator() !== coordinator || !getManager()) {
+    return errorResult("Agent execution is unavailable until the root session is ready");
+  }
+
   // Use SpawnCoordinator for unified spawn path
-  const coordinator = getCoordinator()!;
   const result = await coordinator.spawn(getPiInstance(), ctx, {
     type: resolvedType,
     agentConfig,
@@ -410,8 +423,8 @@ async function executeBoundNestedAgent(
  * Build a compact list of running (or queued) agents.
  * Format: "short_id (type), short_id (type)" — one line, easy for LLM to parse.
  */
-function formatRunningAgents(): string {
-  const agents = getManager()!.listAgents().filter(
+function formatRunningAgents(manager: AgentManager): string {
+  const agents = manager.listAgents().filter(
     (a) => a.lifecycle.status === "running" || a.lifecycle.status === "queued",
   );
 
@@ -429,34 +442,41 @@ function formatRunningAgents(): string {
 export async function executeStopAgentTool(
   _toolCallId: string,
   params: Record<string, unknown>,
-  _signal: AbortSignal | undefined,
+  signal: AbortSignal | undefined,
   _onUpdate: ((update: any) => void) | undefined,
   _ctx: ExtensionContext,
 ): Promise<any> {
+  if (signal?.aborted) return cancelledResult();
+
   const agentId = params.agent_id as string | undefined;
+  const manager = getManager();
+
+  if (!manager || !getCoordinator()) {
+    return errorResult("Agent control is unavailable until the root session is ready");
+  }
 
   if (!agentId) {
     return errorResult("agent_id is required");
   }
 
-  const record = getManager()!.getRecord(agentId);
+  const record = manager.getRecord(agentId);
 
   if (!record) {
     // Agent not found → return error + list of running agents
     return errorResult(
-      `Agent ${agentId} not found. Running agents: ${formatRunningAgents()}`,
+      `Agent ${agentId} not found. Running agents: ${formatRunningAgents(manager)}`,
     );
   }
 
   // Check if already in a terminal state (not running or queued)
   if (record.lifecycle.status !== "running" && record.lifecycle.status !== "queued") {
     return successResult(
-      `Agent ${agentId} is already ${record.lifecycle.status}. Running agents: ${formatRunningAgents()}`,
+      `Agent ${agentId} is already ${record.lifecycle.status}. Running agents: ${formatRunningAgents(manager)}`,
     );
   }
 
   // Attempt to stop the running/queued agent
-  if (getManager()!.abort(agentId, "agent")) {
+  if (manager.abort(agentId, "agent")) {
     return successResult(`Stopped agent ${agentId.slice(0, SHORT_ID_LENGTH)}`);
   }
 
