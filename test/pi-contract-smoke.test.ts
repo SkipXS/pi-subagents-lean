@@ -54,6 +54,14 @@ describe.sequential("Pi extension contract", () => {
 
       sessionStarted = true;
       await runner.emit({ type: "session_start", reason: "startup" });
+      const beforeAgentStart = await runner.emitBeforeAgentStart(
+        "Verify the loaded extension lifecycle.",
+        undefined,
+        "You are a helpful assistant.",
+        { cwd: projectDir },
+      );
+      expect(beforeAgentStart?.systemPrompt).toContain("[subagents-lean orchestration v1]");
+
       await runner.emit({ type: "session_shutdown", reason: "quit" });
       sessionShutdown = true;
 
@@ -80,5 +88,5 @@ describe.sequential("Pi extension contract", () => {
         }
       }
     }
-  });
+  }, 15_000);
 });
