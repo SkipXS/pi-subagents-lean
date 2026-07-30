@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const COMMAND_TIMEOUT_MS = 120_000;
+// A cold npm install of Pi's provider-heavy dependency tree can exceed two
+// minutes on hosted Windows runners.
+const COMMAND_TIMEOUT_MS = 300_000;
 
 export function productionManifest(manifest: Record<string, unknown>): Record<string, unknown> {
   const { devDependencies: _devDependencies, ...productionManifest } = manifest;
@@ -29,7 +31,7 @@ function main(): void {
     });
     console.log("npm production install succeeded");
   } finally {
-    rmSync(tempRoot, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
   }
 }
 

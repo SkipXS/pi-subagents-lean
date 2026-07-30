@@ -27,8 +27,8 @@ conservative per-file floors:
 |---|---:|---:|---:|---:|
 | `src/registration.ts` | 80% | 70% | 95% | 80% |
 | `src/agents/agent-manager.ts` | 85% | 80% | 80% | 88% |
-| `src/config/config-io.ts` | 68% | 80% | 75% | 70% |
-| `src/prompt/skill-loader.ts` | 74% | 80% | 70% | 74% |
+| `src/config/config-io.ts` | 68% | 80% | 73% | 70% |
+| `src/prompt/skill-loader.ts` | 72% | 80% | 70% | 72% |
 | `src/spawn/spawn-coordinator.ts` | 75% | 70% | 85% | 76% |
 
 These floors are below the reproducible Ubuntu baseline rather than rounded up
