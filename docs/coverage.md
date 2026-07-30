@@ -62,5 +62,5 @@ durability.
 - `Checks (Windows, Pi locked)`
 - `Checks (Ubuntu, Pi minimum)`
 - `Coverage`
-- `Package smoke (ubuntu-latest)`
-- `Package smoke (windows-latest)`
+- `Package smoke`
+- `Package smoke (Windows)`

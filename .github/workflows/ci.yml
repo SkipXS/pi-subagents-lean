@@ -80,13 +80,18 @@ jobs:
           fi
 
   package-smoke:
-    name: Package smoke (${{ matrix.os }})
+    # Keep the Ubuntu check name stable for the existing branch-protection rule.
+    name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - label: Package smoke
+            os: ubuntu-latest
+          - label: Package smoke (Windows)
+            os: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
