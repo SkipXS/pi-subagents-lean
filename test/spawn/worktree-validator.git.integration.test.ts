@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -80,6 +80,24 @@ describe("validateWorktreePath real git integration", () => {
     expect(linkedFromMain.ok).toBe(true);
     const mainFromLinked = await validateWorktreePath(pi, main, linked);
     expect(mainFromLinked.ok).toBe(true);
+
+    // A validated nested directory must retain the linked worktree root rather
+    // than treating an arbitrary descendant as an independent checkout.
+    const nested = join(linked, "packages", "worker");
+    mkdirSync(nested, { recursive: true });
+    const nestedValidation = await validateWorktreePath(pi, nested, main);
+    expect(nestedValidation).toMatchObject({ ok: true });
+    if (nestedValidation.ok) {
+      // realpath may use Windows' equivalent short path, so assert the
+      // canonical relation rather than the input spelling.
+      expect(nestedValidation.resolvedPath).toMatch(/\/linked\/packages\/worker$/);
+      expect(nestedValidation.worktreeRoot).toMatch(/\/linked$/);
+    }
+
+    const notDirectory = join(root, "not-a-worktree");
+    writeFileSync(notDirectory, "not a directory");
+    expect(await validateWorktreePath(pi, notDirectory, main))
+      .toEqual({ ok: false, error: WORKTREE_VALIDATION_ERRORS.NOT_A_DIRECTORY });
 
     const otherRepo = await validateWorktreePath(pi, foreign, main);
     expect(otherRepo).toEqual({ ok: false, error: WORKTREE_VALIDATION_ERRORS.DIFFERENT_REPO });

@@ -569,6 +569,21 @@ describe("SpawnCoordinator", () => {
       expect(coordinator.isBackground(result.agentId)).toBe(false);
     });
 
+    it("delivers a root completion once even when the manager repeats its completion callback", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const result = await coordinator.spawn(mockPi, ctx, {
+        type: "builder", prompt: "task", description: "duplicate completion", graceTurns: 6, runInBackground: true,
+      });
+      result.record.lifecycle.status = "completed";
+
+      coordinator.onAgentComplete(result.record);
+      coordinator.onAgentComplete(result.record);
+      vi.advanceTimersByTime(200);
+
+      expect(mockPi.sendMessage).toHaveBeenCalledOnce();
+      expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
+    });
+
     it("uses steer delivery while the parent session is busy", async () => {
       mockIsIdle.mockReturnValue(false);
       const coordinator = new SpawnCoordinator(manager as any);

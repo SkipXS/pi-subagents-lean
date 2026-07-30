@@ -24,10 +24,10 @@ The global thresholds in `vitest.config.ts` are:
 
 | Metric | Minimum |
 |---|---:|
-| Statements | 79% |
-| Branches | 69% |
-| Functions | 75% |
-| Lines | 80% |
+| Statements | 80% |
+| Branches | 74% |
+| Functions | 78% |
+| Lines | 81% |
 
 Coverage runs once on Ubuntu with one worker. A single worker makes aggregation
 reproducible for this suite because many tests intentionally isolate and mock the
@@ -37,8 +37,10 @@ Linux also executes filesystem permission and symlink cases that may be skipped
 on Windows.
 
 Treat the thresholds as a regression floor, not a target for low-value tests.
-Prefer lifecycle, concurrency, cleanup, configuration, and Pi contract paths.
-Raise thresholds after a reproducible CI run improves the baseline. Do not lower
+They are deliberately global rather than per-file gates: critical paths gain
+focused behavioral tests without forcing low-value coverage padding in every
+module. Prefer lifecycle, concurrency, cleanup, configuration, and Pi contract
+paths. Raise thresholds after a reproducible CI run improves the baseline. Do not lower
 them without documenting the platform or instrumentation reason in the change.
 
 ## Compatibility and package checks

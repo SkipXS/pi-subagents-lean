@@ -171,6 +171,20 @@ describe("config I/O with the real filesystem", () => {
     expect(JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8"))).toEqual(replacement);
   });
 
+  it("fails menu persistence immediately when another live host owns the config lock", async () => {
+    const { updateConfigAtomic, ConfigLockTimeoutError, UI_CONFIG_LOCK_TIMEOUT_MS } = await loadConfigModule();
+    const configPath = join(testDir!, "subagents-lean.json");
+    const lockPath = `${configPath}.lock`;
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+      token: "other-process", pid: 999_999, hostname: "other-host", createdAt: Date.now(),
+    }));
+
+    expect(UI_CONFIG_LOCK_TIMEOUT_MS).toBe(0);
+    expect(() => updateConfigAtomic(() => undefined)).toThrow(ConfigLockTimeoutError);
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
   it("only removes proven-dead local stale locks and times out for foreign locks", async () => {
     const { createConfigFileIO, ConfigLockTimeoutError } = await loadConfigModule();
     const configPath = join(testDir!, "subagents-lean.json");

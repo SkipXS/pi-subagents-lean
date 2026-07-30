@@ -51,6 +51,7 @@ const mockModules = vi.hoisted(() => ({
   mockExitSubagentSpawn: vi.fn(),
   mockManager: null as any,
   mockCoordinator: null as any,
+  mockRevalidateWorktreePath: vi.fn(),
 }));
 
 vi.mock("../../src/agents/agent-types.js", async (importOriginal) => {
@@ -62,6 +63,10 @@ vi.mock("../../src/agents/agent-types.js", async (importOriginal) => {
     getToolNamesForType: mockModules.mockGetToolNamesForType,
   };
 });
+
+vi.mock("../../src/spawn/worktree-validator.js", () => ({
+  revalidateWorktreePath: mockModules.mockRevalidateWorktreePath,
+}));
 
 vi.mock("../../src/prompt/prompts.js", () => ({
   buildAgentPrompt: mockModules.mockBuildAgentPrompt,
@@ -159,6 +164,9 @@ function resetMocks() {
   mockModules.mockPreloadSkills.mockReturnValue([]);
   mockModules.mockManager = null;
   mockModules.mockCoordinator = null;
+  mockModules.mockRevalidateWorktreePath.mockResolvedValue({
+    ok: true, resolvedPath: "/worktree", worktreeRoot: "/worktree", label: "worktree",
+  });
 }
 
 /**
@@ -2336,5 +2344,34 @@ describe("runAgent — abort and callback event paths", () => {
     expect(onTextDelta).toHaveBeenCalledWith("hello", "hello");
     expect(onToolActivity).toHaveBeenNthCalledWith(1, { type: "start", toolName: "read" });
     expect(onToolActivity).toHaveBeenNthCalledWith(2, { type: "end", toolName: "read" });
+  });
+});
+
+describe("runAgent — worktree revalidation", () => {
+  beforeEach(() => {
+    resetMocks();
+  });
+
+  it("does not load runner resources or create a session after a selected worktree is swapped", async () => {
+    mockModules.mockRevalidateWorktreePath.mockResolvedValueOnce({
+      ok: false,
+      error: "worktree_path changed after validation",
+    });
+
+    await expect(runAgent(fakeCtx(), "test-agent", "do something", {
+      pi: fakePi,
+      cwd: "/selected-worktree",
+      worktreeSelectionPath: "/links/selected-worktree",
+      worktreeParentCwd: "/parent-repository",
+    })).rejects.toThrow("worktree_path changed after validation");
+
+    expect(mockModules.mockRevalidateWorktreePath).toHaveBeenCalledWith(
+      fakePi,
+      "/links/selected-worktree",
+      "/parent-repository",
+      "/selected-worktree",
+    );
+    expect(mockModules.getLoaderOpts()).toBeNull();
+    expect(mockModules.mockCreateAgentSession).not.toHaveBeenCalled();
   });
 });

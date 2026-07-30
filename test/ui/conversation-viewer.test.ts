@@ -767,6 +767,24 @@ describe("ConversationViewer", () => {
   });
 
   describe("dispose", () => {
+    it("cancels a pending debounced render", () => {
+      vi.useFakeTimers();
+      let subscriber: (event?: unknown) => void = () => {};
+      mockSubscribe.mockImplementation((callback: (event?: unknown) => void) => {
+        subscriber = callback;
+        return () => {};
+      });
+      const session = makeMockSession();
+      const viewer = new ConversationViewer(makeTui(), session, makeMockRecord({ execution: { session } }), noopTheme, vi.fn());
+
+      subscriber({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "late" } });
+      viewer.dispose();
+      vi.advanceTimersByTime(100);
+
+      expect(mockRequestRender).not.toHaveBeenCalled();
+      vi.useRealTimers();
+    });
+
     it("unsubscribes from session", () => {
       const unsubscribe = vi.fn();
       mockSubscribe.mockReturnValue(unsubscribe);

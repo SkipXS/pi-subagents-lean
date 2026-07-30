@@ -8,6 +8,7 @@ import {
   ModelRegistry,
   ModelRuntime,
   SessionManager,
+  type ExtensionActions,
 } from "@earendil-works/pi-coding-agent";
 
 describe.sequential("Pi extension contract", () => {
@@ -45,6 +46,46 @@ describe.sequential("Pi extension contract", () => {
       const handlerErrors: unknown[] = [];
       runner.onError((error) => handlerErrors.push(error));
 
+      // Bind through Pi's actual public runtime seam with a complete, usable
+      // host action set. The test exercises registration/lifecycle only and
+      // intentionally makes no model or provider request.
+      let activeToolsReads = 0;
+      const hostActions: ExtensionActions = {
+        sendMessage: () => {},
+        sendUserMessage: () => {},
+        appendEntry: () => {},
+        setSessionName: () => {},
+        getSessionName: () => undefined,
+        setLabel: () => {},
+        getActiveTools: () => { activeToolsReads++; return ["Agent"]; },
+        getAllTools: () => [],
+        setActiveTools: () => {},
+        refreshTools: () => {},
+        getCommands: () => [],
+        setModel: async () => true,
+        getThinkingLevel: () => "off" as any,
+        setThinkingLevel: () => {},
+      };
+      runner.bindCore(hostActions, {
+        getModel: () => undefined,
+        isIdle: () => true,
+        isProjectTrusted: () => true,
+        getSignal: () => undefined,
+        abort: () => {},
+        hasPendingMessages: () => false,
+        shutdown: () => {},
+        getContextUsage: () => undefined,
+        compact: () => {},
+        getSystemPrompt: () => "",
+      } as any);
+      runner.bindCommandContext();
+
+      expect(runner.createContext().isIdle()).toBe(true);
+      expect(result.runtime.getActiveTools()).toEqual(["Agent"]);
+      expect(activeToolsReads).toBe(1);
+      expect(runner.getAllRegisteredTools().map((tool) => tool.definition.name).sort())
+        .toEqual(["Agent", "AgentStatus", "StopAgent"]);
+      expect(runner.getMessageRenderer("subagent-result")).toBeTypeOf("function");
       expect(runner.hasUI()).toBe(false);
       expect(runner.hasHandlers("tool_call")).toBe(true);
       expect(runner.hasHandlers("before_agent_start")).toBe(true);

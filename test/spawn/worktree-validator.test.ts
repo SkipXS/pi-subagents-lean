@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { canCreateDirectoryLinks, createDirectoryLink } from "../fixtures.ts";
 import {
+  revalidateWorktreePath,
   validateWorktreePath,
   WORKTREE_VALIDATION_ERRORS,
   type WorktreeValidationSuccess,
@@ -585,6 +586,70 @@ describe("validateWorktreePath", () => {
 
     expect(result.ok).toBe(false);
     expect((result as WorktreeValidationFailure).error).toBe(WORKTREE_VALIDATION_ERRORS.DIFFERENT_REPO);
+  });
+});
+
+describe("revalidateWorktreePath", () => {
+  it("rejects a worktree deleted after initial validation", async () => {
+    const tmp = makeTempDir("wt-revalidate-delete");
+    try {
+      const parent = join(tmp.dir, "parent");
+      const worktree = join(tmp.dir, "worktree");
+      mkdirSync(parent, { recursive: true });
+      mkdirSync(worktree, { recursive: true });
+      const commonDir = join(tmp.dir, "shared.git");
+      const pi = makePi(new Map([
+        [parent, commonDir],
+        [worktree, commonDir],
+      ]));
+
+      expect((await validateWorktreePath(pi, worktree, parent)).ok).toBe(true);
+      rmSync(worktree, { recursive: true, force: true });
+
+      await expect(revalidateWorktreePath(pi, worktree.replace(/\\/g, "/"), parent)).resolves.toEqual({
+        ok: false,
+        error: WORKTREE_VALIDATION_ERRORS.PATH_DOES_NOT_EXIST,
+      });
+    } finally {
+      tmp.cleanup();
+    }
+  });
+
+  itWithDirectoryLinkSupport("rejects a symlink retargeted after initial validation", async () => {
+    const tmp = makeTempDir("wt-revalidate-link");
+    try {
+      const parent = join(tmp.dir, "parent");
+      const first = join(tmp.dir, "first");
+      const second = join(tmp.dir, "second");
+      const selected = join(tmp.dir, "selected");
+      mkdirSync(parent, { recursive: true });
+      mkdirSync(first, { recursive: true });
+      mkdirSync(second, { recursive: true });
+      createDirectoryLink(first, selected);
+      const commonDir = join(tmp.dir, "shared.git");
+      const pi = makePi(new Map([
+        [parent, commonDir],
+        [first, commonDir],
+        [second, commonDir],
+      ]));
+
+      const initial = await validateWorktreePath(pi, selected, parent);
+      expect(initial).toMatchObject({ ok: true, resolvedPath: toForwardSlashPath(first) });
+      rmSync(selected, { recursive: true, force: true });
+      createDirectoryLink(second, selected);
+
+      await expect(revalidateWorktreePath(
+        pi,
+        selected,
+        parent,
+        (initial as WorktreeValidationSuccess).resolvedPath,
+      )).resolves.toEqual({
+        ok: false,
+        error: WORKTREE_VALIDATION_ERRORS.PATH_CHANGED,
+      });
+    } finally {
+      tmp.cleanup();
+    }
   });
 });
 

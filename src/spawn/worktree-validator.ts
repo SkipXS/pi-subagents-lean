@@ -20,6 +20,7 @@ export const WORKTREE_VALIDATION_ERRORS = {
   DIFFERENT_REPO: "worktree_path is not a worktree of the parent's repository",
   GIT_NOT_FOUND: "worktree_path validation failed: git executable not found on this host",
   GIT_TIMEOUT: "worktree_path validation failed: git command timed out",
+  PATH_CHANGED: "worktree_path changed after validation",
 } as const;
 
 /** Successful validation result. */
@@ -199,6 +200,38 @@ export async function validateWorktreePath(
     worktreeRoot: normalizedRoot,
     label,
   };
+}
+
+/**
+ * Repeat validation at the execution boundary and reject a path whose canonical
+ * target changed after it was selected. This preserves same-repository
+ * validation; it is not intended to sandbox a worktree.
+ */
+export async function revalidateWorktreePath(
+  pi: PiExec,
+  selectedPath: string,
+  parentCwd: string,
+  expectedResolvedPath = selectedPath,
+  onWarning?: (msg: string) => void,
+): Promise<WorktreeValidationResult> {
+  const validation = await validateWorktreePath(pi, selectedPath, parentCwd, onWarning);
+  if (!validation.ok) return validation;
+  if (!validation.resolvedPath || !sameCanonicalPath(validation.resolvedPath, expectedResolvedPath)) {
+    return { ok: false, error: WORKTREE_VALIDATION_ERRORS.PATH_CHANGED };
+  }
+  return validation;
+}
+
+/** Compare canonical display paths while retaining Windows case semantics. */
+function sameCanonicalPath(first: string, second: string): boolean {
+  const firstIsWindowsPath = isWindowsAbsolutePath(first);
+  const secondIsWindowsPath = isWindowsAbsolutePath(second);
+  if (firstIsWindowsPath || secondIsWindowsPath) {
+    return firstIsWindowsPath
+      && secondIsWindowsPath
+      && path.win32.normalize(first).toLowerCase() === path.win32.normalize(second).toLowerCase();
+  }
+  return path.posix.normalize(first) === path.posix.normalize(second);
 }
 
 /**

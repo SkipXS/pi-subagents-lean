@@ -478,6 +478,26 @@ describe("buildAgentActionsList — stop/steer callback routing", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("reports an unavailable or rejected stop instead of claiming it stopped", async () => {
+    const record = makeRecord({
+      lifecycle: { status: "running", startedAt: Date.now() - 20000 },
+      execution: { session: { messages: [] } },
+      result: "",
+    });
+    const ctx = createMockCtx();
+    mockModules.mockManager.abort.mockImplementationOnce(() => false).mockImplementationOnce(() => {
+      throw new Error("manager disposed");
+    });
+
+    const first: any = buildAgentActionsList(ctx, record, noopTheme, () => {}, () => {}, () => {});
+    await first.onSelect!({ value: "stop" });
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Unable to stop test-id-", "error");
+
+    const second: any = buildAgentActionsList(ctx, record, noopTheme, () => {}, () => {}, () => {});
+    await second.onSelect!({ value: "stop" });
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Unable to stop test-id-: manager disposed", "error");
+  });
+
   it("opens steer input on steer selection", async () => {
     const record = makeRecord({
       lifecycle: { status: "running", startedAt: Date.now() - 20000 },
@@ -517,6 +537,25 @@ describe("buildAgentActionsList — stop/steer callback routing", () => {
     expect(mockModules.mockManager.steer).toHaveBeenCalledWith("test-id-123", "please do this");
     // After submit, should switch back to the list
     expect(setActive).toHaveBeenCalledTimes(2); // steer input + back to list
+  });
+
+  it("reports a rejected steer and returns to the action list", async () => {
+    const record = makeRecord({
+      lifecycle: { status: "running", startedAt: Date.now() - 20000 },
+      execution: { session: { messages: [] } },
+      result: "",
+    });
+    const ctx = createMockCtx();
+    let capturedInput: any = null;
+    const setActive = vi.fn((c: any) => { capturedInput = c; });
+    mockModules.mockManager.steer.mockRejectedValueOnce(new Error("session closed"));
+
+    const list: any = buildAgentActionsList(ctx, record, noopTheme, () => {}, setActive, () => {});
+    await list.onSelect!({ value: "steer" });
+    await capturedInput.onSubmit("please do this");
+
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Steer failed for test-id-: session closed", "error");
+    expect(setActive).toHaveBeenCalledTimes(2);
   });
 
   it("cancels steer on escape", async () => {

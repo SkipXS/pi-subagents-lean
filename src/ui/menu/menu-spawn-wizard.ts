@@ -18,6 +18,7 @@ import { findModelInRegistry } from "../../utils.js";
 import { normalizeThinkingLevel, supportedThinkingLevels } from "../../models/thinking.js";
 import { buildModelOptions, buildSettingsListTheme, buildSelectListTheme, createSearchableSelect } from "./helpers.js";
 import { DEFAULT_GRACE_TURNS } from "../../config/config-io.js";
+import { revalidateWorktreePath, validateWorktreePath } from "../../spawn/worktree-validator.js";
 import { createNumericSubmenu, createInputSubmenu } from "./submenus/numeric-input.js";
 import { SettingsListWrapper } from "./wrappers/settings-list.js";
 import {
@@ -148,10 +149,21 @@ export async function showSpawnAgentMenu(
     : resolveType(type);
 
   const session = getSessionCtx();
-  const parentCwd = session?.cwd ?? "";
+  const parentCwd = session?.cwd ?? ctx.cwd ?? "";
+  const validateMenuWorktree = async (worktreePath: string, revalidate = false, expectedPath?: string) => {
+    const validation = revalidate
+      ? await revalidateWorktreePath(getPiInstance(), worktreePath, parentCwd, expectedPath)
+      : await validateWorktreePath(getPiInstance(), worktreePath, parentCwd);
+    if (!validation.ok || !validation.resolvedPath) {
+      ctx.ui.notify(`Worktree unavailable: ${validation.ok ? "worktree_path validation failed" : validation.error}`, "error");
+      return undefined;
+    }
+    return validation;
+  };
   const inGitRepo = parentCwd ? await isInGitRepo(parentCwd) : false;
   const worktrees = inGitRepo ? (await listWorktrees(parentCwd)) ?? [] : [];
   let initialWorktreePath: string | undefined;
+  let initialWorktreeSelectionPath: string | undefined;
   let initialWorktreeLabel = "Inherits parent cwd";
 
   // If the parent has no visible types, a trusted worktree can still provide
@@ -171,9 +183,12 @@ export async function showSpawnAgentMenu(
       theme,
     ));
     if (!chosen) return;
-    initialWorktreePath = chosen;
-    initialWorktreeLabel = worktrees.find(wt => wt.path === chosen)?.branch ?? "detached";
-    catalog = await resolveAgentCatalog(`${chosen}/.pi/agents`, {
+    const validation = await validateMenuWorktree(chosen);
+    if (!validation) return;
+    initialWorktreePath = validation.resolvedPath;
+    initialWorktreeSelectionPath = chosen;
+    initialWorktreeLabel = validation.label ?? worktrees.find(wt => wt.path === chosen)?.branch ?? "detached";
+    catalog = await resolveAgentCatalog(`${initialWorktreePath}/.pi/agents`, {
       disableDefaultAgents: getStore().agent.disableDefaultAgents,
     });
     if (availableTypes().length === 0) {
@@ -251,10 +266,13 @@ export async function showSpawnAgentMenu(
   let currentGraceTurns: number = store.agent.graceTurns ?? DEFAULT_GRACE_TURNS;
   let currentBackground: boolean = store.agent.forceBackground;
   let currentWorktreePath: string | undefined = initialWorktreePath;
+  let currentWorktreeSelectionPath: string | undefined = initialWorktreeSelectionPath;
   let currentWorktreeLabel = initialWorktreeLabel;
   let currentDescription = prompt.length > 50 ? prompt.slice(0, 50) : prompt;
   let rebuild: ((items: SettingItem[]) => void) | undefined;
   let worktreeResolutionRequest = 0;
+  let pendingWorktreeSelection: Promise<boolean> | undefined;
+  let latestWorktreeSelectionSucceeded = true;
 
   const applyAgentConfig = (type: string, config: AgentConfig) => {
     selectedType = type;
@@ -267,19 +285,30 @@ export async function showSpawnAgentMenu(
   };
 
   /** Resolve the complete selected catalog locally, ignoring stale picker results. */
-  const applyWorktreeSelection = async (worktreePath?: string): Promise<void> => {
+  const applyWorktreeSelection = async (worktreePath?: string, selectedLabel?: string): Promise<boolean> => {
     const request = ++worktreeResolutionRequest;
     let nextCatalog: Map<string, AgentConfig> | undefined;
+    let nextWorktreePath: string | undefined;
+    let nextWorktreeLabel = "Inherits parent cwd";
     if (worktreePath && ctx.isProjectTrusted()) {
-      nextCatalog = await resolveAgentCatalog(`${worktreePath}/.pi/agents`, {
+      // Validate immediately before opening worktree-local Markdown. Keep all
+      // results local until the request token confirms they are still current.
+      const validation = await validateMenuWorktree(worktreePath);
+      if (request !== worktreeResolutionRequest || !validation) return false;
+      nextWorktreePath = validation.resolvedPath;
+      nextWorktreeLabel = validation.label ?? selectedLabel ?? "detached";
+      nextCatalog = await resolveAgentCatalog(`${validation.resolvedPath}/.pi/agents`, {
         disableDefaultAgents: store.agent.disableDefaultAgents,
       });
     } else if (worktreePath) {
       // Do not read project-controlled Markdown before trust is granted.
       ctx.ui.notify("Worktree agent definitions are unavailable because the project is not trusted; using the parent agent definition.", "warning");
     }
-    if (request !== worktreeResolutionRequest) return;
+    if (request !== worktreeResolutionRequest) return false;
 
+    currentWorktreePath = nextWorktreePath;
+    currentWorktreeSelectionPath = nextWorktreePath ? worktreePath : undefined;
+    currentWorktreeLabel = nextWorktreeLabel ? nextWorktreeLabel : "Inherits parent cwd";
     catalog = nextCatalog;
     const types = availableTypes();
     const resolved = resolveSelectedType(selectedType);
@@ -291,6 +320,44 @@ export async function showSpawnAgentMenu(
       currentAgentConfig = undefined;
     }
     rebuild?.(buildItems());
+    return true;
+  };
+
+  /** Start a selection and retain its result so Spawn cannot use an older one. */
+  const selectWorktree = (worktreePath?: string, selectedLabel?: string) => {
+    latestWorktreeSelectionSucceeded = false;
+    const selection = applyWorktreeSelection(worktreePath, selectedLabel);
+    pendingWorktreeSelection = selection;
+    void selection.then(
+      (succeeded) => {
+        if (pendingWorktreeSelection === selection) {
+          pendingWorktreeSelection = undefined;
+          latestWorktreeSelectionSucceeded = succeeded;
+        }
+      },
+      () => {
+        if (pendingWorktreeSelection === selection) {
+          pendingWorktreeSelection = undefined;
+          latestWorktreeSelectionSucceeded = false;
+        }
+      },
+    );
+  };
+
+  /** Await the current selection, including its catalog resolution. */
+  const awaitLatestWorktreeSelection = async (): Promise<boolean> => {
+    while (pendingWorktreeSelection) {
+      const selection = pendingWorktreeSelection;
+      try {
+        await selection;
+      } catch {
+        if (pendingWorktreeSelection === selection) return false;
+        continue;
+      }
+      // A newer picker choice arrived while this one was resolving.
+      if (pendingWorktreeSelection === selection) return latestWorktreeSelectionSucceeded;
+    }
+    return latestWorktreeSelectionSucceeded;
   };
 
   const currentModel = () => findModelInRegistry(
@@ -325,16 +392,13 @@ export async function showSpawnAgentMenu(
           {
             onSelect: (value) => {
               if (value === "Inherits parent cwd") {
-                currentWorktreePath = undefined;
-                currentWorktreeLabel = value;
                 subDone(value);
-                void applyWorktreeSelection(undefined);
+                selectWorktree(undefined);
               } else {
                 const worktree = worktrees.find((entry) => entry.path === value);
-                currentWorktreePath = worktree?.path;
-                currentWorktreeLabel = worktree?.branch ?? "detached";
-                subDone(currentWorktreeLabel);
-                void applyWorktreeSelection(currentWorktreePath);
+                const label = worktree?.branch ?? "detached";
+                subDone(label);
+                selectWorktree(worktree?.path, label);
               }
             },
             onCancel: () => subDone(),
@@ -441,12 +505,26 @@ export async function showSpawnAgentMenu(
           const spawnPrompt = prompt;
 
           const doSpawn = async () => {
+            // A picker choice is asynchronous because it validates and loads
+            // the worktree catalog. Never fall back to the previously accepted
+            // worktree if the newest choice is still pending or failed.
+            if (!await awaitLatestWorktreeSelection()) return;
+
             // Re-read the selected worktree only into an invocation-local
             // catalog and snapshot that exact config for queued work.
             let finalCatalog = catalog;
-            if (currentWorktreePath) {
+            let finalWorktreePath = currentWorktreePath;
+            const finalWorktreeSelectionPath = currentWorktreeSelectionPath;
+            let finalWorktreeLabel = currentWorktreeLabel;
+            if (finalWorktreePath) {
               if (ctx.isProjectTrusted()) {
-                finalCatalog = await resolveAgentCatalog(`${currentWorktreePath}/.pi/agents`, {
+                // Recheck the canonical selection directly before reading the
+                // final overlay accepted for this runner.
+                const validation = await validateMenuWorktree(finalWorktreeSelectionPath ?? finalWorktreePath, true, finalWorktreePath);
+                if (!validation) return;
+                finalWorktreePath = validation.resolvedPath;
+                finalWorktreeLabel = validation.label ?? finalWorktreeLabel;
+                finalCatalog = await resolveAgentCatalog(`${finalWorktreePath}/.pi/agents`, {
                   disableDefaultAgents: store.agent.disableDefaultAgents,
                 });
               } else {
@@ -506,8 +584,10 @@ export async function showSpawnAgentMenu(
                 maxTokens,
                 thinkingLevel: thinking,
                 graceTurns,
-                worktreePath: currentWorktreePath,
-                worktreeLabel: currentWorktreePath ? currentWorktreeLabel : undefined,
+                worktreePath: finalWorktreePath,
+                worktreeLabel: finalWorktreePath ? finalWorktreeLabel : undefined,
+                worktreeParentCwd: finalWorktreePath ? parentCwd : undefined,
+                worktreeSelectionPath: finalWorktreePath ? finalWorktreeSelectionPath : undefined,
                 agentCatalog: finalCatalog,
                 invocation: {
                   modelName: model?.id,

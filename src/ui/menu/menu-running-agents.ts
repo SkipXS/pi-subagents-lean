@@ -229,27 +229,40 @@ export function buildAgentActionsList(
       input.setValue("");
       input.onSubmit = async (value) => {
         const trimmed = value.trim();
-        if (trimmed) {
-          const sent = await getManager()!.steer(record.id, trimmed);
-          ctx.ui.notify(
-            sent ? `Steer sent to ${shortId}…` : `Steer failed for ${shortId}`,
-            sent ? "info" : "error",
-          );
+        try {
+          if (trimmed) {
+            const sent = await getManager()!.steer(record.id, trimmed);
+            ctx.ui.notify(
+              sent ? `Steer sent to ${shortId}…` : `Steer failed for ${shortId}`,
+              sent ? "info" : "error",
+            );
+          }
+        } catch (err) {
+          ctx.ui.notify(`Steer failed for ${shortId}: ${err instanceof Error ? err.message : String(err)}`, "error");
+        } finally {
+          setActive(list);
         }
-        setActive(list);
       };
       input.onEscape = () => setActive(list);
       setActive(input);
     } else if (item.value === "stop") {
-      getManager()?.abort(record.id, "user");
-      ctx.ui.notify(`Stopped ${shortId}`, "info");
+      try {
+        const stopped = getManager()?.abort(record.id, "user") ?? false;
+        ctx.ui.notify(stopped ? `Stopped ${shortId}` : `Unable to stop ${shortId}`, stopped ? "info" : "error");
+      } catch (err) {
+        ctx.ui.notify(`Unable to stop ${shortId}: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
       onClose();
     } else if (item.value === "retry-delivery") {
-      const retried = getCoordinator()?.retryDelivery(record.id) ?? false;
-      ctx.ui.notify(
-        retried ? `Delivery retry attempted for ${shortId}` : `Delivery retry unavailable for ${shortId}`,
-        retried ? "info" : "error",
-      );
+      try {
+        const retried = getCoordinator()?.retryDelivery(record.id) ?? false;
+        ctx.ui.notify(
+          retried ? `Delivery retry attempted for ${shortId}` : `Delivery retry unavailable for ${shortId}`,
+          retried ? "info" : "error",
+        );
+      } catch (err) {
+        ctx.ui.notify(`Delivery retry failed for ${shortId}: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
       done();
     }
   };
@@ -299,10 +312,18 @@ export async function showRunningAgentsMenu(
 
     agentList.onSelect = async (item) => {
       if (item.value === "__stop-all") {
+        let stopped = 0;
         for (const r of running) {
-          getManager()?.abort(r.id, "user");
+          try {
+            if (getManager()?.abort(r.id, "user")) stopped++;
+          } catch {
+            // Continue attempting remaining agents; summarize the actual result below.
+          }
         }
-        ctx.ui.notify(`Stopped ${running.length} agent(s)`, "info");
+        ctx.ui.notify(
+          stopped > 0 ? `Stopped ${stopped} of ${running.length} agent(s)` : `Unable to stop ${running.length} agent(s)`,
+          stopped > 0 ? "info" : "error",
+        );
         done(undefined);
         return;
       }

@@ -12,6 +12,20 @@ import { mockModules, selectDialogInstances, resetSelectDialogInstances } from "
 import { createMockCtx } from "../../menu-test-helpers.js";
 import { getAgentConfig, getAvailableTypes, resolveAgentCatalog } from "../../../src/agents/agent-types.js";
 
+const worktreeValidator = vi.hoisted(() => ({
+  validate: vi.fn(async (_pi: unknown, selectedPath: string) => ({
+    ok: true, resolvedPath: selectedPath, worktreeRoot: selectedPath, label: selectedPath.split("/").filter(Boolean).pop(),
+  })),
+  revalidate: vi.fn(async (_pi: unknown, selectedPath: string, _parent: string, expectedPath?: string) => ({
+    ok: true, resolvedPath: expectedPath ?? selectedPath, worktreeRoot: expectedPath ?? selectedPath, label: (expectedPath ?? selectedPath).split("/").filter(Boolean).pop(),
+  })),
+}));
+
+vi.mock("../../../src/spawn/worktree-validator.js", () => ({
+  validateWorktreePath: worktreeValidator.validate,
+  revalidateWorktreePath: worktreeValidator.revalidate,
+}));
+
 // Capture SettingsList constructor calls from pi-tui
 let settingsListCalls: Array<{
   items: any[];
@@ -74,6 +88,12 @@ vi.mock("@earendil-works/pi-tui", () => ({
 import { showSpawnAgentMenu } from "../../../src/ui/menu/menu-spawn-wizard.js";
 
 function setupMocks() {
+  worktreeValidator.validate.mockReset().mockImplementation(async (_pi: unknown, selectedPath: string) => ({
+    ok: true, resolvedPath: selectedPath, worktreeRoot: selectedPath, label: selectedPath.split("/").filter(Boolean).pop(),
+  }));
+  worktreeValidator.revalidate.mockReset().mockImplementation(async (_pi: unknown, selectedPath: string, _parent: string, expectedPath?: string) => ({
+    ok: true, resolvedPath: expectedPath ?? selectedPath, worktreeRoot: expectedPath ?? selectedPath, label: (expectedPath ?? selectedPath).split("/").filter(Boolean).pop(),
+  }));
   mockModules.mockConfig.agent = { default: null, forceBackground: false, graceTurns: 6 };
   mockModules.mockSessionOverrides = { default: null };
   mockModules.mockSessionThinkingOverrides = {};
@@ -661,6 +681,162 @@ describe("showSpawnAgentMenu — worktree submenu", () => {
     item.submenu("Inherits parent cwd", mockDone);
     selectDialogInstances[selectDialogInstances.length - 1].callbacks.onSelect("/test-feature");
     expect(mockDone).toHaveBeenCalledWith("feature");
+  });
+
+  it("waits for a pending worktree validation and catalog before spawning", async () => {
+    setupExecMock({ inGitRepo: true, worktrees: [{ path: "/wt-new", branch: "new" }] });
+    let resolveValidation!: (value: any) => void;
+    const validation = new Promise<any>((resolve) => { resolveValidation = resolve; });
+    let resolveCatalog!: (value: Map<string, any>) => void;
+    const catalog = new Promise<Map<string, any>>((resolve) => { resolveCatalog = resolve; });
+    worktreeValidator.validate.mockImplementation((_pi: unknown, path: string) => {
+      if (path === "/wt-new") return validation;
+      return Promise.resolve({ ok: true, resolvedPath: path, worktreeRoot: path, label: "new" });
+    });
+    (resolveAgentCatalog as any)
+      .mockImplementationOnce(() => catalog)
+      .mockImplementation(async () => new Map([
+        ["general-purpose", (getAgentConfig as any)("general-purpose")],
+      ]));
+    const ctx = createMockWizardCtx(["general-purpose", "review", undefined]);
+    await completeWizard(ctx);
+
+    const worktree = allOptionItems().find((item: any) => item.id === "worktree");
+    worktree.submenu(worktree.currentValue, vi.fn());
+    selectDialogInstances.at(-1)!.callbacks.onSelect("/wt-new");
+    allOptionItems().find((item: any) => item.id === "spawn").submenu("", vi.fn());
+
+    await Promise.resolve();
+    expect(mockModules.mockManager.spawn).not.toHaveBeenCalled();
+
+    resolveValidation({ ok: true, resolvedPath: "/wt-new", worktreeRoot: "/wt-new", label: "new" });
+    await vi.waitFor(() => expect(resolveAgentCatalog).toHaveBeenCalledTimes(1));
+    expect(mockModules.mockManager.spawn).not.toHaveBeenCalled();
+
+    resolveCatalog(new Map([["general-purpose", (getAgentConfig as any)("general-purpose")]]));
+    await vi.waitFor(() => expect(mockModules.mockManager.spawn).toHaveBeenCalledTimes(1));
+    expect(mockModules.mockManager.spawn.mock.calls[0][4]).toMatchObject({
+      worktreePath: "/wt-new",
+      worktreeSelectionPath: "/wt-new",
+    });
+  });
+
+  it("keeps the accepted worktree when the picker is cancelled", async () => {
+    setupExecMock({ inGitRepo: true, worktrees: [{ path: "/wt-a", branch: "a" }, { path: "/wt-b", branch: "b" }] });
+    const ctx = createMockWizardCtx(["general-purpose", "review", undefined]);
+    await completeWizard(ctx);
+
+    const selectWorktree = (path: string) => {
+      const worktree = allOptionItems().find((item: any) => item.id === "worktree");
+      worktree.submenu(worktree.currentValue, vi.fn());
+      selectDialogInstances.at(-1)!.callbacks.onSelect(path);
+    };
+    selectWorktree("/wt-a");
+    await vi.waitFor(() => expect(resolveAgentCatalog).toHaveBeenCalledWith("/wt-a/.pi/agents", expect.anything()));
+
+    const worktree = allOptionItems().find((item: any) => item.id === "worktree");
+    worktree.submenu(worktree.currentValue, vi.fn());
+    selectDialogInstances.at(-1)!.callbacks.onCancel();
+    allOptionItems().find((item: any) => item.id === "spawn").submenu("", vi.fn());
+
+    await vi.waitFor(() => expect(mockModules.mockManager.spawn).toHaveBeenCalledTimes(1));
+    expect(mockModules.mockManager.spawn.mock.calls[0][4]).toMatchObject({
+      worktreePath: "/wt-a",
+      worktreeSelectionPath: "/wt-a",
+    });
+  });
+
+  it("does not spawn when the accepted worktree fails final revalidation", async () => {
+    setupExecMock({ inGitRepo: true, worktrees: [{ path: "/wt-a", branch: "a" }] });
+    const ctx = createMockWizardCtx(["general-purpose", "review", undefined]);
+    await completeWizard(ctx);
+
+    const worktree = allOptionItems().find((item: any) => item.id === "worktree");
+    worktree.submenu(worktree.currentValue, vi.fn());
+    selectDialogInstances.at(-1)!.callbacks.onSelect("/wt-a");
+    await vi.waitFor(() => expect(resolveAgentCatalog).toHaveBeenCalledWith("/wt-a/.pi/agents", expect.anything()));
+    worktreeValidator.revalidate.mockResolvedValue({
+      ok: false,
+      error: "worktree_path changed after validation",
+    } as any);
+
+    allOptionItems().find((item: any) => item.id === "spawn").submenu("", vi.fn());
+    await vi.waitFor(() => expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Worktree unavailable"),
+      "error",
+    ));
+    expect(mockModules.mockManager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to a previously accepted worktree when the latest selection fails", async () => {
+    setupExecMock({ inGitRepo: true, worktrees: [{ path: "/wt-a", branch: "a" }, { path: "/wt-b", branch: "b" }] });
+    let resolveLatestValidation!: (value: any) => void;
+    const latestValidation = new Promise<any>((resolve) => { resolveLatestValidation = resolve; });
+    worktreeValidator.validate.mockImplementation((_pi: unknown, path: string) => {
+      if (path === "/wt-b") return latestValidation;
+      return Promise.resolve({ ok: true, resolvedPath: path, worktreeRoot: path, label: "a" });
+    });
+    (resolveAgentCatalog as any).mockImplementation(async () => new Map([
+      ["general-purpose", (getAgentConfig as any)("general-purpose")],
+    ]));
+    const ctx = createMockWizardCtx(["general-purpose", "review", undefined]);
+    await completeWizard(ctx);
+
+    const selectWorktree = (path: string) => {
+      const worktree = allOptionItems().find((item: any) => item.id === "worktree");
+      worktree.submenu(worktree.currentValue, vi.fn());
+      selectDialogInstances.at(-1)!.callbacks.onSelect(path);
+    };
+    selectWorktree("/wt-a");
+    await vi.waitFor(() => expect(resolveAgentCatalog).toHaveBeenCalledWith("/wt-a/.pi/agents", expect.anything()));
+
+    selectWorktree("/wt-b");
+    allOptionItems().find((item: any) => item.id === "spawn").submenu("", vi.fn());
+    await Promise.resolve();
+    expect(mockModules.mockManager.spawn).not.toHaveBeenCalled();
+
+    resolveLatestValidation({ ok: false, error: "worktree_path is not inside a git repository" });
+    await vi.waitFor(() => expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Worktree unavailable"),
+      "error",
+    ));
+    await Promise.resolve();
+    expect(mockModules.mockManager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("keeps the latest worktree when an earlier validation resolves late", async () => {
+    setupExecMock({ inGitRepo: true, worktrees: [{ path: "/wt-a", branch: "a" }, { path: "/wt-b", branch: "b" }] });
+    const pending = new Map<string, { resolve: (value: any) => void; promise: Promise<any> }>();
+    for (const path of ["/wt-a", "/wt-b"]) {
+      let resolve!: (value: any) => void;
+      const promise = new Promise<any>((done) => { resolve = done; });
+      pending.set(path, { resolve: (value) => resolve(value), promise });
+    }
+    worktreeValidator.validate.mockImplementation((_pi: unknown, path: string) => pending.get(path)!.promise);
+    (resolveAgentCatalog as any).mockImplementation(async (dir: string) => new Map([
+      ["general-purpose", { ...(getAgentConfig as any)("general-purpose"), description: dir }],
+    ]));
+    const ctx = createMockWizardCtx(["general-purpose", "review", undefined]);
+    await completeWizard(ctx);
+
+    const select = (path: string) => {
+      const item = allOptionItems().find((entry: any) => entry.id === "worktree");
+      item.submenu(item.currentValue, vi.fn());
+      selectDialogInstances.at(-1)!.callbacks.onSelect(path);
+    };
+    select("/wt-a");
+    select("/wt-b");
+    pending.get("/wt-b")!.resolve({ ok: true, resolvedPath: "/wt-b", worktreeRoot: "/wt-b", label: "b" });
+    await vi.waitFor(() => expect(resolveAgentCatalog).toHaveBeenCalledWith("/wt-b/.pi/agents", expect.anything()));
+    pending.get("/wt-a")!.resolve({ ok: true, resolvedPath: "/wt-a", worktreeRoot: "/wt-a", label: "a" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    allOptionItems().find((entry: any) => entry.id === "spawn").submenu("", vi.fn());
+    await vi.waitFor(() => expect(mockModules.mockManager.spawn).toHaveBeenCalledTimes(1));
+    expect(mockModules.mockManager.spawn.mock.calls[0][4]).toMatchObject({
+      worktreePath: "/wt-b",
+      worktreeSelectionPath: "/wt-b",
+    });
   });
 
   it("refreshes model-aware options from a local worktree definition without leaking it", async () => {

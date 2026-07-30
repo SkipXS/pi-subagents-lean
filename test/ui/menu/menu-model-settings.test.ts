@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mockModules } from "../../menu-mock-setup.js";
+import { mockModules, selectDialogInstances, resetSelectDialogInstances } from "../../menu-mock-setup.js";
 import { createMockCtx } from "../../menu-test-helpers.js";
 import { getAgentConfig, getAllTypes } from "../../../src/agents/agent-types.js";
 
@@ -65,9 +65,10 @@ vi.mock("../../../src/ui/searchable-select.js", () => ({
   SearchableSelectDialog: class MockSearchableSelectDialog {
     onSelect?: (v: string) => void;
     onCancel?: () => void;
-    constructor(_items: any, _current: any, callbacks: any, _theme: any) {
+    constructor(items: any[], currentValue: any, callbacks: any, _theme: any) {
       this.onSelect = callbacks.onSelect;
       this.onCancel = callbacks.onCancel;
+      selectDialogInstances.push({ items, currentValue, callbacks });
     }
     render() { return []; }
     handleInput() {}
@@ -91,6 +92,7 @@ describe("showModelSettingsMenu — SettingsList migration", () => {
     settingsListCalls = [];
     selectListInstances = [];
     settingsListWrapperCalls = [];
+    resetSelectDialogInstances();
     vi.clearAllMocks();
     (getAgentConfig as any).mockImplementation(() => undefined);
   });
@@ -108,6 +110,41 @@ describe("showModelSettingsMenu — SettingsList migration", () => {
     expect(settingsListCalls.length).toBe(1);
     const ids = settingsListCalls[0].items.map((i: any) => i.id);
     expect(ids).toContain("defaultModel");
+  });
+
+  it("leaves model settings unchanged when the override mode selection is cancelled", async () => {
+    const ctx = createMockCtx();
+    await showModelSettingsMenu(ctx, ["anthropic/claude-sonnet-4-20250514"]);
+    const item = settingsListCalls[0].items.find((entry: any) => entry.id === "defaultModel");
+    const done = vi.fn();
+
+    item.submenu("", done);
+    selectListInstances.at(-1)!.onCancel!();
+
+    expect(done).toHaveBeenCalledWith();
+    expect(mockModules.mockConfig.agent.default).toBeNull();
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
+  });
+
+  it("keeps the model submenu open and reports a failed permanent write", async () => {
+    const ctx = createMockCtx();
+    const { getStore } = await import("../../../src/shell.js");
+    const setDefaultModel = (getStore() as any).mutate.agent.setDefaultModel;
+    (getStore() as any).mutate.agent.setDefaultModel = () => { throw new Error("config locked"); };
+    try {
+      await showModelSettingsMenu(ctx, ["anthropic/claude-sonnet-4-20250514"]);
+      const item = settingsListCalls[0].items.find((entry: any) => entry.id === "defaultModel");
+      const done = vi.fn();
+      item.submenu("", done);
+      selectListInstances.at(-1)!.onSelect!({ value: "permanent" });
+      selectDialogInstances.at(-1)!.callbacks.onSelect("anthropic/claude-sonnet-4-20250514");
+
+      expect(done).not.toHaveBeenCalled();
+      expect(ctx.ui.notify).toHaveBeenCalledWith("Failed to save setting: config locked", "error");
+      expect(mockModules.mockConfig.agent.default).toBeNull();
+    } finally {
+      (getStore() as any).mutate.agent.setDefaultModel = setDefaultModel;
+    }
   });
 
   it("shows global default model with current value", async () => {

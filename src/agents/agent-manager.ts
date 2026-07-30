@@ -88,6 +88,10 @@ interface NestedControl {
   usesParentSlot: boolean;
   worktreePath?: string;
   worktreeLabel?: string;
+  /** Parent cwd retained with the selected worktree for runner-boundary validation. */
+  worktreeParentCwd?: string;
+  /** Original path retained to detect a retargeted symlink at runner start. */
+  worktreeSelectionPath?: string;
   status: AgentStatus;
   settled: boolean;
 }
@@ -352,6 +356,8 @@ export class AgentManager {
       // manager directly rather than the tool/coordinator path.
       worktreePath: parent ? parent.worktreePath : frozenOptions.worktreePath,
       worktreeLabel: parent ? parent.worktreeLabel : frozenOptions.worktreeLabel,
+      worktreeParentCwd: parent ? parent.worktreeParentCwd : frozenOptions.worktreeParentCwd,
+      worktreeSelectionPath: parent ? parent.worktreeSelectionPath : frozenOptions.worktreeSelectionPath,
       status: queued ? "queued" : "running",
       settled: false,
     };
@@ -515,6 +521,8 @@ export class AgentManager {
       maxTokens: options.maxTokens,
       thinkingLevel: options.thinkingLevel,
       cwd: control.worktreePath,
+      worktreeParentCwd: control.worktreeParentCwd,
+      worktreeSelectionPath: control.worktreeSelectionPath,
       graceTurns: options.graceTurns,
       // The runner/runtime gets its own catalog projection; it must not gain a
       // mutable reference to the manager's authorization ledger.

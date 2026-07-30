@@ -13,9 +13,38 @@ import type { AgentStatus } from "../types.js";
 // Stats rendering helpers
 // ============================================================================
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function agentStatus(value: unknown): AgentStatus {
+  switch (value) {
+    case "running":
+    case "queued":
+    case "completed":
+    case "turn_limited":
+    case "stopped":
+    case "error":
+    case "aborted":
+      return value;
+    default:
+      return "completed";
+  }
+}
+
 /** Format agent display name with optional model and thinking level. */
 export function agentNameLabel(d: Record<string, unknown>, theme: Theme): string {
-  const typeName = getDisplayName((d.type as string) || "");
+  const typeName = getDisplayName(stringValue(d.type) || "");
   const modelName = typeof d.modelName === "string" && d.modelName.trim() ? d.modelName.trim() : undefined;
   const thinkingTag = formatThinkingTag(d.thinkingLevel);
   const label = [modelName, thinkingTag].filter((part): part is string => part !== undefined).join(" · ");
@@ -25,20 +54,20 @@ export function agentNameLabel(d: Record<string, unknown>, theme: Theme): string
 /** Build the stats line for an agent result card. */
 export function buildStatsLine(d: Record<string, unknown>, theme: Theme, showCost: boolean): string {
   const cells = buildStatsCells({
-    toolUses: (d.toolUses as number) ?? 0,
-    turnCount: d.turnCount as number | undefined,
-    maxTurns: d.maxTurns as number | undefined,
-    input: (d.input as number) ?? 0,
-    output: (d.output as number) ?? 0,
-    cacheRead: d.cacheRead as number | undefined,
-    cacheWrite: d.cacheWrite as number | undefined,
-    latestCacheHitRate: d.latestCacheHitRate as number | undefined,
-    contextPercent: d.contextPercent as number | null,
-    contextWindow: d.contextWindow as number | undefined,
-    autoCompactionEnabled: d.autoCompactionEnabled as boolean | undefined,
-    cost: showCost ? (d.cost as number | undefined) : undefined,
-    usingSubscription: showCost ? (d.usingSubscription as boolean | undefined) : undefined,
-    durationMs: d.durationMs as number,
+    toolUses: finiteNumber(d.toolUses) ?? 0,
+    turnCount: finiteNumber(d.turnCount),
+    maxTurns: finiteNumber(d.maxTurns),
+    input: finiteNumber(d.input) ?? 0,
+    output: finiteNumber(d.output) ?? 0,
+    cacheRead: finiteNumber(d.cacheRead),
+    cacheWrite: finiteNumber(d.cacheWrite),
+    latestCacheHitRate: finiteNumber(d.latestCacheHitRate),
+    contextPercent: finiteNumber(d.contextPercent),
+    contextWindow: finiteNumber(d.contextWindow),
+    autoCompactionEnabled: typeof d.autoCompactionEnabled === "boolean" ? d.autoCompactionEnabled : undefined,
+    cost: showCost ? finiteNumber(d.cost) : undefined,
+    usingSubscription: showCost && typeof d.usingSubscription === "boolean" ? d.usingSubscription : undefined,
+    durationMs: finiteNumber(d.durationMs),
   }, theme);
   return formatStatsRow(cells) ?? "";
 }
@@ -74,12 +103,13 @@ export function renderAgentToolResult(
   showCost: boolean,
 ): Text {
   const { expanded } = options;
-  const text = result.content[0]?.type === "text" ? result.content[0].text ?? "" : "";
-  const d = result.details;
+  const firstContent = Array.isArray(result.content) ? result.content[0] : undefined;
+  const text = firstContent?.type === "text" && typeof firstContent.text === "string" ? firstContent.text : "";
+  const d = asRecord(result.details);
   const icon = result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-  const desc = (d?.description as string) || "";
+  const desc = stringValue(d?.description) || "";
 
-  if (d && d.turnCount != null) {
+  if (d && finiteNumber(d.turnCount) !== undefined) {
     const namePart = agentNameLabel(d, theme);
     const statsLine = buildStatsLine(d, theme, showCost);
     let lines = `${icon} ${namePart} · ${statsLine}\n  ${theme.fg("text", desc)}`;
@@ -111,26 +141,28 @@ export function renderSubagentResult(
   showCost: boolean,
 ): Container {
   const { expanded } = options;
-  const d = message.details;
-  const text = (message.content as string)?.trim() || "";
+  const d = asRecord(message.details);
+  const text = typeof message.content === "string" ? message.content.trim() : "";
 
   const inner = new Container();
   inner.addChild(new Text(theme.fg("customMessageLabel", "Subagent Result"), 0, 0));
   inner.addChild(new Spacer(1));
 
   if (d && d.turnCount != null) {
-    const status = (d.status as AgentStatus | undefined) ?? "completed";
+    const status = agentStatus(d.status);
     const { icon, color } = getAgentStatusDisplay(status);
     const statusIcon = theme.fg(color, icon);
 
     const namePart = agentNameLabel(d, theme);
     const statsLine = buildStatsLine(d, theme, showCost);
-    let headerLine = `${statusIcon} ${namePart} · ${statsLine}\n  ${theme.fg("text", (d.description as string) || "")}`;
-    if (d.outputFile as string) {
-      headerLine += `\n  ${theme.fg("dim", `output log: ${d.outputFile}`)}`;
+    let headerLine = `${statusIcon} ${namePart} · ${statsLine}\n  ${theme.fg("text", stringValue(d.description) || "")}`;
+    const outputFile = stringValue(d.outputFile);
+    const worktreePath = stringValue(d.worktreePath);
+    if (outputFile) {
+      headerLine += `\n  ${theme.fg("dim", `output log: ${outputFile}`)}`;
     }
-    if (d.worktreePath as string) {
-      headerLine += `\n  ${theme.fg("dim", `worktree: ${d.worktreePath}`)}`;
+    if (worktreePath) {
+      headerLine += `\n  ${theme.fg("dim", `worktree: ${worktreePath}`)}`;
     }
     inner.addChild(new Text(headerLine, 0, 0));
 
@@ -158,19 +190,20 @@ function buildFallbackResultLine(
   text: string,
   theme: Theme,
 ): string {
-  const status = (d?.status as AgentStatus | undefined) ?? "completed";
-  const { icon, color } = getAgentStatusDisplay(status);
+  const { icon, color } = getAgentStatusDisplay(agentStatus(d?.status));
   let line = theme.fg(color, icon);
-  if (d?.type) {
-    line += ` ${agentNameLabel(d, theme)}`;
+  if (stringValue(d?.type)) {
+    line += ` ${agentNameLabel(d!, theme)}`;
   }
-  const desc = (d?.description as string) || "";
+  const desc = stringValue(d?.description);
   if (desc) line += `\n  ${theme.fg("text", desc)}`;
-  if (d?.outputFile) {
-    line += `\n  ${theme.fg("dim", `output log: ${d.outputFile}`)}`;
+  const outputFile = stringValue(d?.outputFile);
+  const worktreePath = stringValue(d?.worktreePath);
+  if (outputFile) {
+    line += `\n  ${theme.fg("dim", `output log: ${outputFile}`)}`;
   }
-  if (d?.worktreePath) {
-    line += `\n  ${theme.fg("dim", `worktree: ${d.worktreePath}`)}`;
+  if (worktreePath) {
+    line += `\n  ${theme.fg("dim", `worktree: ${worktreePath}`)}`;
   }
   return line;
 }
