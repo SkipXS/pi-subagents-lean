@@ -19,6 +19,8 @@ export const mockModules = {
   mockSessionOverrides: { default: null } as Record<string, any>,
   mockSessionThinkingOverrides: {} as Record<string, any>,
   mockSessionShowCost: undefined as boolean | undefined,
+  mockConfigHealth: "healthy" as "healthy" | "using-backup" | "unrecoverable",
+  mockCanRepair: false,
   mockManager: {
     setConcurrency: vi.fn(),
     listAgents: vi.fn<() => any[]>(() => []),
@@ -127,6 +129,12 @@ vi.mock("../src/agents/tool-execution.js", () => ({
 
 vi.mock("../src/shell.js", () => {
   const mockStore = {
+    get health() { return mockModules.mockConfigHealth; },
+    get canRepair() { return mockModules.mockCanRepair; },
+    repair() {
+      mockModules.mockConfigHealth = "healthy";
+      mockModules.mockCanRepair = false;
+    },
     get agent() {
       const a = mockModules.mockConfig.agent;
       const widgetMaxLines = a.widgetMaxLines ?? 12;

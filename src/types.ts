@@ -35,6 +35,8 @@ export interface AgentRecord {
   id: string;
   result?: string;
   error?: string;
+  /** Background-result handoff state; absent for foreground agents. */
+  delivery?: BackgroundDelivery;
   /** Lifecycle state: status, timestamps. */
   lifecycle: AgentLifecycle;
   /** Display-oriented info: type, description, output file, invocation. */
@@ -98,8 +100,19 @@ export interface CompactionInfo {
 /** Possible agent lifecycle statuses. */
 export type AgentStatus = "queued" | "running" | "completed" | "turn_limited" | "aborted" | "stopped" | "error";
 
-/** Who initiated an agent stop: "user" via UI menu, or "agent" via StopAgent tool. */
-export type StopInitiator = "user" | "agent";
+/** Who initiated an agent stop: UI user, agent tool, or its parent turn. */
+export type StopInitiator = "user" | "agent" | "parent";
+
+/** Background-result delivery state. `accepted` only means Pi did not synchronously reject sendMessage. */
+export type BackgroundDeliveryState = "pending" | "accepted" | "failed" | "abandoned";
+
+/** Metadata retained with a background agent result for delivery retry and UI status. */
+export interface BackgroundDelivery {
+  state: BackgroundDeliveryState;
+  attempts: number;
+  lastAttemptAt?: number;
+  lastError?: string;
+}
 
 /**
  * Lifecycle state: when the agent started, completed, and its current status.

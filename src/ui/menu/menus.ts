@@ -26,6 +26,8 @@ import { showWidgetSettingsMenu } from "./menu-widget-settings.js";
 import { showRunningAgentsMenu } from "./menu-running-agents.js";
 import { showAgentCatalog } from "./menu-agent-catalog.js";
 import { showSystemPromptMenu } from "./menu-system-prompt.js";
+import { showConfigRecoveryMenu } from "./menu-config-recovery.js";
+import { getStore } from "../../shell.js";
 
 // Spawn wizard — co-located in this folder.
 import { showSpawnAgentMenu } from "./menu-spawn-wizard.js";
@@ -40,17 +42,18 @@ export { showSpawnAgentMenu };
 async function runSelectMenu(
   ctx: ExtensionCommandContext,
   title: string,
-  items: SelectItem[],
-  dispatch: (choice: string) => Promise<void>,
+  items: SelectItem[] | (() => SelectItem[]),
+  dispatch: (choice: string) => Promise<boolean | void>,
 ): Promise<void> {
   while (true) {
     const choice = await ctx.ui.custom<string | undefined>((_tui, theme, _kb, done) => {
-      const list = new SelectList([...items], 10, buildSelectListTheme(theme));
+      const currentItems = typeof items === "function" ? items() : items;
+      const list = new SelectList([...currentItems], 10, buildSelectListTheme(theme));
       list.onSelect = (item) => done(item.value);
       return new SettingsListWrapper(list, { title, theme, onCancel: () => done(undefined) });
     });
     if (choice === undefined) return;
-    await dispatch(choice);
+    if (await dispatch(choice)) return;
   }
 }
 
@@ -58,12 +61,17 @@ export async function showSettingsMenu(
   ctx: ExtensionCommandContext,
   modelOptions: string[],
 ): Promise<void> {
-  const items: SelectItem[] = [
-    { value: "models", label: "Agent settings", description: "Agent availability and global/per-agent model and thinking overrides" },
-    { value: "execution", label: "Execution", description: "Global concurrency, background mode, and turn limits" },
-    { value: "widget", label: "Widget", description: "Appearance, sizing, behavior, and usage stats" },
-    { value: "systemprompt", label: "System prompt, context, skills & extensions", description: "Prompt mode and implicit loading defaults" },
-  ];
+  const items = (): SelectItem[] => {
+    if (getStore().health !== "healthy") {
+      return [{ value: "recovery", label: "Config recovery required", description: "Persistent settings are disabled until the config is recovered safely" }];
+    }
+    return [
+      { value: "models", label: "Agent settings", description: "Agent availability and global/per-agent model and thinking overrides" },
+      { value: "execution", label: "Execution", description: "Global concurrency, background mode, and turn limits" },
+      { value: "widget", label: "Widget", description: "Appearance, sizing, behavior, and usage stats" },
+      { value: "systemprompt", label: "System prompt, context, skills & extensions", description: "Prompt mode and implicit loading defaults" },
+    ];
+  };
 
   await runSelectMenu(ctx, "Settings", items, async (choice) => {
     switch (choice) {
@@ -71,6 +79,7 @@ export async function showSettingsMenu(
       case "execution": await showExecutionMenu(ctx); break;
       case "widget": await showWidgetSettingsMenu(ctx); break;
       case "systemprompt": await showSystemPromptMenu(ctx); break;
+      case "recovery": await showConfigRecoveryMenu(ctx); break;
     }
   });
 }

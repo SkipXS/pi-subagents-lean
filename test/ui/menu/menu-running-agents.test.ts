@@ -200,6 +200,16 @@ describe("buildAgentActionsList — actions submenu", () => {
     expect(values).not.toContain("stop");
   });
 
+  it("shows Retry delivery only for terminal delivery failures", () => {
+    const failed = makeRecord({ delivery: { state: "failed", attempts: 1, lastError: "stale Pi" } });
+    const accepted = makeRecord({ delivery: { state: "accepted", attempts: 1 } });
+    const abandoned = makeRecord({ delivery: { state: "abandoned", attempts: 1 } });
+
+    expect((buildAgentActionsList(createMockCtx(), failed, noopTheme, () => {}, () => {}, () => {}) as any).items.map((i: any) => i.value)).toContain("retry-delivery");
+    expect((buildAgentActionsList(createMockCtx(), accepted, noopTheme, () => {}, () => {}, () => {}) as any).items.map((i: any) => i.value)).not.toContain("retry-delivery");
+    expect((buildAgentActionsList(createMockCtx(), abandoned, noopTheme, () => {}, () => {}, () => {}) as any).items.map((i: any) => i.value)).not.toContain("retry-delivery");
+  });
+
 });
 
 describe("showTextViewer (via buildAgentActionsList)", () => {

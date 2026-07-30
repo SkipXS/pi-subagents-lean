@@ -16,6 +16,7 @@ vi.mock("../../../src/ui/menu/menu-widget-settings.js", () => ({ showWidgetSetti
 vi.mock("../../../src/ui/menu/menu-running-agents.js", () => ({ showRunningAgentsMenu: vi.fn() }));
 vi.mock("../../../src/ui/menu/menu-agent-catalog.js", () => ({ showAgentCatalog: vi.fn() }));
 vi.mock("../../../src/ui/menu/menu-system-prompt.js", () => ({ showSystemPromptMenu: vi.fn() }));
+vi.mock("../../../src/ui/menu/menu-config-recovery.js", () => ({ showConfigRecoveryMenu: vi.fn() }));
 vi.mock("../../../src/ui/menu/menu-spawn-wizard.js", () => ({ showSpawnAgentMenu: vi.fn() }));
 
 import { showRunningAgentsMenu } from "../../../src/ui/menu/menu-running-agents.js";
@@ -25,12 +26,15 @@ import { showModelSettingsMenu } from "../../../src/ui/menu/menu-model-settings.
 import { showExecutionMenu } from "../../../src/ui/menu/menu-execution.js";
 import { showWidgetSettingsMenu } from "../../../src/ui/menu/menu-widget-settings.js";
 import { showSystemPromptMenu } from "../../../src/ui/menu/menu-system-prompt.js";
+import { showConfigRecoveryMenu } from "../../../src/ui/menu/menu-config-recovery.js";
 import { showAgentsMainMenu, showSettingsMenu } from "../../../src/ui/menu/menus.js";
 
 function resetAgentState(): void {
   mockModules.mockConfig.agent = { default: null, forceBackground: false };
   mockModules.mockSessionOverrides.default = null;
   mockModules.mockSessionShowCost = undefined;
+  mockModules.mockConfigHealth = "healthy";
+  mockModules.mockCanRepair = false;
 }
 
 describe("showAgentsMainMenu — SelectList dispatcher", () => {
@@ -103,6 +107,19 @@ describe("showSettingsMenu — SelectList dispatcher", () => {
     expect(component.settingsList.items.map((item: any) => item.value)).toEqual([
       "models", "execution", "widget", "systemprompt",
     ]);
+  });
+
+  it("offers only the recovery/status flow while config health is not healthy", async () => {
+    mockModules.mockConfigHealth = "using-backup";
+    const ctx = createMockCtx();
+    let component: any;
+    ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
+      component = factory({ terminal: { rows: 40 } }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, null, () => {});
+      return undefined;
+    });
+
+    await showSettingsMenu(ctx, []);
+    expect(component.settingsList.items.map((item: any) => item.value)).toEqual(["recovery"]);
   });
 
   it("Escape closes the menu", async () => {

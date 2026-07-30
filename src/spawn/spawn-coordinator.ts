@@ -12,21 +12,13 @@ import { buildAgentDetails, formatResultContent } from "../agents/tool-execution
 /**
  * spawn-coordinator.ts — Spawn-and-track coordination for subagents.
  *
- * Single entry point for both LLM tool and menu spawn paths.
- * Owns: LiveView store, Nudge system (schedule/batch/emit), background agent tracking.
- * Delegates concurrency and record lifecycle to AgentManager (peers, not ownership).
- *
- * Decision refs: D3 (forward events to live-view), D4 (stats on record only),
- * D6 (Nudge owned here), D2 (peers with AgentManager).
+ * Single entry point for both LLM tool and menu spawn paths. Owns live display
+ * state and background-result delivery; AgentManager owns execution and records.
  */
-
-// ============================================================================
-// Types
-// ============================================================================
 
 /** Coordinator-owned per-agent live display state. Only transient UI state. */
 export interface LiveView {
-  activeTools: Map<string, string>;  // keyed by toolName_timestamp
+  activeTools: Map<string, string>;
   responseText: string;
 }
 
@@ -46,12 +38,10 @@ export interface SpawnResult {
   record: AgentRecord;
 }
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-/** Batch delay for nudges — only emit one update per batch window (ms). */
+/** Batch delay for automatic background-result delivery (ms). */
 const NUDGE_DELAY_MS = 200;
+
+type DeliverySource = "auto" | "manual";
 
 /** Copy array-valued fields so queued work cannot observe later config mutation. */
 function snapshotAgentConfig(config: AgentConfig | undefined): AgentConfig | undefined {
@@ -68,65 +58,54 @@ function snapshotAgentConfig(config: AgentConfig | undefined): AgentConfig | und
   };
 }
 
-// ============================================================================
-// SpawnCoordinator
-// ============================================================================
+function isTerminal(record: AgentRecord): boolean {
+  return record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
+}
+
+function deliveryErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export class SpawnCoordinator {
   /** Per-agent live display state. Widget reads from here + record for stats. */
   private liveViews = new Map<string, LiveView>();
 
-  /** Agent IDs spawned as background — only these trigger a nudge on completion. */
+  /** Background agents that have not yet completed. */
   private backgroundAgentIds = new Set<string>();
 
-  /** Captured ExtensionContext per background agent, bound to the spawning session. */
-  private backgroundContexts = new Map<string, ExtensionContext>();
-
-  /** Parent cancellation listeners for background delivery tracking. */
+  /** Parent cancellation listeners retained until delivery is accepted or abandoned. */
   private backgroundParentAborts = new Map<string, { signal: AbortSignal; listener: () => void }>();
 
-  /** Pending nudge agent IDs, batched within the delay window. */
+  /** Pending automatic delivery IDs, batched within the delay window. */
   private pendingNudges = new Set<string>();
 
-  /** Active nudge timer. */
+  /** IDs that already received their one automatic completion delivery attempt. */
+  private autoNudgeIssued = new Set<string>();
+
+  /** Guards synchronous/reentrant delivery calls so no attempt can be duplicated. */
+  private deliveryInProgress = new Set<string>();
+
+  /** Active automatic-delivery timer. */
   private nudgeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** Set during dispose to prevent nudge emission after session replacement. */
+  /** Set during dispose to prevent delivery through a stale Pi instance. */
   private disposed = false;
 
   constructor(private manager: AgentManager) {}
 
-  /**
-   * Spawn + wire tracking + (foreground) await.
-   * Single entry point for LLM tool executor and menu wizard.
-   */
+  /** Spawn + wire tracking + (foreground) await. */
   async spawn(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
     intent: SpawnIntent,
   ): Promise<SpawnResult> {
-    // Create live view BEFORE spawn so callbacks can close over it
-    const liveView: LiveView = {
-      activeTools: new Map(),
-      responseText: "",
-    };
+    const liveView: LiveView = { activeTools: new Map(), responseText: "" };
     const liveViewCallbacks = this.createLiveViewCallbacks(liveView);
 
-    // This is the shared spawn boundary for tool and menu paths. Normalize
-    // thinking here so the manager, record, runner, and UI all receive the
-    // level the effective model will actually use.
     const model = intent.model ?? ctx.model;
-    const thinkingLevel = normalizeThinkingLevel(
-      model,
-      intent.thinkingLevel ?? ctx.thinkingLevel,
-    );
+    const thinkingLevel = normalizeThinkingLevel(model, intent.thinkingLevel ?? ctx.thinkingLevel);
     const modelKey = intent.modelKey ?? (model ? `${model.provider}/${model.id}` : undefined);
-    // Callers that discover a worktree pass its config explicitly. The fallback
-    // keeps every other coordinator caller safe too.
     const agentConfig = snapshotAgentConfig(intent.agentConfig ?? getAgentConfig(intent.type));
-
-    // Shared config fields (SpawnConfig) pass through unchanged; only the
-    // intent-only fields (type/prompt/runInBackground/signal) need translation.
     const { type, prompt, runInBackground, invocation, signal, ...config } = intent;
     const spawnOptions: SpawnOptions = {
       ...config,
@@ -142,22 +121,16 @@ export class SpawnCoordinator {
 
     const agentId = this.manager.spawn(pi, ctx, type, prompt, spawnOptions);
     const record = this.manager.getRecord(agentId)!;
-    const isTerminal = record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
+    if (runInBackground) this.initializeBackgroundDelivery(record);
 
-    // A parent signal may already be aborted. AgentManager then stops and
-    // notifies synchronously, before this method can register its completion
-    // tracking. There is no parent turn left to receive a nudge, so do not
-    // retain UI/tracking state or an unconsumed terminal record.
-    if (isTerminal) {
-      if (intent.signal?.aborted) {
-        record.lifecycle.resultConsumed = true;
-      } else if (intent.runInBackground) {
-        // Reconcile any other synchronous terminal completion that occurred
-        // before onAgentComplete could observe the background registration.
-        // It still needs parent-abort tracking throughout the delivery delay.
+    if (isTerminal(record)) {
+      // An already-aborted parent can complete synchronously, before coordinator
+      // tracking is registered. It has no remaining route for a result.
+      if (runInBackground && signal?.aborted) {
+        this.abandonBackgroundDelivery(agentId, record);
+      } else if (runInBackground) {
         this.backgroundAgentIds.add(agentId);
-        this.backgroundContexts.set(agentId, ctx);
-        this.trackBackgroundParentAbort(agentId, intent.signal);
+        this.trackBackgroundParentAbort(agentId, signal);
         this.scheduleNudge(agentId);
       } else {
         record.lifecycle.resultConsumed = true;
@@ -165,32 +138,15 @@ export class SpawnCoordinator {
       return { agentId, record };
     }
 
-    // Register live view
     this.liveViews.set(agentId, liveView);
+    getWidget()?.ensureTimer();
 
-    // Ensure widget timer is running so it displays the new agent
-    // (menu path calls this explicitly, but tool path doesn't)
-    const widget = getWidget();
-    if (widget) {
-      widget.ensureTimer();
-    }
-
-    // Track background agents + capture ctx for fallback notification
-    if (intent.runInBackground) {
+    if (runInBackground) {
       this.backgroundAgentIds.add(agentId);
-      this.backgroundContexts.set(agentId, ctx);
-      this.trackBackgroundParentAbort(agentId, intent.signal);
-    }
-
-    if (!intent.runInBackground) {
-      // Foreground: await completion
+      this.trackBackgroundParentAbort(agentId, signal);
+    } else {
       await record.execution.promise;
-
-      // Foreground tool handler reads the result inline on return — mark it
-      // consumed so the cleanup timer may evict the record once it ages out.
       record.lifecycle.resultConsumed = true;
-
-      // Clean up live view (foreground completion handled inline)
       this.liveViews.delete(agentId);
     }
 
@@ -202,71 +158,91 @@ export class SpawnCoordinator {
     return this.liveViews.get(id);
   }
 
-  /** Check if an agent was spawned as background. */
+  /** Check if an agent is still awaiting background completion. */
   isBackground(agentId: string): boolean {
     return this.backgroundAgentIds.has(agentId);
   }
 
   /**
-   * Schedule a nudge for a background agent.
-   * Batches with NUDGE_DELAY_MS window to coalesce rapid completions.
+   * Request the sole automatic delivery attempt for a background completion.
+   * Kept public for existing callers/tests; duplicate requests are deliberately
+   * ignored, including after a failed attempt.
    */
   scheduleNudge(agentId: string): void {
+    const record = this.manager.getRecord(agentId);
+    // Public callers can request this at any time. Only a retained terminal
+    // background result that is still pending may claim the automatic attempt.
+    if (this.disposed || this.autoNudgeIssued.has(agentId)
+      || !record || !isTerminal(record) || record.delivery?.state !== "pending") return;
+    this.autoNudgeIssued.add(agentId);
     this.pendingNudges.add(agentId);
-
     if (this.nudgeTimer) return;
 
     this.nudgeTimer = setTimeout(() => {
       this.nudgeTimer = null;
       const batch = [...this.pendingNudges];
       this.pendingNudges.clear();
-
-      for (const id of batch) {
-        this.emitIndividualNudge(id);
-      }
+      for (const id of batch) this.deliver(id, "auto");
     }, NUDGE_DELAY_MS);
   }
 
-  /**
-   * Called by AgentManager's onComplete callback (wired at session_start).
-   * Owns the completion side-effects: nudge scheduling, live-view cleanup.
-   */
+  /** Called by AgentManager's completion callback. */
   onAgentComplete(record: AgentRecord): void {
-    // A parent abort has no remaining LLM delivery route. Do not schedule a
-    // stale follow-up nudge; the result is objectively consumed by cancellation.
+    this.liveViews.delete(record.id);
+    if (!this.backgroundAgentIds.has(record.id)) return;
+
+    this.backgroundAgentIds.delete(record.id);
+    this.initializeBackgroundDelivery(record);
     if (this.backgroundParentAborts.get(record.id)?.signal.aborted) {
       this.abandonBackgroundDelivery(record.id, record);
       return;
     }
-    // Keep the listener through the delayed nudge window. The parent can end
-    // after completion but before delivery, in which case it must suppress the
-    // nudge and consume the otherwise-undeliverable result.
-
-    // Schedule nudge for background agents
-    if (this.backgroundAgentIds.has(record.id)) {
-      this.scheduleNudge(record.id);
-      this.backgroundAgentIds.delete(record.id);
-    }
-
-    // Clean up live view
-    this.liveViews.delete(record.id);
+    // Every background completion gets exactly one automatic attempt. The set
+    // also protects against accidental duplicate completion notifications.
+    this.scheduleNudge(record.id);
   }
 
-  /** Dispose: clear timer, live views, and background tracking. */
+  /**
+   * Immediately retry a terminal failed background delivery. Returns false when
+   * the record is no longer eligible (accepted, abandoned, evicted, or active).
+   */
+  retryDelivery(agentId: string): boolean {
+    if (this.disposed) return false;
+    const record = this.manager.getRecord(agentId);
+    if (!record || !isTerminal(record) || record.delivery?.state !== "failed") return false;
+    return this.deliver(agentId, "manual");
+  }
+
+  /** Remove coordinator tracking when AgentManager fully evicts a record. */
+  onRecordEvicted(record: AgentRecord): void {
+    this.clearBackgroundTracking(record.id, true);
+  }
+
+  /** Dispose without delivering any retained pending or failed result. */
   dispose(): void {
+    this.disposed = true;
     if (this.nudgeTimer) {
       clearTimeout(this.nudgeTimer);
       this.nudgeTimer = null;
     }
     this.pendingNudges.clear();
+
+    // Include completed failures and active background records: shutdown has no
+    // valid parent session, so none may be delivered if completion races dispose.
+    for (const record of this.manager.listAgents()) {
+      if (record.delivery?.state === "pending" || record.delivery?.state === "failed") {
+        this.abandonBackgroundDelivery(record.id, record);
+      }
+    }
     this.liveViews.clear();
     this.backgroundAgentIds.clear();
-    this.backgroundContexts.clear();
-    for (const id of this.backgroundParentAborts.keys()) this.clearBackgroundParentAbort(id);
-    this.disposed = true;
+    this.autoNudgeIssued.clear();
+    for (const id of [...this.backgroundParentAborts.keys()]) this.clearBackgroundParentAbort(id);
   }
 
-  // ── Private ──
+  private initializeBackgroundDelivery(record: AgentRecord): void {
+    record.delivery ??= { state: "pending", attempts: 0 };
+  }
 
   /** Create callbacks that bridge manager events to a specific live view. */
   private createLiveViewCallbacks(view: LiveView): Pick<SpawnOptions, "onToolActivity" | "onTextDelta"> {
@@ -280,19 +256,14 @@ export class SpawnCoordinator {
           }
         }
       },
-      onTextDelta: (_delta: string, fullText: string) => {
-        view.responseText = fullText;
-      },
+      onTextDelta: (_delta: string, fullText: string) => { view.responseText = fullText; },
     };
   }
 
-  /** Track parent cancellation so a background result cannot nudge an aborted turn. */
+  /** Keep delivery tied to the parent turn until Pi has accepted it. */
   private trackBackgroundParentAbort(agentId: string, signal?: AbortSignal): void {
-    if (!signal) return;
-    const listener = () => {
-      const record = this.manager.getRecord(agentId);
-      this.abandonBackgroundDelivery(agentId, record);
-    };
+    if (!signal || this.backgroundParentAborts.has(agentId)) return;
+    const listener = () => this.abandonBackgroundDelivery(agentId, this.manager.getRecord(agentId));
     this.backgroundParentAborts.set(agentId, { signal, listener });
     signal.addEventListener("abort", listener, { once: true });
     if (signal.aborted && this.backgroundParentAborts.has(agentId)) listener();
@@ -305,61 +276,58 @@ export class SpawnCoordinator {
     this.backgroundParentAborts.delete(agentId);
   }
 
-  /** Remove background delivery state when its parent no longer exists. */
+  /** Parent/dispose abandonment is terminal and deliberately has no retry path. */
   private abandonBackgroundDelivery(agentId: string, record?: AgentRecord): void {
-    record && (record.lifecycle.resultConsumed = true);
-    this.pendingNudges.delete(agentId);
-    this.backgroundAgentIds.delete(agentId);
-    this.backgroundContexts.delete(agentId);
-    this.liveViews.delete(agentId);
-    this.clearBackgroundParentAbort(agentId);
+    if (record?.delivery && record.delivery.state !== "accepted") {
+      record.delivery.state = "abandoned";
+      record.lifecycle.resultConsumed = true;
+    }
+    this.clearBackgroundTracking(agentId, true);
   }
 
-  /** Clear coordinator-only state after any terminal delivery attempt. */
-  private clearBackgroundDeliveryTracking(agentId: string): void {
+  /** Clear transient tracking; retain parent listener after failure for later parent abort. */
+  private clearBackgroundTracking(agentId: string, clearParent: boolean): void {
     this.pendingNudges.delete(agentId);
     this.backgroundAgentIds.delete(agentId);
-    this.backgroundContexts.delete(agentId);
     this.liveViews.delete(agentId);
-    this.clearBackgroundParentAbort(agentId);
+    if (clearParent) {
+      this.autoNudgeIssued.delete(agentId);
+      this.clearBackgroundParentAbort(agentId);
+    }
   }
 
-  /** Emit an individual nudge for a completed background agent. */
-  private emitIndividualNudge(agentId: string): void {
-    // An abort can happen after completion, while this nudge was waiting.
-    if (this.backgroundParentAborts.get(agentId)?.signal.aborted) {
-      this.abandonBackgroundDelivery(agentId, this.manager.getRecord(agentId));
-      return;
-    }
-
-    // Skip if disposed — prevents stale pi usage after session replacement
-    if (this.disposed) {
-      this.clearBackgroundDeliveryTracking(agentId);
-      return;
-    }
-
-    // Read pi and record before delivery. These are terminal delivery attempts:
-    // without either, leave the result unconsumed and never retain stale ctx.
-    const pi = getPiInstance();
+  /** Shared delivery path: auto only from pending, manual only from failed. */
+  private deliver(agentId: string, source: DeliverySource): boolean {
     const record = this.manager.getRecord(agentId);
-    if (!pi || !record) {
-      this.clearBackgroundDeliveryTracking(agentId);
-      return;
+    const delivery = record?.delivery;
+    if (!record) {
+      this.clearBackgroundTracking(agentId, true);
+      return false;
+    }
+    if (!delivery || this.deliveryInProgress.has(agentId)) return false;
+    if (source === "auto" ? delivery.state !== "pending" : delivery.state !== "failed") return false;
+
+    if (this.disposed || this.backgroundParentAborts.get(agentId)?.signal.aborted) {
+      this.abandonBackgroundDelivery(agentId, record);
+      return false;
     }
 
-    const details = buildAgentDetails(record, {
-      includeStats: true,
-      includeStatus: true,
-    });
-
+    this.deliveryInProgress.add(agentId);
+    delivery.attempts++;
+    delivery.lastAttemptAt = Date.now();
+    delete delivery.lastError;
     try {
-      // Pick delivery mode based on parent session state:
-      // - steer: queues while running, delivers before next LLM call
-      // - followUp: waits for agent to finish, then delivers
-      const ctx = getSessionCtx();
-      const parentIdle = ctx?.isIdle?.() ?? true;
-      const deliverAs = parentIdle ? "followUp" : "steer";
+      const pi = getPiInstance();
+      if (!pi) throw new Error("Pi instance unavailable for background result delivery");
+      // Check immediately before the irreversible handoff as well as before
+      // preparation, so a queued timer can never send after parent/dispose.
+      if (this.disposed || this.backgroundParentAborts.get(agentId)?.signal.aborted) {
+        this.abandonBackgroundDelivery(agentId, record);
+        return false;
+      }
 
+      const details = buildAgentDetails(record, { includeStats: true, includeStatus: true });
+      const parentIdle = getSessionCtx()?.isIdle?.() ?? true;
       pi.sendMessage(
         {
           customType: "subagent-result",
@@ -367,33 +335,22 @@ export class SpawnCoordinator {
           details,
           display: true,
         },
-        {
-          deliverAs,
-          triggerTurn: true,
-        },
+        { deliverAs: parentIdle ? "followUp" : "steer", triggerTurn: true },
       );
 
-      // Full result delivered to the LLM — record is now safe for the cleanup
-      // timer to evict once it ages out.
+      // This intentionally means only that Pi did not synchronously throw. It
+      // is not an LLM/provider delivery confirmation.
+      delivery.state = "accepted";
       record.lifecycle.resultConsumed = true;
+      this.clearBackgroundTracking(agentId, true);
     } catch (error) {
-      // sendMessage failed (shared runtime overwritten by subagent bindCore).
-      // Fall back to UI notification using the captured spawning-session context.
-      const spawnCtx = this.backgroundContexts.get(agentId);
-      if (spawnCtx?.ui?.notify) {
-        try {
-          spawnCtx.ui.notify(
-            `[Subagent "${record.display.type}" ${record.lifecycle.status}] Result available`,
-            "info",
-          );
-        } catch {
-          // ctx may also be stale if session was replaced
-        }
-      }
+      // Preserve result and terminal status for the explicit manual retry path.
+      delivery.state = "failed";
+      delivery.lastError = deliveryErrorMessage(error);
+      this.clearBackgroundTracking(agentId, false);
     } finally {
-      // Context is only a best-effort UI fallback and must never outlive a
-      // delivery attempt. A failed/no-Pi delivery deliberately stays unconsumed.
-      this.clearBackgroundDeliveryTracking(agentId);
+      this.deliveryInProgress.delete(agentId);
     }
+    return true;
   }
 }
