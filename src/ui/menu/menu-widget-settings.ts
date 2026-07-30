@@ -153,8 +153,6 @@ export async function showWidgetSettingsMenu(ctx: ExtensionCommandContext): Prom
         values: ["ON", "OFF"],
         description: "Show local HH:MM start time after each agent status symbol.",
       },
-      { id: "__sep__", label: "Usage stats", currentValue: "" },
-      ...statItems,
       { id: "__sep__", label: "Behavior", currentValue: "" },
       {
         id: "finishedRetention",
@@ -172,6 +170,8 @@ export async function showWidgetSettingsMenu(ctx: ExtensionCommandContext): Prom
         values: ["OFF", "80", "200", "500", "1000"],
         description: "Controls log file thinking buffering in chars. OFF = only at turn end, 80 = flush after 80 chars.",
       },
+      { id: "__sep__", label: "Usage stats", currentValue: "" },
+      ...statItems,
     ];
 
     settingsList = new SettingsList(items, 16, buildSettingsListTheme(theme), onChange, () => done(undefined));

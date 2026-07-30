@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   agentContinuationPrefix,
   agentHierarchyPrefix,
+  agentHierarchyRolePrefix,
   orderAgentsByHierarchy,
   visibleNestedAgentIds,
 } from "../../src/ui/agent-hierarchy.js";
@@ -43,10 +44,12 @@ describe("visible hierarchy prefixes", () => {
     ];
 
     expect(visibleNestedAgentIds(agents)).toEqual(new Set(["child"]));
-    expect(agentHierarchyPrefix(agents[1]!, agents)).toBe(" └");
+    expect(agentHierarchyPrefix(agents[1]!, agents)).toBe("  ");
+    expect(agentHierarchyRolePrefix(agents[1]!, agents)).toBe(" ↳ ");
     expect(agentContinuationPrefix(agents[1]!, agents)).toBe("   ");
     for (const agent of [agents[2]!, agents[3]!, agents[4]!, agents[5]!]) {
       expect(agentHierarchyPrefix(agent, agents)).toBe("  ");
+      expect(agentHierarchyRolePrefix(agent, agents)).toBe(" ");
       expect(agentContinuationPrefix(agent, agents)).toBe("  ");
     }
   });

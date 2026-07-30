@@ -146,14 +146,17 @@ describe("showAgentCatalog", () => {
     expect(message).toContain("Skills: all");
     expect(message).toContain("Preloaded skills: none");
     expect(message).toContain("Extensions: all");
-    expect(message).toContain("Delegation: leaf (no delegate_to); effective total child budget: 0; one foreground child at a time; depth 2 hard limit");
+    expect(message).toContain("Delegation: none");
+    expect(message).not.toContain("Children:");
+    expect(message).not.toContain("Depth:");
   });
 
-  it("shows effective delegation permissions and child limits", async () => {
+  it("shows sanitized delegation permissions, child limits, and the configured depth", async () => {
+    mockModules.mockConfig.agent.maxNestingDepth = 1;
     (getAllTypes as any).mockReturnValue(["Coordinator"]);
     (getAgentConfig as any).mockReturnValue({
       description: "Coordinates bounded work",
-      delegateTo: ["scout", "reviewer"],
+      delegateTo: ["scout\n\u001b[31m", "reviewer"],
       maxChildAgents: 3,
       systemPrompt: "Instructions",
     });
@@ -162,9 +165,12 @@ describe("showAgentCatalog", () => {
 
     await showAgentCatalog(ctx);
 
-    expect(ctx.ui.notify.mock.calls[0][0]).toContain(
-      "Delegation: allowed delegate_to: scout, reviewer; effective total child budget: 3; one foreground child at a time; depth 2 hard limit",
+    const message = ctx.ui.notify.mock.calls[0][0];
+    expect(message).toContain(
+      "Delegation: scout, reviewer\n  Children: 3 total · 1 at a time\n  Depth: 1",
     );
+    expect(message).not.toContain("delegate_to");
+    expect(message).not.toContain("effective total child budget");
   });
 
   it("shows cfg.systemPrompt as agent instructions rather than a runtime prompt", async () => {

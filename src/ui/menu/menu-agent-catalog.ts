@@ -37,13 +37,15 @@ function formatPolicy(value: true | string[] | false, excluded?: string[]): stri
   return excluded?.length ? `all except ${excluded.join(", ")}` : "all";
 }
 
-function formatDelegationPolicy(cfg: AgentConfig): string {
+function formatDelegationPolicy(cfg: AgentConfig, maxNestingDepth: number): string {
   const allowedRoles = cfg.delegateTo?.map(sanitizeDisplayText).filter(Boolean) ?? [];
-  const budget = getEffectiveMaxChildAgents(cfg);
-  const policy = allowedRoles.length > 0
-    ? `allowed delegate_to: ${allowedRoles.join(", ")}`
-    : "leaf (no delegate_to)";
-  return `${policy}; effective total child budget: ${budget}; one foreground child at a time; depth 2 hard limit`;
+  if (allowedRoles.length === 0) return "Delegation: none";
+
+  return [
+    `Delegation: ${allowedRoles.join(", ")}`,
+    `  Children: ${getEffectiveMaxChildAgents(cfg)} total · 1 at a time`,
+    `  Depth: ${maxNestingDepth}`,
+  ].join("\n");
 }
 
 function formatTools(
@@ -108,7 +110,7 @@ function formatAgentConfiguration(
   lines.push(`Skills: ${formatPolicy(skills)}${skillsNote}`);
   lines.push(`Preloaded skills: ${formatPolicy(cfg.preloadSkills ?? false)}`);
   lines.push(`Extensions: ${formatPolicy(extensions, Array.isArray(cfg.extensions) ? undefined : cfg.excludeExtensions)}`);
-  lines.push(`Delegation: ${formatDelegationPolicy(cfg)}`);
+  lines.push(formatDelegationPolicy(cfg, store.agent.maxNestingDepth));
   if (cfg.source) lines.push(`Source: ${cfg.source}`);
   return lines.join("\n");
 }
