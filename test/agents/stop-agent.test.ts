@@ -26,6 +26,17 @@ describe("executeStopAgentTool", () => {
     vi.clearAllMocks();
   });
 
+  it("returns cancellation before reading or stopping an agent", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await executeStopAgentTool("call_cancelled", { agent_id: "abc123def456ghi" }, controller.signal, undefined, {} as any);
+
+    expect(result).toMatchObject({ isError: true, content: [{ text: "Agent execution cancelled" }] });
+    expect(mockGetRecord).not.toHaveBeenCalled();
+    expect(mockAbort).not.toHaveBeenCalled();
+  });
+
   it("returns error when agent_id is missing", async () => {
     const result = await executeStopAgentTool("call_1", {}, undefined, undefined, {} as any);
     expect(result.isError).toBe(true);

@@ -108,7 +108,16 @@ vi.mock("../../src/utils.js", () => ({
   parseThinkingLevel: vi.fn((value?: string) => value),
 }));
 
-vi.mock("../../src/shell.js", () => ({
+vi.mock("../../src/shell.js", () => {
+  const coordinator = {
+    spawn: mockCoordinatorSpawn,
+    spawnNested: mockCoordinatorSpawnNested,
+    isBackground: vi.fn(() => false),
+    scheduleNudge: vi.fn(),
+    onAgentComplete: vi.fn(),
+    dispose: vi.fn(),
+  };
+  return {
   createSubagentRuntimeContext: (executeNestedAgent: any, settings: any) => Object.freeze({
     isChildRuntime: true as const,
     executeNestedAgent,
@@ -136,15 +145,9 @@ vi.mock("../../src/shell.js", () => ({
     ensureTimer: vi.fn(),
     update: vi.fn(),
   }),
-  getCoordinator: () => ({
-    spawn: mockCoordinatorSpawn,
-    spawnNested: mockCoordinatorSpawnNested,
-    isBackground: vi.fn(() => false),
-    scheduleNudge: vi.fn(),
-    onAgentComplete: vi.fn(),
-    dispose: vi.fn(),
-  }),
-}));
+  getCoordinator: () => coordinator,
+};
+});
 
 vi.mock("../../src/agents/usage.js", () => ({
   getSessionUsageSnapshot: vi.fn(() => undefined),
@@ -288,6 +291,53 @@ describe("executeAgentTool — explicit agent type", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("Unknown agent type: unknown-agent");
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("keeps listener-injected settings distinct from explicit tool values at execution", async () => {
+    const record = {
+      id: "agent-settings", result: "done",
+      display: { type: "general-purpose", description: "Test agent" },
+      lifecycle: { status: "completed", startedAt: 0, completedAt: 1 }, execution: {},
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+    };
+    mockGetRecord.mockReturnValueOnce(record);
+    mockModelFor.mockReturnValueOnce("settings/model");
+    mockThinkingSettingFor.mockReturnValueOnce({ value: "low", source: "config-global" });
+    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "settings", modelId: "model" });
+
+    const injected = makeParams();
+    await toolCallListener({ toolName: "Agent", input: injected } as any, ctx);
+    expect(injected).toMatchObject({
+      model: "settings/model", thinking: "low", _modelFromSettings: true, _thinkingFromSettings: true,
+    });
+
+    await executeAgentTool("injected-settings", injected, undefined, undefined, ctx);
+    expect(mockModelSettingFor).toHaveBeenLastCalledWith(
+      "general-purpose", expect.any(String), expect.any(Object), undefined,
+    );
+    expect(mockThinkingSettingFor).toHaveBeenLastCalledWith(
+      "general-purpose", undefined, expect.any(Object), undefined,
+    );
+
+    vi.clearAllMocks();
+    mockGetRecord.mockReturnValueOnce(record);
+    (utils.parseModelKey as any)
+      .mockReturnValueOnce({ provider: "explicit", modelId: "model" })
+      .mockReturnValueOnce({ provider: "explicit", modelId: "model" })
+      .mockReturnValueOnce({ provider: "explicit", modelId: "model" });
+    ctx.modelRegistry.find.mockReturnValueOnce({ provider: "explicit", id: "model" });
+    const explicit = makeParams({ model: "explicit/model", thinking: "high" });
+    await toolCallListener({ toolName: "Agent", input: explicit } as any, ctx);
+    expect(explicit._modelFromSettings).toBeUndefined();
+    expect(explicit._thinkingFromSettings).toBeUndefined();
+
+    await executeAgentTool("explicit-settings", explicit, undefined, undefined, ctx);
+    expect(mockModelSettingFor).toHaveBeenLastCalledWith(
+      "general-purpose", expect.any(String), expect.any(Object), "explicit/model",
+    );
+    expect(mockThinkingSettingFor).toHaveBeenLastCalledWith(
+      "general-purpose", undefined, expect.any(Object), "high",
+    );
   });
 });
 

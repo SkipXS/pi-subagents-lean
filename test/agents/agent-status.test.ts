@@ -32,6 +32,17 @@ describe("AgentStatus tool execute behavior", () => {
     vi.clearAllMocks();
   });
 
+  it("returns cancellation before reading agent status", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { executeAgentStatusTool } = await import("../../src/agents/agent-status.js");
+
+    const result = await executeAgentStatusTool("call_cancelled", {}, controller.signal, undefined, {} as any);
+
+    expect(result).toMatchObject({ isError: true, content: [{ text: "Agent execution cancelled" }] });
+    expect(mockListAgents).not.toHaveBeenCalled();
+  });
+
   it("returns empty state message when no agents exist", async () => {
     mockListAgents.mockReturnValue([]);
 

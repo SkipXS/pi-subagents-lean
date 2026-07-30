@@ -47,13 +47,27 @@ describe("showConfigRecoveryMenu", () => {
     expect(ctx.ui.notify).not.toHaveBeenCalled();
   });
 
-  it("repairs once after confirmation and reports success", async () => {
+  it("builds recovery and confirmation choices before repairing", async () => {
     const ctx = createMockCtx();
-    ctx.ui.custom.mockResolvedValueOnce("repair").mockResolvedValueOnce("yes");
+    const wrappers: any[] = [];
+    const choices = ["repair", "yes"];
+    ctx.ui.custom.mockImplementation(async (factory: any) => {
+      wrappers.push(factory(
+        { terminal: { rows: 40 } },
+        { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+        null,
+        () => {},
+      ));
+      return choices.shift();
+    });
     const repair = vi.spyOn(getStore(), "repair");
 
     await expect(showConfigRecoveryMenu(ctx)).resolves.toBe(true);
 
+    expect(wrappers).toHaveLength(2);
+    expect(wrappers.map((wrapper) => wrapper.title)).toEqual(["Config Recovery", "Confirm Config Repair"]);
+    expect(wrappers[0].settingsList.items.map((item: any) => item.value)).toEqual(["repair", "cancel"]);
+    expect(wrappers[1].settingsList.items.map((item: any) => item.value)).toEqual(["yes", "no"]);
     expect(repair).toHaveBeenCalledOnce();
     expect(mockModules.mockConfigHealth).toBe("healthy");
     expect(mockModules.mockCanRepair).toBe(false);

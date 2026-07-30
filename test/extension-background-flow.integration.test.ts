@@ -51,7 +51,15 @@ vi.mock("@earendil-works/pi-tui", () => {
 
 import extension from "../src/index.js";
 import { runAgent } from "../src/agents/agent-runner.js";
-import { getCoordinator, getManager, getPiInstance, getSessionCtx, getSubagentRuntimeContext } from "../src/shell.js";
+import {
+  getCoordinator,
+  getManager,
+  getPiInstance,
+  getSessionCtx,
+  getSubagentRuntimeContext,
+  setCoordinator,
+  setManager,
+} from "../src/shell.js";
 
 interface OfflineSession {
   prompt: ReturnType<typeof vi.fn>;
@@ -165,11 +173,44 @@ describe("offline extension background flow", () => {
     expect(api.tools.map((tool) => tool.name)).toEqual(["Agent", "StopAgent", "AgentStatus"]);
     expect(api.messageRenderers).toContain("subagent-result");
 
+    const agentTool = api.tools.find((tool) => tool.name === "Agent")!;
+    const stopAgentTool = api.tools.find((tool) => tool.name === "StopAgent")!;
+    const agentStatusTool = api.tools.find((tool) => tool.name === "AgentStatus")!;
+    const beforeStart = await Promise.all([
+      agentTool.execute("before-agent", { agent: "Scout", prompt: "must not start" }, undefined, undefined, ctx),
+      stopAgentTool.execute("before-stop", { agent_id: "missing" }, undefined, undefined, ctx),
+      agentStatusTool.execute("before-status", {}, undefined, undefined, ctx),
+    ]);
+    expect(beforeStart.every((result) => result.isError === true)).toBe(true);
+    expect(sessions).toHaveLength(0);
+    expect(api.api.sendMessage).not.toHaveBeenCalled();
+
     await listener(api, "session_start")({}, ctx);
     expect(getManager()).not.toBeNull();
     expect(getCoordinator()).not.toBeNull();
 
-    const agentTool = api.tools.find((tool) => tool.name === "Agent");
+    const manager = getManager()!;
+    const coordinator = getCoordinator()!;
+    setCoordinator(null);
+    const managerOnly = await Promise.all([
+      agentTool.execute("manager-only-agent", { agent: "Scout", prompt: "must not start" }, undefined, undefined, ctx),
+      stopAgentTool.execute("manager-only-stop", { agent_id: "missing" }, undefined, undefined, ctx),
+      agentStatusTool.execute("manager-only-status", {}, undefined, undefined, ctx),
+    ]);
+    expect(managerOnly.every((result) => result.isError === true)).toBe(true);
+
+    setCoordinator(coordinator);
+    setManager(null);
+    const coordinatorOnly = await Promise.all([
+      agentTool.execute("coordinator-only-agent", { agent: "Scout", prompt: "must not start" }, undefined, undefined, ctx),
+      stopAgentTool.execute("coordinator-only-stop", { agent_id: "missing" }, undefined, undefined, ctx),
+      agentStatusTool.execute("coordinator-only-status", {}, undefined, undefined, ctx),
+    ]);
+    expect(coordinatorOnly.every((result) => result.isError === true)).toBe(true);
+    expect(sessions).toHaveLength(0);
+    expect(api.api.sendMessage).not.toHaveBeenCalled();
+    setManager(manager);
+
     expect(agentTool).toBeDefined();
 
     const firstSpawn = await agentTool.execute("call-1", {
@@ -216,6 +257,17 @@ describe("offline extension background flow", () => {
     expect(sessions.every((session) => session.dispose.mock.calls.length === 1)).toBe(true);
     expect(getManager()).toBeNull();
     expect(getCoordinator()).toBeNull();
+
+    const sendMessageCalls = api.api.sendMessage.mock.calls.length;
+    const sessionCount = sessions.length;
+    const afterShutdown = await Promise.all([
+      agentTool.execute("after-agent", { agent: "Scout", prompt: "must not start" }, undefined, undefined, ctx),
+      stopAgentTool.execute("after-stop", { agent_id: "missing" }, undefined, undefined, ctx),
+      agentStatusTool.execute("after-status", {}, undefined, undefined, ctx),
+    ]);
+    expect(afterShutdown.every((result) => result.isError === true)).toBe(true);
+    expect(sessions).toHaveLength(sessionCount);
+    expect(api.api.sendMessage).toHaveBeenCalledTimes(sendMessageCalls);
   });
 
   it("isolates a direct executor-less run before extension loading", async () => {
@@ -415,9 +467,14 @@ describe("offline extension background flow", () => {
       await reviewer.session.promptStarted;
       expect(reviewer.session.setActiveToolsByName).toHaveBeenLastCalledWith(["read", "grep"]);
       reviewer.session.finish("Reviewer result");
-      await expect(reviewerResult).resolves.toMatchObject({
+      const nestedResult = await reviewerResult;
+      expect(nestedResult).toMatchObject({
         content: [expect.objectContaining({ text: expect.stringContaining("Reviewer result") })],
       });
+      expect(nestedResult).not.toHaveProperty("isError");
+      // The proxy re-enters its child ALS only for its bound call; neither the
+      // foreground result nor its completion can leak into root delivery.
+      expect(getSubagentRuntimeContext()).toBeUndefined();
       expect(api.api.sendMessage).not.toHaveBeenCalled();
 
       setups[0].session.finish("Implementer result");

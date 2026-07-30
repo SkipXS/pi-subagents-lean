@@ -9,6 +9,8 @@ const state = vi.hoisted(() => ({
   managers: [] as any[],
   widgets: [] as any[],
   coordinators: [] as any[],
+  coordinatorDisposeError: undefined as unknown,
+  coordinatorDisposePending: undefined as Promise<void> | undefined,
   registerAgents: vi.fn(),
   scanAndMerge: vi.fn(async () => new Map()),
   store: {
@@ -49,8 +51,16 @@ vi.mock("../src/agents/agent-manager.js", () => ({
 
 vi.mock("../src/ui/agent-widget.js", () => ({
   AgentWidget: class {
-    dispose = vi.fn();
-    setUICtx = vi.fn();
+    uiCtx: any;
+    dispose = vi.fn(() => {
+      this.uiCtx?.setWidget?.("agents", undefined);
+      this.uiCtx?.setStatus?.("agents", undefined);
+    });
+    setUICtx = vi.fn((uiCtx) => {
+      this.uiCtx = uiCtx;
+      uiCtx.setWidget?.("agents", this);
+      uiCtx.setStatus?.("agents", "active");
+    });
     onTurnStart = vi.fn();
     update = vi.fn();
     constructor() { state.widgets.push(this); }
@@ -64,7 +74,10 @@ vi.mock("../src/ui/conversation-viewer.js", () => ({
 
 vi.mock("../src/spawn/spawn-coordinator.js", () => ({
   SpawnCoordinator: class {
-    dispose = vi.fn();
+    dispose = vi.fn(async () => {
+      if (state.coordinatorDisposeError) throw state.coordinatorDisposeError;
+      await state.coordinatorDisposePending;
+    });
     onAgentComplete = vi.fn();
     constructor() { state.coordinators.push(this); }
   },
@@ -87,17 +100,30 @@ vi.mock("../src/shell.js", () => ({
 
 import { setupEventListeners } from "../src/events.js";
 
-function createContext(activeRecords: any[] = []) {
+function createContext(
+  activeRecords: any[] = [],
+  sharedUI?: { widgets: Map<string, unknown>; statuses: Map<string, unknown> },
+) {
   const unregister = vi.fn();
   const onTerminalInput = vi.fn(() => unregister);
   const notify = vi.fn();
+  const widgets = sharedUI?.widgets ?? new Map<string, unknown>();
+  const statuses = sharedUI?.statuses ?? new Map<string, unknown>();
+  const setWidget = vi.fn((key: string, value: unknown) => {
+    if (value === undefined) widgets.delete(key);
+    else widgets.set(key, value);
+  });
+  const setStatus = vi.fn((key: string, value: unknown) => {
+    if (value === undefined) statuses.delete(key);
+    else statuses.set(key, value);
+  });
   const ctx = {
     cwd: "/tmp/project",
     hasUI: true,
     isProjectTrusted: () => true,
-    ui: { onTerminalInput, notify },
+    ui: { onTerminalInput, notify, setWidget, setStatus },
   } as unknown as ExtensionContext;
-  return { ctx, unregister, onTerminalInput, notify, activeRecords };
+  return { ctx, unregister, onTerminalInput, notify, widgets, statuses, activeRecords };
 }
 
 describe("extension session lifecycle", () => {
@@ -110,6 +136,8 @@ describe("extension session lifecycle", () => {
     state.managers.length = 0;
     state.widgets.length = 0;
     state.coordinators.length = 0;
+    state.coordinatorDisposeError = undefined;
+    state.coordinatorDisposePending = undefined;
   });
 
   it("creates runtime services on start and disposes them on shutdown", async () => {
@@ -143,6 +171,78 @@ describe("extension session lifecycle", () => {
     expect(state.coordinator).toBeNull();
   });
 
+  it("waits for shutdown disposal before reactivating a new session", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const first = createContext();
+    await listeners.get("session_start")!({}, first.ctx);
+    const firstManager = state.manager;
+
+    let releaseDisposal!: () => void;
+    state.coordinatorDisposePending = new Promise<void>((resolve) => { releaseDisposal = resolve; });
+    const shutdown = listeners.get("session_shutdown")!({}, first.ctx);
+    await vi.waitFor(() => expect(state.coordinators[0].dispose).toHaveBeenCalledOnce());
+
+    const retry = createContext();
+    const restart = listeners.get("session_start")!({}, retry.ctx);
+    expect(state.sessionCtx).toBe(first.ctx);
+    expect(state.manager).toBe(firstManager);
+
+    releaseDisposal();
+    await shutdown;
+    await restart;
+    expect(state.sessionCtx).toBe(retry.ctx);
+    expect(state.manager).not.toBe(firstManager);
+    expect(retry.onTerminalInput).toHaveBeenCalledOnce();
+
+    await listeners.get("session_shutdown")!({}, retry.ctx);
+  });
+
+  it("keeps a new runtime intact when an older overlapping shutdown finishes late", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const sharedUI = { widgets: new Map<string, unknown>(), statuses: new Map<string, unknown>() };
+    const first = createContext([], sharedUI);
+    await listeners.get("session_start")!({}, first.ctx);
+    await listeners.get("tool_execution_start")!({}, first.ctx);
+    const firstManager = state.manager;
+    expect(sharedUI.widgets.get("agents")).toBe(state.widget);
+
+    let releaseFirstDisposal!: () => void;
+    state.coordinatorDisposePending = new Promise<void>((resolve) => { releaseFirstDisposal = resolve; });
+    const firstShutdown = listeners.get("session_shutdown")!({}, first.ctx);
+    await vi.waitFor(() => expect(state.coordinators[0].dispose).toHaveBeenCalledOnce());
+
+    // The second generation cleans global services while the first remains
+    // blocked disposing its coordinator.
+    await listeners.get("session_shutdown")!({}, first.ctx);
+
+    const retry = createContext([], sharedUI);
+    await listeners.get("session_start")!({}, retry.ctx);
+    await listeners.get("tool_execution_start")!({}, retry.ctx);
+    const retryManager = state.manager;
+    const retryWidget = state.widget;
+    const retryCoordinator = state.coordinator;
+    expect(retryManager).not.toBe(firstManager);
+    expect(sharedUI.widgets.get("agents")).toBe(retryWidget);
+    expect(sharedUI.statuses.get("agents")).toBe("active");
+    expect(state.sessionCtx).toBe(retry.ctx);
+
+    releaseFirstDisposal();
+    await firstShutdown;
+
+    expect(firstManager.dispose).toHaveBeenCalledOnce();
+    expect(state.store.dispose).toHaveBeenCalledOnce();
+    expect(state.manager).toBe(retryManager);
+    expect(state.widget).toBe(retryWidget);
+    expect(state.coordinator).toBe(retryCoordinator);
+    expect(sharedUI.widgets.get("agents")).toBe(retryWidget);
+    expect(sharedUI.statuses.get("agents")).toBe("active");
+    expect(state.sessionCtx).toBe(retry.ctx);
+
+    await listeners.get("session_shutdown")!({}, retry.ctx);
+  });
+
   it("re-registers terminal input after a shutdown and warns about killed agents", async () => {
     const listeners = new Map<string, (...args: any[]) => any>();
     setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
@@ -164,5 +264,143 @@ describe("extension session lifecycle", () => {
     expect(second.onTerminalInput).toHaveBeenCalledOnce();
     await listeners.get("session_shutdown")!({}, second.ctx);
     expect(second.unregister).toHaveBeenCalledOnce();
+  });
+
+  it("cleans a setDeps startup failure and can start again", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const first = createContext();
+    const failure = new Error("manager dependency failed");
+    state.store.setDeps.mockImplementationOnce(() => { throw failure; });
+
+    await expect(listeners.get("session_start")!({}, first.ctx)).rejects.toBe(failure);
+
+    expect(state.managers).toHaveLength(1);
+    expect(state.managers[0].dispose).toHaveBeenCalledOnce();
+    expect(state.coordinators).toHaveLength(0);
+    expect(state.widgets).toHaveLength(0);
+    expect(state.store.dispose).toHaveBeenCalledOnce();
+    expect(state.manager).toBeNull();
+    expect(state.widget).toBeNull();
+    expect(state.coordinator).toBeNull();
+    expect(state.sessionCtx).toBeNull();
+
+    const retry = createContext();
+    await expect(listeners.get("session_start")!({}, retry.ctx)).resolves.toBeUndefined();
+    expect(state.manager).not.toBeNull();
+    expect(retry.onTerminalInput).toHaveBeenCalledOnce();
+    await listeners.get("session_shutdown")!({}, retry.ctx);
+  });
+
+  it("does not leak a completed scan after shutdown and permits a fresh session", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const first = createContext();
+    let completeScan!: (catalog: Map<string, unknown>) => void;
+    const pendingScan = new Promise<Map<string, unknown>>((resolve) => { completeScan = resolve; });
+    state.scanAndMerge.mockImplementationOnce(() => pendingScan);
+
+    const startup = listeners.get("session_start")!({}, first.ctx);
+    expect(state.scanAndMerge).toHaveBeenCalledOnce();
+    expect(state.manager).not.toBeNull();
+    expect(state.coordinator).not.toBeNull();
+
+    await listeners.get("session_shutdown")!({}, first.ctx);
+    expect(state.coordinators[0].dispose).toHaveBeenCalledOnce();
+    expect(state.widgets[0].dispose).toHaveBeenCalledOnce();
+    expect(state.managers[0].dispose).toHaveBeenCalledOnce();
+    expect(state.manager).toBeNull();
+    expect(state.widget).toBeNull();
+    expect(state.coordinator).toBeNull();
+    expect(state.sessionCtx).toBeNull();
+
+    // Start a new session before the stale scan completes. It must own the
+    // shared agent catalog and terminal listener after reactivation.
+    const retry = createContext();
+    await expect(listeners.get("session_start")!({}, retry.ctx)).resolves.toBeUndefined();
+    expect(state.registerAgents).toHaveBeenCalledOnce();
+    expect(retry.onTerminalInput).toHaveBeenCalledOnce();
+
+    completeScan(new Map());
+    await expect(startup).resolves.toBeUndefined();
+    expect(state.registerAgents).toHaveBeenCalledOnce();
+    expect(first.onTerminalInput).not.toHaveBeenCalled();
+    expect(first.unregister).not.toHaveBeenCalled();
+    expect(state.sessionCtx).toBe(retry.ctx);
+    expect(state.manager).not.toBeNull();
+    expect(state.widget).not.toBeNull();
+    expect(state.coordinator).not.toBeNull();
+
+    await listeners.get("session_shutdown")!({}, retry.ctx);
+    expect(retry.unregister).toHaveBeenCalledOnce();
+  });
+
+  it("cleans services when scanning fails and supports a retry", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const first = createContext();
+    const failure = new Error("agent scan failed");
+    state.scanAndMerge.mockRejectedValueOnce(failure);
+
+    await expect(listeners.get("session_start")!({}, first.ctx)).rejects.toBe(failure);
+
+    expect(first.onTerminalInput).not.toHaveBeenCalled();
+    expect(state.coordinators[0].dispose).toHaveBeenCalledOnce();
+    expect(state.widgets[0].dispose).toHaveBeenCalledOnce();
+    expect(state.managers[0].dispose).toHaveBeenCalledOnce();
+    expect(state.store.dispose).toHaveBeenCalledOnce();
+    expect(state.manager).toBeNull();
+    expect(state.widget).toBeNull();
+    expect(state.coordinator).toBeNull();
+    expect(state.sessionCtx).toBeNull();
+
+    const retry = createContext();
+    await expect(listeners.get("session_start")!({}, retry.ctx)).resolves.toBeUndefined();
+    expect(retry.onTerminalInput).toHaveBeenCalledOnce();
+    await listeners.get("session_shutdown")!({}, retry.ctx);
+  });
+
+  it("preserves a startup error while continuing cleanup after a disposal error", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const first = createContext();
+    const startupFailure = new Error("agent scan failed");
+    const disposalFailure = new Error("coordinator disposal failed");
+    state.scanAndMerge.mockRejectedValueOnce(startupFailure);
+    state.coordinatorDisposeError = disposalFailure;
+
+    await expect(listeners.get("session_start")!({}, first.ctx)).rejects.toBe(startupFailure);
+
+    expect(state.widgets[0].dispose).toHaveBeenCalledOnce();
+    expect(state.managers[0].dispose).toHaveBeenCalledOnce();
+    expect(state.manager).toBeNull();
+    expect(state.widget).toBeNull();
+    expect(state.coordinator).toBeNull();
+    expect(state.sessionCtx).toBeNull();
+  });
+
+  it("unregisters terminal input when post-registration startup work fails", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const first = createContext();
+    const failure = new Error("tool expansion sync failed");
+    state.store.notifyToolsExpanded.mockImplementationOnce(() => { throw failure; });
+
+    await expect(listeners.get("session_start")!({}, first.ctx)).rejects.toBe(failure);
+
+    expect(first.onTerminalInput).toHaveBeenCalledOnce();
+    expect(first.unregister).toHaveBeenCalledOnce();
+    expect(state.coordinators[0].dispose).toHaveBeenCalledOnce();
+    expect(state.widgets[0].dispose).toHaveBeenCalledOnce();
+    expect(state.managers[0].dispose).toHaveBeenCalledOnce();
+    expect(state.manager).toBeNull();
+    expect(state.widget).toBeNull();
+    expect(state.coordinator).toBeNull();
+    expect(state.sessionCtx).toBeNull();
+
+    const retry = createContext();
+    await expect(listeners.get("session_start")!({}, retry.ctx)).resolves.toBeUndefined();
+    expect(retry.onTerminalInput).toHaveBeenCalledOnce();
+    await listeners.get("session_shutdown")!({}, retry.ctx);
   });
 });

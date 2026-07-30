@@ -9,7 +9,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
 import { SHORT_ID_LENGTH } from "../types.js";
-import { getManager } from "../shell.js";
+import { getCoordinator, getManager } from "../shell.js";
 
 /**
  * Format a single agent record as "short_id (type) status [delivery state]".
@@ -34,11 +34,24 @@ function formatAgent(record: AgentRecord): string {
 export async function executeAgentStatusTool(
   _toolCallId: string,
   _params: Record<string, unknown>,
-  _signal: AbortSignal | undefined,
+  signal: AbortSignal | undefined,
   _onUpdate: ((update: any) => void) | undefined,
   _ctx: ExtensionContext,
 ): Promise<any> {
-  const manager = getManager()!;
+  if (signal?.aborted) {
+    return {
+      content: [{ type: "text", text: "Agent execution cancelled" }],
+      isError: true as const,
+    };
+  }
+
+  const manager = getManager();
+  if (!manager || !getCoordinator()) {
+    return {
+      content: [{ type: "text", text: "Agent status is unavailable until the root session is ready" }],
+      isError: true as const,
+    };
+  }
   const agents = manager.listAgents();
 
   const nudge = "Don't poll — you'll receive notifications when agents complete.";
