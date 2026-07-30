@@ -175,6 +175,120 @@ describe("config I/O paths", () => {
     expect(tempWrites[0]![0]).not.toBe(tempWrites[1]![0]);
   });
 
+  it.each([
+    ["write", mockWriteFileSync],
+    ["open", mockOpenSync],
+    ["fsync", mockFsyncSync],
+  ])("preserves a %s failure, cleans its temp file, and releases the lock", async (_stage, failingCall) => {
+    const agentDir = "/tmp/pi-agent";
+    const configPath = join(agentDir, "subagents-lean.json");
+    const lockPath = `${configPath}.lock`;
+    const failure = new Error(`${_stage} failed`);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockGetAgentDir.mockReturnValue(agentDir);
+    if (_stage === "write") {
+      failingCall.mockImplementation((file) => {
+        if (String(file).endsWith(".tmp")) throw failure;
+      });
+    } else {
+      failingCall.mockImplementationOnce(() => { throw failure; });
+    }
+    mockReadFileSync.mockImplementation((file) => {
+      if (String(file) === join(lockPath, "owner.json")) {
+        const ownerWrite = mockWriteFileSync.mock.calls.find(([candidate]) => String(candidate).endsWith("owner.json"));
+        return ownerWrite?.[1] ?? "{}";
+      }
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    });
+    vi.resetModules();
+
+    try {
+      const { createConfigFileIO } = await import("../../src/config/config-io.ts");
+      expect(() => createConfigFileIO(agentDir).update(() => undefined)).toThrow(failure);
+      const tempWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).includes("subagents-lean.json.") && String(file).endsWith(".tmp"));
+      if (tempWrite) expect(mockUnlinkSync).toHaveBeenCalledWith(tempWrite[0]);
+      expect(mockRmSync).toHaveBeenCalledWith(lockPath, { recursive: true, force: true });
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("preserves a close-only failure, cleans its temp file, releases the lock, and permits a retry", async () => {
+    const agentDir = "/tmp/pi-agent";
+    const configPath = join(agentDir, "subagents-lean.json");
+    const lockPath = `${configPath}.lock`;
+    const closeFailure = new Error("close failed");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockGetAgentDir.mockReturnValue(agentDir);
+    mockCloseSync.mockImplementationOnce(() => { throw closeFailure; });
+    mockReadFileSync.mockImplementation((file) => {
+      if (String(file) === join(lockPath, "owner.json")) {
+        const ownerWrites = mockWriteFileSync.mock.calls.filter(([candidate]) => String(candidate).endsWith("owner.json"));
+        return ownerWrites.at(-1)?.[1] ?? "{}";
+      }
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    });
+    vi.resetModules();
+
+    try {
+      const { createConfigFileIO } = await import("../../src/config/config-io.ts");
+      const io = createConfigFileIO(agentDir);
+      let thrown: unknown;
+      try {
+        io.update(() => undefined);
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBe(closeFailure);
+      const failedTemp = mockWriteFileSync.mock.calls.find(([file]) => String(file).includes("subagents-lean.json.") && String(file).endsWith(".tmp"))![0];
+      expect(mockUnlinkSync).toHaveBeenCalledWith(failedTemp);
+      expect(mockRmSync).toHaveBeenCalledWith(lockPath, { recursive: true, force: true });
+
+      expect(() => io.update((config) => { config.concurrency.default = 3; })).not.toThrow();
+      expect(mockRenameSync.mock.calls.filter(([, target]) => target === configPath)).toHaveLength(1);
+      expect(mockRmSync.mock.calls.filter(([file]) => file === lockPath)).toHaveLength(2);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("preserves the fsync error when close and cleanup also fail", async () => {
+    const agentDir = "/tmp/pi-agent";
+    const syncFailure = new Error("fsync primary");
+    mockGetAgentDir.mockReturnValue(agentDir);
+    mockFsyncSync.mockImplementationOnce(() => { throw syncFailure; });
+    mockCloseSync.mockImplementationOnce(() => { throw new Error("close secondary"); });
+    mockUnlinkSync.mockImplementationOnce(() => { throw new Error("cleanup secondary"); });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.resetModules();
+
+    const { createConfigFileIO } = await import("../../src/config/config-io.ts");
+    expect(() => createConfigFileIO(agentDir).update(() => undefined)).toThrow(syncFailure);
+  });
+
+  it("releases the lock when the mutator throws and permits a retry", async () => {
+    const agentDir = "/tmp/pi-agent";
+    const configPath = join(agentDir, "subagents-lean.json");
+    const lockPath = `${configPath}.lock`;
+    mockGetAgentDir.mockReturnValue(agentDir);
+    mockReadFileSync.mockImplementation((file) => {
+      if (String(file) === join(lockPath, "owner.json")) {
+        const ownerWrites = mockWriteFileSync.mock.calls.filter(([candidate]) => String(candidate).endsWith("owner.json"));
+        return ownerWrites.at(-1)?.[1] ?? "{}";
+      }
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    });
+    vi.resetModules();
+
+    const { createConfigFileIO } = await import("../../src/config/config-io.ts");
+    const io = createConfigFileIO(agentDir);
+    const mutationFailure = new Error("mutation failed");
+    expect(() => io.update(() => { throw mutationFailure; })).toThrow(mutationFailure);
+    expect(() => io.update((config) => { config.concurrency.default = 3; })).not.toThrow();
+    expect(mockRmSync.mock.calls.filter(([file]) => file === lockPath)).toHaveLength(2);
+  });
+
   it("reports rename failures and removes the temporary config file", async () => {
     const agentDir = "/tmp/pi-agent";
     const renameError = new Error("simulated rename failure");

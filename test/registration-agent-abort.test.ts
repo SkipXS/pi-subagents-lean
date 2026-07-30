@@ -52,7 +52,7 @@ vi.mock("../src/agents/agent-status.js", () => ({ executeAgentStatusTool: vi.fn(
 import { registerTools } from "../src/registration.js";
 
 describe("registered Agent cancellation contract", () => {
-  it("returns a cancellation error without preflight or spawn for a pre-aborted public callback", async () => {
+  it("throws cancellation without preflight or spawn for a pre-aborted public callback", async () => {
     const tools: Array<Record<string, any>> = [];
     const pi = {
       registerTool: vi.fn((tool: Record<string, any>) => tools.push(tool)),
@@ -65,16 +65,14 @@ describe("registered Agent cancellation contract", () => {
 
     const controller = new AbortController();
     controller.abort();
-    const result = await execute!(
+    await expect(execute!(
       "cancelled-call",
       { agent: "general-purpose", prompt: "do not start", worktree_path: "/project/worktree" },
       controller.signal,
       undefined,
       { cwd: "/project", modelRegistry: { find: vi.fn() } },
-    );
+    )).rejects.toThrow("Agent execution cancelled");
 
-    expect(result).toMatchObject({ isError: true });
-    expect(result.content[0].text).toBe("Agent execution cancelled");
     expect(boundary.validateWorktreePath).not.toHaveBeenCalled();
     expect(boundary.resolveType).not.toHaveBeenCalled();
     expect(boundary.coordinatorSpawn).not.toHaveBeenCalled();

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const COMMAND_TIMEOUT_MS = 120_000;
 
 export function productionManifest(manifest: Record<string, unknown>): Record<string, unknown> {
   const { devDependencies: _devDependencies, ...productionManifest } = manifest;
@@ -24,6 +25,7 @@ function main(): void {
     execFileSync(npm, ["install", "--omit=dev", "--package-lock=false", "--ignore-scripts"], {
       cwd: tempRoot,
       stdio: "inherit",
+      timeout: COMMAND_TIMEOUT_MS,
     });
     console.log("npm production install succeeded");
   } finally {

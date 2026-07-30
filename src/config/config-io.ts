@@ -305,7 +305,19 @@ function atomicWrite(targetPath: string, contents: Buffer): void {
   try {
     fs.writeFileSync(tempPath, contents);
     const fd = fs.openSync(tempPath, "r+");
-    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    let syncError: unknown;
+    try {
+      fs.fsyncSync(fd);
+    } catch (err) {
+      syncError = err;
+    }
+    try {
+      fs.closeSync(fd);
+    } catch (err) {
+      // A close failure is primary only when fsync itself succeeded.
+      if (syncError === undefined) syncError = err;
+    }
+    if (syncError !== undefined) throw syncError;
     fs.renameSync(tempPath, targetPath);
   } catch (err) {
     try { fs.unlinkSync(tempPath); } catch { /* temp may not exist */ }

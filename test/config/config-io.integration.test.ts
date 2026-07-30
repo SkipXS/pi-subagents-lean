@@ -7,6 +7,33 @@ import { pathToFileURL } from "node:url";
 
 let testDir: string | undefined;
 
+const PROCESS_TIMEOUT_MS = 3_000;
+
+function runBunScript(script: string, args: string[], label: string, timeoutMs = PROCESS_TIMEOUT_MS): Promise<void> {
+  return new Promise((resolveRun, reject) => {
+    const bunExecutable = process.env.BUN_EXE ?? (process.platform === "win32" ? "bun.exe" : "bun");
+    const child = spawn(bunExecutable, ["-e", script, ...args], { cwd: testDir!, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    let spawnError: Error | undefined;
+    let timedOut = false;
+    child.stderr?.on("data", (data) => { stderr += data; });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+    child.once("error", (error) => { spawnError = error; });
+    // `close`, unlike `exit`, waits for all child stdio handles to close. In the
+    // timeout case this also keeps Windows cleanup from racing the killed child.
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (timedOut) reject(new Error(`${label} timed out after ${timeoutMs}ms: ${stderr}`));
+      else if (spawnError) reject(spawnError);
+      else if (code === 0) resolveRun();
+      else reject(new Error(`${label} exited ${code}: ${stderr}`));
+    });
+  });
+}
+
 async function loadConfigModule() {
   testDir = mkdtempSync(join(tmpdir(), "subagents-config-"));
   vi.stubEnv("PI_CODING_AGENT_DIR", testDir);
@@ -23,6 +50,13 @@ afterEach(() => {
 });
 
 describe("config I/O with the real filesystem", () => {
+  it("kills a hung child and waits for it to close", async () => {
+    await loadConfigModule();
+    const script = "setInterval(() => {}, 1_000);";
+
+    await expect(runBunScript(script, [], "hung child", 100)).rejects.toThrow("hung child timed out after 100ms");
+  });
+
   it("loads complete defaults when the file is missing or invalid", async () => {
     const configIo = await loadConfigModule();
     expect(configIo.loadConfig().config).toMatchObject({
@@ -224,14 +258,7 @@ describe("config I/O with the real filesystem", () => {
     }));
     const moduleUrl = pathToFileURL(resolve("src/config/config-io.ts")).href;
     const script = `import { createConfigFileIO } from ${JSON.stringify(moduleUrl)}; import { closeSync, openSync, unlinkSync } from "node:fs"; const io = createConfigFileIO(process.argv[1]); io.update(() => { const fd = openSync(process.argv[2], "wx"); try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150); } finally { closeSync(fd); unlinkSync(process.argv[2]); } });`;
-    const run = () => new Promise<void>((resolveRun, reject) => {
-      const bunExecutable = process.env.BUN_EXE ?? (process.platform === "win32" ? "bun.exe" : "bun");
-      const child = spawn(bunExecutable, ["-e", script, testDir!, markerPath], { cwd: testDir!, stdio: ["ignore", "ignore", "pipe"] });
-      let stderr = "";
-      child.stderr?.on("data", (data) => { stderr += data; });
-      child.once("error", reject);
-      child.once("exit", (code) => code === 0 ? resolveRun() : reject(new Error(`reclaimer exited ${code}: ${stderr}`)));
-    });
+    const run = () => runBunScript(script, [testDir!, markerPath], "reclaimer");
 
     await Promise.all([run(), run()]);
     expect(existsSync(markerPath)).toBe(false);
@@ -244,14 +271,7 @@ describe("config I/O with the real filesystem", () => {
     writeFileSync(configPath, JSON.stringify({ agent: { showCost: false, forceBackground: false }, concurrency: { default: 4 } }));
     const moduleUrl = pathToFileURL(resolve("src/config/config-io.ts")).href;
     const script = `import { createConfigFileIO } from ${JSON.stringify(moduleUrl)}; const io = createConfigFileIO(process.argv[1]); io.update(c => { c.agent[process.argv[2]] = process.argv[3] === 'true'; });`;
-    const run = (field: string) => new Promise<void>((resolveRun, reject) => {
-      const bunExecutable = process.env.BUN_EXE ?? (process.platform === "win32" ? "bun.exe" : "bun");
-      const child = spawn(bunExecutable, ["-e", script, testDir!, field, "true"], { cwd: testDir!, stdio: ["ignore", "ignore", "pipe"] });
-      let stderr = "";
-      child.stderr?.on("data", (data) => { stderr += data; });
-      child.once("error", reject);
-      child.once("exit", (code) => code === 0 ? resolveRun() : reject(new Error(`writer exited ${code}: ${stderr}`)));
-    });
+    const run = (field: string) => runBunScript(script, [testDir!, field, "true"], "writer");
 
     await Promise.all([run("showCost"), run("forceBackground")]);
     expect(JSON.parse(readFileSync(configPath, "utf8")).agent).toMatchObject({ showCost: true, forceBackground: true });

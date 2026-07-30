@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { productionManifest } from "../scripts/npm-production-smoke.ts";
 
 describe("productionManifest", () => {
@@ -27,5 +29,14 @@ describe("productionManifest", () => {
       peerDependenciesMeta: { peer: { optional: true } },
       overrides: { transitive: "^1.0.0" },
     });
+  });
+
+  it("publishes the source entrypoint, documentation, and all canonical default agents", () => {
+    const manifest = JSON.parse(readFileSync("package.json", "utf8"));
+    expect(manifest.pi).toEqual({ extensions: ["./src/index.ts"] });
+    expect(manifest.files).toEqual(expect.arrayContaining(["src/", "README.md", "LICENSE", "docs/coverage.md"]));
+    for (const name of ["architect", "scout", "implementer", "reviewer", "verifier"]) {
+      expect(existsSync(join("src", "agents", "defaults", `${name}.md`))).toBe(true);
+    }
   });
 });

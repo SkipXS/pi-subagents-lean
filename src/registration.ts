@@ -7,9 +7,20 @@ import { showAgentsMainMenu } from "./ui/menu/menus.js";
 import { getPiInstance, getStore } from "./shell.js";
 
 // Provider-side json_schema enforcement; "prefer" falls back gracefully on
-// providers without strict mode (e.g. local Ollama). Runtime-supported field,
-// not yet declared in pi's ToolDefinition type.
-const CONSTRAINED_SAMPLING = { type: "json_schema", strict: "prefer" };
+// providers without strict mode (e.g. local Ollama).
+const CONSTRAINED_SAMPLING = { type: "json_schema", strict: "prefer" } as const;
+
+/** Pi's public tool contract signals failures by throwing, not by isError results. */
+function throwingToolExecute<T extends (...args: any[]) => Promise<any>>(execute: T): T {
+  return (async (...args: Parameters<T>) => {
+    const result = await execute(...args);
+    if (result?.isError === true) {
+      const text = result.content?.find?.((part: { type?: string; text?: string }) => part.type === "text")?.text;
+      throw new Error(text || "Tool execution failed");
+    }
+    return result;
+  }) as T;
+}
 
 // ============================================================================
 // Agent tool registration helper — fixed stealth schema
@@ -20,6 +31,7 @@ function registerAgentTool(pi: ExtensionAPI): void {
   const tool = {
     name: "Agent",
     label: "Agent",
+    description: "Delegate a task to a specialized agent.",
     parameters: Type.Object({
       prompt: Type.String(),
       description: Type.Optional(Type.String()),
@@ -27,7 +39,7 @@ function registerAgentTool(pi: ExtensionAPI): void {
       run_in_background: Type.Optional(Type.Boolean()),
       worktree_path: Type.Optional(Type.String()),
     }, { additionalProperties: false }),
-    execute: executeAgentTool,
+    execute: throwingToolExecute(executeAgentTool),
 
     renderCall: (args: Record<string, unknown>, theme: any) => renderAgentToolCall(args, theme),
 
@@ -41,7 +53,6 @@ function registerAgentTool(pi: ExtensionAPI): void {
       );
     },
   };
-  // @ts-expect-error — description removed to save prompt tokens
   pi.registerTool(tool);
 }
 
@@ -58,24 +69,24 @@ export function registerTools(pi: ExtensionAPI): void {
   const stopAgentTool = {
     name: "StopAgent",
     label: "StopAgent",
+    description: "Stop a running or queued agent.",
     parameters: Type.Object({
       agent_id: Type.String(),
     }, { additionalProperties: false }),
-    execute: executeStopAgentTool,
+    execute: throwingToolExecute(executeStopAgentTool),
     constrainedSampling: CONSTRAINED_SAMPLING,
   };
-  // @ts-expect-error — description removed to save prompt tokens
   pi.registerTool(stopAgentTool);
 
   // AgentStatus tool — stealth schema, list all agents and their statuses
   const agentStatusTool = {
     name: "AgentStatus",
     label: "AgentStatus",
+    description: "List subagents and their current status.",
     parameters: Type.Object({}, { additionalProperties: false }),
-    execute: executeAgentStatusTool,
+    execute: throwingToolExecute(executeAgentStatusTool),
     constrainedSampling: CONSTRAINED_SAMPLING,
   };
-  // @ts-expect-error — description removed to save prompt tokens
   pi.registerTool(agentStatusTool);
 
   // Message renderer — subagent-result (background agent completion)

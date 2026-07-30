@@ -176,12 +176,12 @@ describe("offline extension background flow", () => {
     const agentTool = api.tools.find((tool) => tool.name === "Agent")!;
     const stopAgentTool = api.tools.find((tool) => tool.name === "StopAgent")!;
     const agentStatusTool = api.tools.find((tool) => tool.name === "AgentStatus")!;
-    const beforeStart = await Promise.all([
+    const beforeStart = await Promise.allSettled([
       agentTool.execute("before-agent", { agent: "Scout", prompt: "must not start" }, undefined, undefined, ctx),
       stopAgentTool.execute("before-stop", { agent_id: "missing" }, undefined, undefined, ctx),
       agentStatusTool.execute("before-status", {}, undefined, undefined, ctx),
     ]);
-    expect(beforeStart.every((result) => result.isError === true)).toBe(true);
+    expect(beforeStart.every((result) => result.status === "rejected")).toBe(true);
     expect(sessions).toHaveLength(0);
     expect(api.api.sendMessage).not.toHaveBeenCalled();
 
@@ -192,21 +192,21 @@ describe("offline extension background flow", () => {
     const manager = getManager()!;
     const coordinator = getCoordinator()!;
     setCoordinator(null);
-    const managerOnly = await Promise.all([
+    const managerOnly = await Promise.allSettled([
       agentTool.execute("manager-only-agent", { agent: "Scout", prompt: "must not start" }, undefined, undefined, ctx),
       stopAgentTool.execute("manager-only-stop", { agent_id: "missing" }, undefined, undefined, ctx),
       agentStatusTool.execute("manager-only-status", {}, undefined, undefined, ctx),
     ]);
-    expect(managerOnly.every((result) => result.isError === true)).toBe(true);
+    expect(managerOnly.every((result) => result.status === "rejected")).toBe(true);
 
     setCoordinator(coordinator);
     setManager(null);
-    const coordinatorOnly = await Promise.all([
+    const coordinatorOnly = await Promise.allSettled([
       agentTool.execute("coordinator-only-agent", { agent: "Scout", prompt: "must not start" }, undefined, undefined, ctx),
       stopAgentTool.execute("coordinator-only-stop", { agent_id: "missing" }, undefined, undefined, ctx),
       agentStatusTool.execute("coordinator-only-status", {}, undefined, undefined, ctx),
     ]);
-    expect(coordinatorOnly.every((result) => result.isError === true)).toBe(true);
+    expect(coordinatorOnly.every((result) => result.status === "rejected")).toBe(true);
     expect(sessions).toHaveLength(0);
     expect(api.api.sendMessage).not.toHaveBeenCalled();
     setManager(manager);
@@ -260,12 +260,12 @@ describe("offline extension background flow", () => {
 
     const sendMessageCalls = api.api.sendMessage.mock.calls.length;
     const sessionCount = sessions.length;
-    const afterShutdown = await Promise.all([
+    const afterShutdown = await Promise.allSettled([
       agentTool.execute("after-agent", { agent: "Scout", prompt: "must not start" }, undefined, undefined, ctx),
       stopAgentTool.execute("after-stop", { agent_id: "missing" }, undefined, undefined, ctx),
       agentStatusTool.execute("after-status", {}, undefined, undefined, ctx),
     ]);
-    expect(afterShutdown.every((result) => result.isError === true)).toBe(true);
+    expect(afterShutdown.every((result) => result.status === "rejected")).toBe(true);
     expect(sessions).toHaveLength(sessionCount);
     expect(api.api.sendMessage).toHaveBeenCalledTimes(sendMessageCalls);
   });

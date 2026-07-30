@@ -71,6 +71,9 @@ export class SpawnCoordinator {
   /** Per-agent live display state. Widget reads from here + record for stats. */
   private liveViews = new Map<string, LiveView>();
 
+  /** Monotonic key prevents same-tool starts in the same clock tick from colliding. */
+  private nextActivityId = 0;
+
   /** Background agents that have not yet completed. */
   private backgroundAgentIds = new Set<string>();
 
@@ -306,7 +309,7 @@ export class SpawnCoordinator {
     return {
       onToolActivity: (activity: ToolActivity) => {
         if (activity.type === "start") {
-          view.activeTools.set(`${activity.toolName}_${Date.now()}`, activity.toolName);
+          view.activeTools.set(`${activity.toolName}_${this.nextActivityId++}`, activity.toolName);
         } else {
           for (const [key, name] of view.activeTools) {
             if (name === activity.toolName) { view.activeTools.delete(key); break; }

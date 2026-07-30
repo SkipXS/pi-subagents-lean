@@ -635,7 +635,7 @@ describe("AgentManager", () => {
         turnLimited: false,
       });
 
-      await new Promise(r => setTimeout(r, 10));
+      await manager.getRecord(id)!.execution.promise;
 
       expect(manager.getTotalAgentCost()).toBe(0.04);
     });
@@ -660,7 +660,7 @@ describe("AgentManager", () => {
       expect(manager.getTotalAgentCount()).toBe(2);
 
       first.resolve(mockRunResult());
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await manager.getRecord(id1)!.execution.promise;
       expect(manager.getRecord(id2)?.lifecycle.status).toBe("running");
       expect(manager.getTotalAgentCount()).toBe(2);
 
@@ -1515,6 +1515,28 @@ describe("AgentManager steering and shutdown", () => {
     parentRun.resolve(mockRunResult({ aborted: true }));
     childRun.resolve(mockRunResult({ aborted: true }));
     await Promise.all(promises);
+  });
+
+  it("continues disposing all records when one session dispose throws", async () => {
+    const firstRun = makeResolvablePromise();
+    const secondRun = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(firstRun.promise).mockReturnValueOnce(secondRun.promise);
+    manager = new AgentManager(undefined, { default: 2 });
+    manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    manager.spawn(fakePi(), fakeCtx(), "reviewer", "second", { description: "second" });
+    const firstSession = mockAgentSession();
+    firstSession.dispose.mockImplementation(() => { throw new Error("dispose failed"); });
+    const secondSession = mockAgentSession();
+    mockModules.mockRunAgent.mock.calls[0]![3].onSessionCreated(firstSession);
+    mockModules.mockRunAgent.mock.calls[1]![3].onSessionCreated(secondSession);
+
+    expect(() => manager.dispose()).not.toThrow();
+    expect(firstSession.dispose).toHaveBeenCalledOnce();
+    expect(secondSession.dispose).toHaveBeenCalledOnce();
+    expect(manager.listAgents()).toEqual([]);
+
+    firstRun.resolve(mockRunResult({ aborted: true }));
+    secondRun.resolve(mockRunResult({ aborted: true }));
   });
 
   it("releases a parent slot after its settled child is evicted by retention", async () => {

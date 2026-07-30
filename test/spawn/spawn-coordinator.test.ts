@@ -391,6 +391,24 @@ describe("SpawnCoordinator", () => {
     expect(view!.responseText).toBe("");
   });
 
+  it("tracks same-name parallel tool activity and full response text behaviorally", async () => {
+    const coordinator = new SpawnCoordinator(manager as any);
+    const result = await coordinator.spawn(mockPi, ctx, {
+      type: "test", prompt: "work", description: "test", graceTurns: 6,
+      runInBackground: true,
+    });
+    const callbacks = manager.spawn.mock.calls[0]![4];
+    const view = coordinator.liveView(result.agentId)!;
+
+    callbacks.onToolActivity({ type: "start", toolName: "read" });
+    callbacks.onToolActivity({ type: "start", toolName: "read" });
+    expect([...view.activeTools.values()]).toEqual(["read", "read"]);
+    callbacks.onToolActivity({ type: "end", toolName: "read" });
+    expect([...view.activeTools.values()]).toEqual(["read"]);
+    callbacks.onTextDelta("ignored delta", "complete response");
+    expect(view.responseText).toBe("complete response");
+  });
+
   it("cleans up live view on foreground completion", async () => {
     const coordinator = new SpawnCoordinator(manager as any);
     const result = await coordinator.spawn(mockPi, ctx, {

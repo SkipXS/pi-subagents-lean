@@ -11,6 +11,7 @@ const installDir = join(tempRoot, "install");
 const rootPackage = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { name: string; version: string };
 const tarball = join(packDir, `${rootPackage.name}-${rootPackage.version}.tgz`);
 const bun = process.execPath;
+const COMMAND_TIMEOUT_MS = 120_000;
 
 function installedVersion(packageName: string): string {
   const packageJson = JSON.parse(
@@ -27,7 +28,7 @@ try {
     "--destination", packDir,
     "--ignore-scripts",
     "--quiet",
-  ], { cwd: root, stdio: "inherit" });
+  ], { cwd: root, stdio: "inherit", timeout: COMMAND_TIMEOUT_MS });
 
   writeFileSync(join(installDir, "package.json"), JSON.stringify({
     private: true,
@@ -40,7 +41,7 @@ try {
     },
   }, null, 2));
 
-  execFileSync(bun, ["install", "--ignore-scripts"], { cwd: installDir, stdio: "inherit" });
+  execFileSync(bun, ["install", "--ignore-scripts"], { cwd: installDir, stdio: "inherit", timeout: COMMAND_TIMEOUT_MS });
 
   const smokeScript = `
     import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -55,7 +56,11 @@ try {
       if (installedPackage.version !== "${rootPackage.version}") {
         throw new Error("Installed package version does not match the tarball version");
       }
-      for (const file of ["README.md", "LICENSE", "CHANGELOG.md", "docs/coverage.md", "docs/releasing.md", "src/index.ts"]) {
+      for (const file of [
+        "README.md", "LICENSE", "CHANGELOG.md", "docs/coverage.md", "docs/releasing.md", "src/index.ts",
+        "src/agents/defaults/architect.md", "src/agents/defaults/scout.md", "src/agents/defaults/implementer.md",
+        "src/agents/defaults/reviewer.md", "src/agents/defaults/verifier.md",
+      ]) {
         if (!existsSync(join(packageDir, file))) throw new Error("Missing packaged file: " + file);
       }
       const extensionPath = join(packageDir, "src", "index.ts");
@@ -81,6 +86,7 @@ try {
     cwd: installDir,
     env: { ...process.env, PI_OFFLINE: "1" },
     stdio: "inherit",
+    timeout: COMMAND_TIMEOUT_MS,
   });
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
