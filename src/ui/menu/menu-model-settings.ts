@@ -37,6 +37,14 @@ export async function showModelSettingsMenu(
   const buildItems = (store: ReturnType<typeof getStore>, theme: Theme): SettingItem[] => {
     const items: SettingItem[] = [];
 
+    items.push({
+      id: "disableDefaultAgents",
+      label: "Disable default agents",
+      currentValue: store.agent.disableDefaultAgents ? "ON" : "OFF",
+      values: ["ON", "OFF"],
+      description: "Exclude bundled agent types from discovery; takes effect on the next parent turn.",
+    });
+
     const modelOverride = (key: string, label: string) =>
       (mode: "session" | "permanent" | "clear", model: string | null): boolean | void => {
         if (mode === "clear") {
@@ -166,14 +174,6 @@ export async function showModelSettingsMenu(
         }),
       });
     }
-
-    items.push({
-      id: "disableDefaultAgents",
-      label: "Disable default agents",
-      currentValue: store.agent.disableDefaultAgents ? "ON" : "OFF",
-      values: ["ON", "OFF"],
-      description: "Exclude bundled agent types from discovery; takes effect on the next parent turn.",
-    });
 
     const hasSession = store.sessionDefaultModel !== null
       || store.sessionDefaultThinking !== undefined

@@ -166,6 +166,7 @@ vi.mock("../src/shell.js", () => {
         showTime: a.showTime !== false,
         outputThinkingBufferSize: a.outputThinkingBufferSize ?? 0,
         finishedRetentionMinutes: a.finishedRetentionMinutes ?? 10,
+        maxNestingDepth: a.maxNestingDepth ?? 2,
       };
     },
     get concurrency() {

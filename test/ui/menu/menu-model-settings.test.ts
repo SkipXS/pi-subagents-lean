@@ -142,6 +142,7 @@ describe("showModelSettingsMenu — SettingsList migration", () => {
     await showModelSettingsMenu(ctx, []);
 
     const item = settingsListCalls[0].items.find((i: any) => i.id === "disableDefaultAgents");
+    expect(settingsListCalls[0].items[0]).toBe(item);
     expect(item.currentValue).toBe("OFF");
 
     settingsListCalls[0].onChange("disableDefaultAgents", "ON");

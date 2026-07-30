@@ -423,7 +423,7 @@ describe("navigation rendering", () => {
       expect(agentLine).toContain("→");
     });
 
-    it("keeps the navigation cursor and hierarchy branch on a selected nested row", () => {
+    it("keeps the navigation cursor and nested marker on a selected nested row", () => {
       const parent = makeFinishedAgent("parent");
       const child = makeFinishedAgent("child");
       child.hierarchy = { parentId: "parent" };
@@ -433,7 +433,8 @@ describe("navigation rendering", () => {
 
       const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
       const childLine = lines.find((line: string) => line.includes("Finished agent child"));
-      expect(childLine).toContain("→└");
+      expect(childLine).toMatch(/^→ /);
+      expect(childLine).toContain("↳");
       expect(childLine).toContain("Finished agent child");
     });
 

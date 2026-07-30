@@ -2,7 +2,7 @@
  * agent-widget.test.ts — Tests for widget rendering.
  *
  * Verifies that the widget renders correct formatting:
- *   - Headers use 2-space prefix (no tree connectors)
+ *   - Headers use a 2-space prefix, with nested rows marked before their role
  *   - Activity lines use a tree connector (│ or └) prefix
  *   - outputFile lines appear before activity lines
  */
@@ -427,8 +427,9 @@ describe("widget rendering format", () => {
     const otherRootIndex = fullLines.findIndex((line: string) => line.includes("Other root"));
     expect(otherRootIndex).toBeLessThan(parentIndex);
     expect(parentIndex).toBeLessThan(childIndex);
-    expect(fullLines[childIndex]).toMatch(/^ └/);
-    expect(fullLines[parentIndex]).toMatch(/^  /);
+    expect(fullLines[childIndex]).toMatch(/^  . \d{2}:\d{2} ↳ Builder/);
+    expect(fullLines[parentIndex]).toMatch(/^  . \d{2}:\d{2} Builder/);
+    expect(fullLines[parentIndex]).not.toContain("↳");
 
     widget.setWidgetShortcut(true);
     widget.setCompactMode(true);
@@ -436,8 +437,54 @@ describe("widget rendering format", () => {
     const compactParentIndex = compactLines.findIndex((line: string) => line.includes("Parent agent"));
     const compactChildIndex = compactLines.findIndex((line: string) => line.includes("Child agent"));
     expect(compactParentIndex).toBeLessThan(compactChildIndex);
-    expect(compactLines[compactChildIndex]).toMatch(/^ └/);
-    expect(compactLines[compactParentIndex]).toMatch(/^  /);
+    expect(compactLines[compactChildIndex]).toMatch(/^  . \d{2}:\d{2} ↳ Builder/);
+    expect(compactLines[compactParentIndex]).toMatch(/^  . \d{2}:\d{2} Builder/);
+    expect(compactLines[compactParentIndex]).not.toContain("↳");
+  });
+
+  it("marks nested queued and finished rows after their timestamps in full and compact modes", () => {
+    const parent = makeRunningAgent("parent");
+    parent.display.description = "Parent agent";
+    const queuedChild = makeQueuedAgent("queued-child");
+    queuedChild.display.description = "Queued child";
+    queuedChild.hierarchy = { parentId: parent.id };
+    const finishedChild = makeFinishedAgent("finished-child");
+    finishedChild.display.description = "Finished child";
+    finishedChild.hierarchy = { parentId: parent.id };
+    activity.set(parent.id, makeActivity(parent.id));
+    (manager as any).listAgents = () => [finishedChild, queuedChild, parent];
+
+    const expectNestedRows = (lines: string[]) => {
+      for (const description of ["Queued child", "Finished child"]) {
+        const line = lines.find((candidate) => candidate.includes(description));
+        expect(line).toMatch(/^  . \d{2}:\d{2} ↳ Builder/);
+        expect(line).not.toMatch(/^ └/);
+      }
+    };
+
+    expectNestedRows((widget as any).renderWidget(makeMockTUI(), makePlainTheme()));
+
+    widget.setWidgetShortcut(true);
+    widget.setCompactMode(true);
+    expectNestedRows((widget as any).renderWidget(makeMockTUI(), makePlainTheme()));
+  });
+
+  it("aligns root and nested role columns", () => {
+    const parent = makeFinishedAgent("parent", "implementer");
+    parent.display.description = "Parent task";
+    parent.display.invocation = { modelName: "gpt-5.6-terra", thinkingLevel: "high" };
+    const child = makeFinishedAgent("child", "reviewer");
+    child.display.description = "Child task";
+    child.display.invocation = { modelName: "gpt-5.6-terra", thinkingLevel: "high" };
+    child.hierarchy = { parentId: parent.id };
+    (manager as any).listAgents = () => [child, parent];
+
+    const lines = (widget as any).renderWidget(makeMockTUI(), makePlainTheme());
+    const parentLine = lines.find((line: string) => line.includes("Parent task"))!;
+    const childLine = lines.find((line: string) => line.includes("Child task"))!;
+
+    expect(parentLine.indexOf("(gpt-5.6-terra · high)")).toBe(childLine.indexOf("(gpt-5.6-terra · high)"));
+    expect(parentLine.indexOf("Parent task")).toBe(childLine.indexOf("Child task"));
   });
 
   it("preserves manager order for equal startedAt values across statuses", () => {

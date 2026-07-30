@@ -10,7 +10,7 @@ import type { Theme } from "./types.js";
 import { formatCost, getSessionUsageSnapshot } from "../agents/usage.js";
 import { buildStatsCells, buildStatsLayout, formatStatsRow, formatThinkingTag, getAgentStatusDisplay, getDisplayName, truncateDesc, describeActivity, fgPreservingNestedStyles, type StatsCells, type StatsLayout, type StatsVisibility } from "./format.js";
 import type { LiveView } from "../spawn/spawn-coordinator.js";
-import { agentContinuationPrefix, agentHierarchyPrefix, orderAgentsByHierarchy } from "./agent-hierarchy.js";
+import { agentContinuationPrefix, agentHierarchyPrefix, agentHierarchyRolePrefix, orderAgentsByHierarchy, visibleNestedAgentIds } from "./agent-hierarchy.js";
 
 // Re-export Theme so existing consumers (searchable-select, result-viewer) don't break
 export type { Theme } from "./types.js";
@@ -452,9 +452,15 @@ export class AgentWidget {
     return maxWidth == null ? label : truncateToWidth(label, maxWidth);
   }
 
-  /** Width used by the row's indent, status symbol, and optional start time. */
+  /** Width used by the row's indent, status symbol, optional start time, and role separator. */
   private rowPrefixWidth(): number {
     return this.showStartTime ? ROW_PREFIX_WIDTH_WITH_START_TIME : ROW_PREFIX_WIDTH_WITHOUT_START_TIME;
+  }
+
+  /** Width available to an agent name after its nested marker, if any. */
+  private nameWidthForRolePrefix(rolePrefix: string, layout: AgentColumnLayout): number {
+    // nameWidth includes the columns added by a nested marker beyond the normal role separator.
+    return Math.max(0, layout.nameWidth - (visibleWidth(rolePrefix) - 1));
   }
 
   /** Render the optional local start time after a status symbol. */
@@ -464,8 +470,10 @@ export class AgentWidget {
 
   /** Build shared terminal-width columns for visible individual agent rows. */
   private buildAgentColumnLayout(agents: AgentRecord[], terminalWidth: number, statsLines: Map<string, string>): AgentColumnLayout {
+    const nestedAgentIds = visibleNestedAgentIds(agents);
     const naturalLayout = agents.reduce<AgentColumnLayout>((layout, a) => ({
-      nameWidth: Math.max(layout.nameWidth, visibleWidth(getDisplayName(a.display.type))),
+      // Reserve the nested marker's two additional columns in the shared role column.
+      nameWidth: Math.max(layout.nameWidth, visibleWidth(getDisplayName(a.display.type)) + (nestedAgentIds.has(a.id) ? 2 : 0)),
       modelThinkingWidth: Math.max(layout.modelThinkingWidth, visibleWidth(this.displayModelThinking(a))),
       descriptionWidth: Math.max(layout.descriptionWidth, visibleWidth(this.displayDescription(a))),
     }), { nameWidth: 0, modelThinkingWidth: 0, descriptionWidth: 0 });
@@ -550,13 +558,14 @@ export class AgentWidget {
   }
 
   /** Render a finished agent line. */
-  private renderFinishedLine(a: AgentRecord, theme: Theme, layout: AgentColumnLayout, rawStats: string): string {
-    const name = padToVisibleWidth(getDisplayName(a.display.type), layout.nameWidth);
+  private renderFinishedLine(a: AgentRecord, visibleAgents: AgentRecord[], theme: Theme, layout: AgentColumnLayout, rawStats: string): string {
+    const rolePrefix = agentHierarchyRolePrefix(a, visibleAgents);
+    const name = padToVisibleWidth(getDisplayName(a.display.type), this.nameWidthForRolePrefix(rolePrefix, layout));
     const modelThinking = padToVisibleWidth(this.displayModelThinking(a, layout.modelThinkingWidth), layout.modelThinkingWidth);
     const description = padToVisibleWidth(this.displayDescription(a, layout.descriptionWidth), layout.descriptionWidth);
     const { icon, statusText } = this.finishedIconAndStatus(a.lifecycle.status, a.error, theme);
     const delivery = a.delivery ? theme.fg("dim", ` delivery:${a.delivery.state}`) : "";
-    return `${icon}${this.renderStartTime(a, theme, "dim")} ${theme.fg("dim", name)}${NAME_COLUMN_GAP}${this.renderModelThinkingColumn(modelThinking, theme, layout)}${theme.fg("dim", description)}  ${wrapInDim(theme, rawStats)}${statusText}${delivery}`;
+    return `${icon}${this.renderStartTime(a, theme, "dim")}${rolePrefix}${theme.fg("dim", name)}${NAME_COLUMN_GAP}${this.renderModelThinkingColumn(modelThinking, theme, layout)}${theme.fg("dim", description)}  ${wrapInDim(theme, rawStats)}${statusText}${delivery}`;
   }
 
   /** Build RenderBlocks for finished (completed/errored) agents. */
@@ -580,7 +589,7 @@ export class AgentWidget {
       }
       blocks.push({
         agent: a,
-        header: truncate(`${agentHierarchyPrefix(a, visibleAgents)}${this.renderFinishedLine(a, theme, layout, statsLines.get(a.id) ?? "")}`),
+        header: truncate(`${agentHierarchyPrefix(a, visibleAgents)}${this.renderFinishedLine(a, visibleAgents, theme, layout, statsLines.get(a.id) ?? "")}`),
         continuations,
       });
     }
@@ -600,7 +609,8 @@ export class AgentWidget {
     const truncate = (line: string) => truncateToWidth(line, w);
     const blocks: RenderBlock[] = [];
     for (const a of running) {
-      const name = padToVisibleWidth(getDisplayName(a.display.type), layout.nameWidth);
+      const rolePrefix = agentHierarchyRolePrefix(a, visibleAgents);
+      const name = padToVisibleWidth(getDisplayName(a.display.type), this.nameWidthForRolePrefix(rolePrefix, layout));
       const modelThinking = padToVisibleWidth(this.displayModelThinking(a, layout.modelThinkingWidth), layout.modelThinkingWidth);
       const modelThinkingColumn = this.renderModelThinkingColumn(modelThinking, theme, layout, "text");
       const bg = this.getLiveView(a.id);
@@ -611,7 +621,7 @@ export class AgentWidget {
       if (this.isCompact()) {
         // Compact: single line with activity inline, truncated description
         const desc = padToVisibleWidth(this.displayDescription(a, layout.descriptionWidth), layout.descriptionWidth);
-        const headerLine = `${agentHierarchyPrefix(a, visibleAgents)}${theme.fg("accent", frame)}${this.renderStartTime(a, theme, "text")} ${theme.fg("text", theme.bold(name))}${NAME_COLUMN_GAP}${modelThinkingColumn}${theme.fg("text", desc)}  ${statsLine}  ${theme.fg("text", activity)}`;
+        const headerLine = `${agentHierarchyPrefix(a, visibleAgents)}${theme.fg("accent", frame)}${this.renderStartTime(a, theme, "text")}${rolePrefix}${theme.fg("text", theme.bold(name))}${NAME_COLUMN_GAP}${modelThinkingColumn}${theme.fg("text", desc)}  ${statsLine}  ${theme.fg("text", activity)}`;
         blocks.push({
           agent: a,
           header: truncate(headerLine),
@@ -620,7 +630,7 @@ export class AgentWidget {
       } else {
         // Full: header + continuation lines
         const description = padToVisibleWidth(this.displayDescription(a, layout.descriptionWidth), layout.descriptionWidth);
-        const headerLine = `${agentHierarchyPrefix(a, visibleAgents)}${theme.fg("accent", frame)}${this.renderStartTime(a, theme, "text")} ${theme.fg("text", theme.bold(name))}${NAME_COLUMN_GAP}${modelThinkingColumn}${theme.fg("text", description)}  ${statsLine}`;
+        const headerLine = `${agentHierarchyPrefix(a, visibleAgents)}${theme.fg("accent", frame)}${this.renderStartTime(a, theme, "text")}${rolePrefix}${theme.fg("text", theme.bold(name))}${NAME_COLUMN_GAP}${modelThinkingColumn}${theme.fg("text", description)}  ${statsLine}`;
         const continuations: string[] = [];
         const continuationPrefix = agentContinuationPrefix(a, visibleAgents);
         const parts = buildWorktreeOutputParts(a);
@@ -736,10 +746,11 @@ export class AgentWidget {
     const blocks: RenderBlock[] = [];
     const statusDisplay = getAgentStatusDisplay("queued");
     for (const a of queued) {
-      const name = padToVisibleWidth(getDisplayName(a.display.type), layout.nameWidth);
+      const rolePrefix = agentHierarchyRolePrefix(a, visibleAgents);
+      const name = padToVisibleWidth(getDisplayName(a.display.type), this.nameWidthForRolePrefix(rolePrefix, layout));
       const modelThinking = padToVisibleWidth(this.displayModelThinking(a, layout.modelThinkingWidth), layout.modelThinkingWidth);
       const desc = padToVisibleWidth(this.displayDescription(a, layout.descriptionWidth), layout.descriptionWidth);
-      const header = `${agentHierarchyPrefix(a, visibleAgents)}${theme.fg(statusDisplay.color, statusDisplay.icon)}${this.renderStartTime(a, theme, "dim")} ${theme.fg("dim", name)}${NAME_COLUMN_GAP}${this.renderModelThinkingColumn(modelThinking, theme, layout)}${theme.fg("dim", desc)}`;
+      const header = `${agentHierarchyPrefix(a, visibleAgents)}${theme.fg(statusDisplay.color, statusDisplay.icon)}${this.renderStartTime(a, theme, "dim")}${rolePrefix}${theme.fg("dim", name)}${NAME_COLUMN_GAP}${this.renderModelThinkingColumn(modelThinking, theme, layout)}${theme.fg("dim", desc)}`;
       blocks.push({ agent: a, header: truncate(header), continuations: [] });
     }
     return blocks;

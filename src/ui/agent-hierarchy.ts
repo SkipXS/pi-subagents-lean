@@ -69,9 +69,14 @@ export function visibleNestedAgentIds(agents: Iterable<AgentRecord>): Set<string
   return nested;
 }
 
-/** A nested agent gets a compact branch marker; roots keep their existing prefix. */
-export function agentHierarchyPrefix(agent: AgentRecord, visibleAgents: Iterable<AgentRecord>): string {
-  return visibleNestedAgentIds(visibleAgents).has(agent.id) ? " └" : "  ";
+/** Agent rows retain their existing two-space leading indent. */
+export function agentHierarchyPrefix(_agent: AgentRecord, _visibleAgents: Iterable<AgentRecord>): string {
+  return "  ";
+}
+
+/** Place the nested relationship marker immediately before an agent's role. */
+export function agentHierarchyRolePrefix(agent: AgentRecord, visibleAgents: Iterable<AgentRecord>): string {
+  return visibleNestedAgentIds(visibleAgents).has(agent.id) ? " ↳ " : " ";
 }
 
 /** Indent continuation rows beneath a root or nested agent header. */

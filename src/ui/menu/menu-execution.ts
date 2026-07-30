@@ -24,14 +24,16 @@ function createConcurrencySetting(ctx: ExtensionCommandContext): SettingItem {
 export async function showExecutionMenu(ctx: ExtensionCommandContext): Promise<void> {
   const store = getStore();
   const items: SettingItem[] = [
-    createConcurrencySetting(ctx),
     {
-      id: "forceBackground",
-      label: "Force background",
-      currentValue: store.agent.forceBackground ? "ON" : "OFF",
-      values: ["ON", "OFF"],
-      description: "Spawn every agent in the background by default.",
+      id: "maxNestingDepth",
+      label: "Max nesting depth",
+      currentValue: String(store.agent.maxNestingDepth),
+      submenu: createNumericSubmenu(ctx, { min: 1, max: 2, required: true }, (parsed) =>
+        applyPersistedSetting(ctx, () => store.mutate.agent.setMaxNestingDepth(parsed), `Max nesting depth set to ${parsed}`),
+      ),
+      description: "1 permits root children only; 2 permits one child layer.",
     },
+    createConcurrencySetting(ctx),
     {
       id: "defaultMaxTurns",
       label: "Default max turns",
@@ -42,15 +44,6 @@ export async function showExecutionMenu(ctx: ExtensionCommandContext): Promise<v
       description: "Soft turn limit. Blank leaves it unlimited.",
     },
     {
-      id: "maxNestingDepth",
-      label: "Max nesting depth",
-      currentValue: String(store.agent.maxNestingDepth),
-      submenu: createNumericSubmenu(ctx, { min: 1, max: 2, required: true }, (parsed) =>
-        applyPersistedSetting(ctx, () => store.mutate.agent.setMaxNestingDepth(parsed), `Max nesting depth set to ${parsed}`),
-      ),
-      description: "1 permits root children only; 2 permits one child layer.",
-    },
-    {
       id: "graceTurns",
       label: "Grace turns",
       currentValue: String(store.agent.graceTurns),
@@ -58,6 +51,13 @@ export async function showExecutionMenu(ctx: ExtensionCommandContext): Promise<v
         applyPersistedSetting(ctx, () => store.mutate.agent.setGraceTurns(parsed), `Grace turns set to ${parsed}`),
       ),
       description: "Extra turns after the soft turn limit before a hard abort.",
+    },
+    {
+      id: "forceBackground",
+      label: "Force background",
+      currentValue: store.agent.forceBackground ? "ON" : "OFF",
+      values: ["ON", "OFF"],
+      description: "Spawn every agent in the background by default.",
     },
   ];
 

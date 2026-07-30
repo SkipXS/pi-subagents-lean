@@ -94,6 +94,15 @@ describe("showWidgetSettingsMenu — SettingsList integration", () => {
     expect(items.find((i: any) => i.id === "showModelThinking").currentValue).toBe("OFF");
   });
 
+  it("places Behavior before Usage stats", async () => {
+    const ctx = createMockCtx();
+    await showWidgetSettingsMenu(ctx);
+    const items = settingsListCalls[0].items;
+    const behaviorIndex = items.findIndex((item: any) => item.label === "Behavior");
+    const usageStatsIndex = items.findIndex((item: any) => item.label === "Usage stats");
+    expect(behaviorIndex).toBeLessThan(usageStatsIndex);
+  });
+
   it("does not expose a navigation-hint toggle", async () => {
     const ctx = createMockCtx();
     await showWidgetSettingsMenu(ctx);

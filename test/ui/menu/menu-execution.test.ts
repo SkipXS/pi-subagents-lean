@@ -39,7 +39,7 @@ describe("showExecutionMenu", () => {
   it("contains the global execution defaults", async () => {
     await showExecutionMenu(createMockCtx());
     expect(settingsLists[0].items.map((item: any) => item.id)).toEqual([
-      "defaultConcurrency", "forceBackground", "defaultMaxTurns", "maxNestingDepth", "graceTurns",
+      "maxNestingDepth", "defaultConcurrency", "defaultMaxTurns", "graceTurns", "forceBackground",
     ]);
   });
 
