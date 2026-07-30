@@ -46,6 +46,8 @@ export interface ConcurrencyConfig {
 }
 
 export type OnAgentComplete = (record: AgentRecord) => void;
+/** Invoked immediately before a settled record is evicted. */
+export type OnAgentEvicted = (record: AgentRecord) => void;
 type OnAgentStart = (record: AgentRecord) => void;
 
 /** Internal global concurrency state. */
@@ -72,6 +74,7 @@ export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
+  private onRecordEvicted?: OnAgentEvicted;
   private onStart?: OnAgentStart;
 
   /** Session-level cumulative agent cost. Survives agent eviction. */
@@ -339,6 +342,11 @@ export class AgentManager {
     this.onComplete = cb;
   }
 
+  /** Register cleanup for coordinator-owned state tied to retained records. */
+  setOnRecordEvicted(cb: OnAgentEvicted): void {
+    this.onRecordEvicted = cb;
+  }
+
   /** Get the session-level cumulative agent cost. Survives agent eviction. */
   getTotalAgentCost(): number {
     return this.totalAgentCost;
@@ -449,7 +457,7 @@ export class AgentManager {
   private bindParentAbortSignal(id: string, signal?: AbortSignal): void {
     if (!signal) return;
 
-    const listener = () => this.abort(id, "agent");
+    const listener = () => this.abort(id, "parent");
     this.parentAbortListeners.set(id, { signal, listener });
     signal.addEventListener("abort", listener, { once: true });
     // AbortSignal does not invoke listeners added after it was aborted.
@@ -520,6 +528,7 @@ export class AgentManager {
 
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
+    try { this.onRecordEvicted?.(record); } catch { /* coordinator cleanup is best-effort */ }
     this.releaseExecution(record);
     this.agents.delete(id);
   }
@@ -533,13 +542,9 @@ export class AgentManager {
       // session or promise early: it still owns the concurrency slot and may be
       // executing final callbacks.
       if (!record.lifecycle.settled) continue;
-      // Keep an undelivered result available, but release the heavy execution
-      // handles after retention. Consumed records can be fully evicted.
-      if (record.lifecycle.resultConsumed) {
-        this.removeRecord(id, record);
-      } else {
-        this.releaseExecution(record);
-      }
+      // Retention is a hard bound on terminal result text and metadata. Delivery
+      // failures remain retryable only until this configured cutoff.
+      this.removeRecord(id, record);
     }
   }
 
@@ -547,12 +552,14 @@ export class AgentManager {
     clearInterval(this.cleanupInterval);
     for (const entry of this.queue) entry.resolve("");
     this.queue = [];
-    for (const id of this.parentAbortListeners.keys()) this.clearParentAbortSignal(id);
-    for (const record of this.agents.values()) {
+    for (const id of [...this.parentAbortListeners.keys()]) this.clearParentAbortSignal(id);
+    for (const [id, record] of this.agents) {
       // A session may not exist yet while setup is in progress. Abort the
       // controller as well so every active run is stopped during shutdown.
       record.execution.abortController?.abort();
-      record.execution.session?.dispose();
+      // Use the normal eviction path so coordinator-owned parent listeners and
+      // maps cannot outlive a manager-only shutdown.
+      this.removeRecord(id, record);
     }
     this.agents.clear();
   }

@@ -564,7 +564,11 @@ describe("navigation highlight clamp on roster shrink", () => {
   });
 
   it("clamps highlight when roster shrinks during navSelect", () => {
-    const agents = Array.from({ length: 5 }, (_, i) => makeFinishedAgent(`a${i}`));
+    const startedAt = Date.now() - 120000;
+    const agents = Array.from({ length: 5 }, (_, i) => ({
+      ...makeFinishedAgent(`a${i}`),
+      lifecycle: { status: "completed" as const, startedAt, completedAt: startedAt + 60000 },
+    }));
     (manager as any).listAgents = () => agents;
 
     widget.navActivate();

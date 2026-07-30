@@ -204,6 +204,9 @@ export function buildAgentActionsList(
     items.push({ value: "steer", label: "Steer" });
     items.push({ value: "stop", label: "Stop" });
   }
+  if (!isRunning && record.delivery?.state === "failed") {
+    items.push({ value: "retry-delivery", label: "Retry delivery" });
+  }
 
   if (items.length === 0) {
     ctx.ui.notify(`Agent ${shortId} — no actions available`, "info");
@@ -240,6 +243,13 @@ export function buildAgentActionsList(
       getManager()?.abort(record.id, "user");
       ctx.ui.notify(`Stopped ${shortId}`, "info");
       onClose();
+    } else if (item.value === "retry-delivery") {
+      const retried = getCoordinator()?.retryDelivery(record.id) ?? false;
+      ctx.ui.notify(
+        retried ? `Delivery retry attempted for ${shortId}` : `Delivery retry unavailable for ${shortId}`,
+        retried ? "info" : "error",
+      );
+      done();
     }
   };
   list.onCancel = () => done();
@@ -268,9 +278,10 @@ export async function showRunningAgentsMenu(
           ? truncateDesc(record.display.description, descLen)
           : "";
         const suffix = headline ? ` \u2014 ${headline}` : "";
+        const delivery = record.delivery ? ` · delivery ${record.delivery.state}` : "";
         return {
           value: record.id,
-          label: `${statusIcon} ${record.id.slice(0, SHORT_ID_LENGTH)}  ${getDisplayName(record.display.type)}  ${record.lifecycle.status}  ${elapsed}s${suffix}`,
+          label: `${statusIcon} ${record.id.slice(0, SHORT_ID_LENGTH)}  ${getDisplayName(record.display.type)}  ${record.lifecycle.status}  ${elapsed}s${delivery}${suffix}`,
         };
       });
       if (running.length > 0) {

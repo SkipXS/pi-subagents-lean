@@ -226,7 +226,7 @@ describe("AgentManager", () => {
       const record = manager.getRecord(id)!;
 
       expect(mockModules.mockRunAgent).not.toHaveBeenCalled();
-      expect(record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "agent" });
+      expect(record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent" });
       expect(record.lifecycle.completedAt).toEqual(expect.any(Number));
       expect(onComplete).toHaveBeenCalledWith(record);
       expect(removeListener).toHaveBeenCalledOnce();
@@ -249,7 +249,7 @@ describe("AgentManager", () => {
 
       parent.abort();
       await expect(queuedRecord.execution.promise).resolves.toBe("");
-      expect(queuedRecord.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "agent" });
+      expect(queuedRecord.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent" });
       expect(onComplete).toHaveBeenCalledWith(queuedRecord);
       expect(removeListener).toHaveBeenCalledOnce();
 
@@ -475,7 +475,7 @@ describe("AgentManager", () => {
   // ── Cleanup eviction ──
 
   describe("cleanup", () => {
-    it("preserves unconsumed completed records older than the cutoff", async () => {
+    it("evicts failed-delivery completed records older than the cutoff", async () => {
       manager = new AgentManager(onComplete);
       mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
 
@@ -483,14 +483,15 @@ describe("AgentManager", () => {
       const record = manager.getRecord(id)!;
       await record.execution.promise;
 
-      // Result never consumed by the LLM — must not be evicted, even when old.
+      // Retention bounds result text even while a failed delivery is retryable.
+      record.delivery = { state: "failed", attempts: 1, lastError: "Pi unavailable" };
       record.lifecycle.completedAt = Date.now() - 20 * 60_000;
       (manager as any).cleanup();
 
-      expect(manager.getRecord(id)).toBeDefined();
+      expect(manager.getRecord(id)).toBeUndefined();
     });
 
-    it("releases execution handles but preserves old unconsumed settled results", async () => {
+    it("fully evicts old unconsumed settled records and releases their session", async () => {
       manager = new AgentManager(onComplete);
       const session = mockAgentSession();
       mockModules.mockRunAgent.mockResolvedValue(mockRunResult({ session }));
@@ -502,13 +503,8 @@ describe("AgentManager", () => {
 
       (manager as any).cleanup();
 
-      expect(manager.getRecord(id)).toBe(record);
-      expect(record.lifecycle.settled).toBe(true);
-      expect(record.result).toBe("done");
-      expect(record.lifecycle.status).toBe("completed");
-      expect(record.display.description).toBe("task");
+      expect(manager.getRecord(id)).toBeUndefined();
       expect(session.dispose).toHaveBeenCalledOnce();
-      expect(record.execution).toEqual({});
     });
 
     it("does not release a stopped runner before it has actually settled", async () => {
@@ -785,7 +781,7 @@ describe("AgentManager steering and shutdown", () => {
     parent.abort();
 
     expect(runnerOptions.signal.aborted).toBe(true);
-    expect(record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "agent" });
+    expect(record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent" });
     expect(record.lifecycle.completedAt).toEqual(expect.any(Number));
     expect(removeListener).toHaveBeenCalledOnce();
 

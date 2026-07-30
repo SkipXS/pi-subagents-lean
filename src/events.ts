@@ -58,6 +58,7 @@ export function ensureManagerAndWidget(): void {
       coordinator.onAgentComplete(record);
       getWidget()?.update();
     });
+    newManager.setOnRecordEvicted?.((record) => coordinator.onRecordEvicted(record));
   }
 
   // Create widget if missing (uses existing or newly created manager)

@@ -12,11 +12,12 @@ import { SHORT_ID_LENGTH } from "../types.js";
 import { getManager } from "../shell.js";
 
 /**
- * Format a single agent record as "short_id (type) status".
+ * Format a single agent record as "short_id (type) status [delivery state]".
  */
 function formatAgent(record: AgentRecord): string {
   const shortId = record.id.slice(0, SHORT_ID_LENGTH);
-  return `${shortId} (${record.display.type}) ${record.lifecycle.status}`;
+  const delivery = record.delivery ? ` delivery:${record.delivery.state}` : "";
+  return `${shortId} (${record.display.type}) ${record.lifecycle.status}${delivery}`;
 }
 
 /**

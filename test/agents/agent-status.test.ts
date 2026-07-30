@@ -122,6 +122,17 @@ describe("AgentStatus tool execute behavior", () => {
     expect(text).toContain("Don't poll");
   });
 
+  it("includes background delivery state when present", async () => {
+    mockListAgents.mockReturnValue([
+      { id: "abc123def456ghi", display: { type: "builder" }, lifecycle: { status: "completed" }, delivery: { state: "failed", attempts: 1 } },
+    ]);
+
+    const { executeAgentStatusTool } = await import("../../src/agents/agent-status.js");
+    const result = await executeAgentStatusTool("call_delivery", {}, undefined, undefined, {} as any);
+
+    expect(result.content[0].text).toContain("delivery:failed");
+  });
+
   it("always includes nudge message", async () => {
     mockListAgents.mockReturnValue([]);
 

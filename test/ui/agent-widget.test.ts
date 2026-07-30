@@ -1672,4 +1672,13 @@ describe("stats visibility integration", () => {
     expect(allText).toContain("↑");
     expect(allText).toContain("$");
   });
+
+  it("shows terminal background delivery state", () => {
+    const finished = makeFinishedAgent("delivery");
+    finished.delivery = { state: "failed", attempts: 1, lastError: "stale Pi" };
+    (manager as any).listAgents = () => [finished];
+
+    const lines = (widget as any).renderWidget(makeMockTUI(), makePlainTheme());
+    expect(lines.join(" ")).toContain("delivery:failed");
+  });
 });

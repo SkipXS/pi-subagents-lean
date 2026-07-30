@@ -554,7 +554,8 @@ export class AgentWidget {
     const modelThinking = padToVisibleWidth(this.displayModelThinking(a, layout.modelThinkingWidth), layout.modelThinkingWidth);
     const description = padToVisibleWidth(this.displayDescription(a, layout.descriptionWidth), layout.descriptionWidth);
     const { icon, statusText } = this.finishedIconAndStatus(a.lifecycle.status, a.error, theme);
-    return `${icon}${this.renderStartTime(a, theme, "dim")} ${theme.fg("dim", name)}${NAME_COLUMN_GAP}${this.renderModelThinkingColumn(modelThinking, theme, layout)}${theme.fg("dim", description)}  ${wrapInDim(theme, rawStats)}${statusText}`;
+    const delivery = a.delivery ? theme.fg("dim", ` delivery:${a.delivery.state}`) : "";
+    return `${icon}${this.renderStartTime(a, theme, "dim")} ${theme.fg("dim", name)}${NAME_COLUMN_GAP}${this.renderModelThinkingColumn(modelThinking, theme, layout)}${theme.fg("dim", description)}  ${wrapInDim(theme, rawStats)}${statusText}${delivery}`;
   }
 
   /** Build RenderBlocks for finished (completed/errored) agents. */

@@ -1,13 +1,18 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { join } from "node:path";
 
-const { mockGetAgentDir, mockMkdirSync, mockWriteFileSync, mockRenameSync, mockUnlinkSync, mockReadFileSync } = vi.hoisted(() => ({
+const { mockGetAgentDir, mockMkdirSync, mockWriteFileSync, mockRenameSync, mockUnlinkSync, mockReadFileSync, mockRmSync, mockOpenSync, mockFsyncSync, mockCloseSync, mockExistsSync } = vi.hoisted(() => ({
   mockGetAgentDir: vi.fn(),
   mockMkdirSync: vi.fn(),
   mockWriteFileSync: vi.fn(),
   mockRenameSync: vi.fn(),
   mockUnlinkSync: vi.fn(),
   mockReadFileSync: vi.fn(),
+  mockRmSync: vi.fn(),
+  mockOpenSync: vi.fn(() => 1),
+  mockFsyncSync: vi.fn(),
+  mockCloseSync: vi.fn(),
+  mockExistsSync: vi.fn(() => false),
 }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -20,7 +25,20 @@ vi.mock("node:fs", () => ({
   renameSync: mockRenameSync,
   unlinkSync: mockUnlinkSync,
   readFileSync: mockReadFileSync,
+  rmSync: mockRmSync,
+  openSync: mockOpenSync,
+  fsyncSync: mockFsyncSync,
+  closeSync: mockCloseSync,
+  existsSync: mockExistsSync,
 }));
+
+beforeEach(() => {
+  mockReadFileSync.mockImplementation(() => {
+    const err = new Error("missing") as NodeJS.ErrnoException;
+    err.code = "ENOENT";
+    throw err;
+  });
+});
 
 afterEach(() => {
   vi.resetAllMocks();
@@ -42,7 +60,7 @@ describe("config I/O paths", () => {
     vi.resetModules();
 
     const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().agent.scout).toBe(expected);
+    expect(loadConfig().config.agent.scout).toBe(expected);
   });
 
   it("defaults global concurrency to four", async () => {
@@ -51,7 +69,7 @@ describe("config I/O paths", () => {
     vi.resetModules();
 
     const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().concurrency).toEqual({ default: 4 });
+    expect(loadConfig().config.concurrency).toEqual({ default: 4 });
   });
 
   it("normalizes legacy provider and model limits out of saved config", async () => {
@@ -67,11 +85,12 @@ describe("config I/O paths", () => {
     vi.resetModules();
 
     const { loadConfig, saveConfigAtomic } = await import("../../src/config/config-io.ts");
-    const config = loadConfig();
+    const config = loadConfig().config;
     expect(config.concurrency).toEqual({ default: 2 });
 
     saveConfigAtomic(config);
-    const saved = JSON.parse(mockWriteFileSync.mock.calls[0]![1]);
+    const configWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
+    const saved = JSON.parse(String(configWrite![1]));
     expect(saved.concurrency).toEqual({ default: 2 });
   });
 
@@ -84,7 +103,7 @@ describe("config I/O paths", () => {
     vi.resetModules();
 
     const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().agent.defaultThinking).toBeUndefined();
+    expect(loadConfig().config.agent.defaultThinking).toBeUndefined();
   });
 
   it("defaults and preserves widget visibility and orchestration settings", async () => {
@@ -95,7 +114,7 @@ describe("config I/O paths", () => {
     }));
     vi.resetModules();
     let { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().agent).toMatchObject({
+    expect(loadConfig().config.agent).toMatchObject({
       widgetShowModelThinking: true,
       widgetShowStartTime: true,
       orchestrationPrompt: true,
@@ -107,7 +126,7 @@ describe("config I/O paths", () => {
     }));
     vi.resetModules();
     ({ loadConfig } = await import("../../src/config/config-io.ts"));
-    expect(loadConfig().agent).toMatchObject({
+    expect(loadConfig().config.agent).toMatchObject({
       widgetShowModelThinking: false,
       widgetShowStartTime: false,
       orchestrationPrompt: false,
@@ -127,7 +146,7 @@ describe("config I/O paths", () => {
     expect(mockGetAgentDir).toHaveBeenCalledOnce();
     expect(CUSTOM_PROMPT_PATH).toBe(join(agentDir, "subagents-lean-prompt.md"));
     expect(mockMkdirSync).toHaveBeenCalledWith(agentDir, { recursive: true });
-    const tmpPath = mockWriteFileSync.mock.calls[0]![0] as string;
+    const tmpPath = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."))![0] as string;
     expect(tmpPath.startsWith(`${configPath}.`)).toBe(true);
     expect(tmpPath.endsWith(".tmp")).toBe(true);
     expect(mockRenameSync).toHaveBeenCalledWith(tmpPath, configPath);
@@ -141,21 +160,25 @@ describe("config I/O paths", () => {
     saveConfigAtomic({ agent: {} as any, concurrency: {} as any });
     saveConfigAtomic({ agent: {} as any, concurrency: {} as any });
 
-    expect(mockWriteFileSync.mock.calls[0]![0]).not.toBe(mockWriteFileSync.mock.calls[1]![0]);
+    const tempWrites = mockWriteFileSync.mock.calls.filter(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
+    expect(tempWrites[0]![0]).not.toBe(tempWrites[1]![0]);
   });
 
   it("reports rename failures and removes the temporary config file", async () => {
     const agentDir = "/tmp/pi-agent";
     const renameError = new Error("simulated rename failure");
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const configPath = join(agentDir, "subagents-lean.json");
     mockGetAgentDir.mockReturnValue(agentDir);
-    mockRenameSync.mockImplementation(() => { throw renameError; });
+    mockRenameSync.mockImplementation((_source, target) => {
+      if (target === configPath) throw renameError;
+    });
     vi.resetModules();
 
     try {
       const { saveConfigAtomic } = await import("../../src/config/config-io.ts");
       expect(() => saveConfigAtomic({ agent: {} as any, concurrency: {} as any })).toThrow(renameError);
-      const tmpPath = mockWriteFileSync.mock.calls[0]![0];
+      const tmpPath = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."))![0];
       expect(mockUnlinkSync).toHaveBeenCalledWith(tmpPath);
       expect(error).toHaveBeenCalledWith(expect.stringContaining("simulated rename failure"));
     } finally {
@@ -169,9 +192,9 @@ describe("config I/O paths", () => {
     vi.resetModules();
 
     const { loadConfig, saveConfigAtomic } = await import("../../src/config/config-io.ts");
-    expect(loadConfig()).toMatchObject({ concurrency: { default: 4 }, thinkingOverrides: {} });
+    expect(loadConfig().config).toMatchObject({ concurrency: { default: 4 }, thinkingOverrides: {} });
     expect(() => saveConfigAtomic({ agent: {} as any, concurrency: {} as any }))
       .toThrow("primary config is corrupt");
-    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(mockWriteFileSync.mock.calls.some(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."))).toBe(false);
   });
 });

@@ -26,19 +26,34 @@ import { CONFIG_AGENT_NON_MODEL_KEYS } from "./types.js";
 import type { SystemPromptMode } from "../agents/types.js";
 import type { ThinkingLevel } from "../types.js";
 import { parseThinkingLevel } from "../utils.js";
-import { VALID_SYSTEM_PROMPT_MODES, DEFAULT_CONCURRENCY, loadConfig, saveConfigAtomic } from "./config-io.js";
+import {
+  VALID_SYSTEM_PROMPT_MODES,
+  DEFAULT_CONCURRENCY,
+  loadConfig,
+  saveConfigAtomic,
+  updateConfigAtomic,
+  repairConfig,
+  type ConfigHealth,
+  type ConfigLoadResult,
+} from "./config-io.js";
 
 
 /** Injected persistence adapter. Swap for an in-memory adapter in tests. */
 export interface ConfigIO {
-  load(): SubagentsConfig;
+  /** Legacy adapters may return a config directly; production returns health too. */
+  load(): SubagentsConfig | ConfigLoadResult;
   save(config: SubagentsConfig): void;
+  /** Transactionally applies a concrete change to the latest disk snapshot. */
+  update?(change: (config: SubagentsConfig) => void): ConfigLoadResult;
+  repair?(): ConfigLoadResult;
 }
 
 /** Production adapter wrapping the real config file. */
 export const fileConfigIO: ConfigIO = {
   load: () => loadConfig(),
-  save: (c) => saveConfigAtomic(c),
+  save: (c) => { saveConfigAtomic(c); },
+  update: (change) => updateConfigAtomic(change),
+  repair: () => repairConfig(),
 };
 
 /** Agent settings with all scalar defaults resolved. Model fields stay nullable. */
@@ -100,6 +115,8 @@ export class ConfigStore {
   private config: SubagentsConfig;
   /** Last successfully loaded or saved config; used to roll back failed writes. */
   private persistedConfig: SubagentsConfig;
+  private configHealth: ConfigHealth = "healthy";
+  private repairAvailable = false;
   private sessionOverrides: SessionModelOverrides = { default: null };
   private sessionThinkingOverrides: SessionThinkingOverrides = {};
   private sessionShowCost: boolean | undefined;
@@ -109,8 +126,11 @@ export class ConfigStore {
   private lastToolsExpanded: boolean | undefined;
 
   constructor(private readonly io: ConfigIO = fileConfigIO) {
-    this.config = this.io.load();
+    const loaded = this.readConfig();
+    this.config = loaded.config;
     this.persistedConfig = structuredClone(this.config);
+    this.configHealth = loaded.health;
+    this.repairAvailable = loaded.canRepair;
   }
 
   // ── Reads ──────────────────────────────────────────────────────
@@ -118,6 +138,16 @@ export class ConfigStore {
   /** Whether a session-level showCost override is active. */
   get hasSessionShowCost(): boolean {
     return this.sessionShowCost !== undefined;
+  }
+
+  /** Health of the source used for this session's durable config. */
+  get health(): ConfigHealth {
+    return this.configHealth;
+  }
+
+  /** True only when a readable corrupt primary can safely be restored from .bak. */
+  get canRepair(): boolean {
+    return this.repairAvailable;
   }
 
   get agent(): ResolvedAgentSettings {
@@ -470,8 +500,11 @@ export class ConfigStore {
 
   /** Re-read disk, reset session overrides + toggle state, re-sync deps. Called at session_start. */
   reload(): void {
-    this.config = this.io.load();
+    const loaded = this.readConfig();
+    this.config = loaded.config;
     this.persistedConfig = structuredClone(this.config);
+    this.configHealth = loaded.health;
+    this.repairAvailable = loaded.canRepair;
     this.sessionOverrides = { default: null };
     this.sessionThinkingOverrides = {};
     this.sessionShowCost = undefined;
@@ -494,15 +527,55 @@ export class ConfigStore {
 
   // ── Private helpers ────────────────────────────────────────────
 
+  /** Restore the durable primary from .bak without touching session overrides. */
+  repair(): void {
+    if (this.configHealth !== "using-backup" || !this.repairAvailable || !this.io.repair) {
+      throw new Error("Config repair is unavailable for this persistence adapter.");
+    }
+    const repaired = this.io.repair();
+    this.config = structuredClone(repaired.config);
+    this.persistedConfig = structuredClone(repaired.config);
+    this.configHealth = repaired.health;
+    this.repairAvailable = repaired.canRepair;
+    this.syncAllDeps();
+  }
+
   /** Save current config, restoring the last durable state if the write fails. */
   private persist(): void {
+    const before = structuredClone(this.persistedConfig);
+    const desired = structuredClone(this.config);
     try {
-      this.io.save(this.config);
-      this.persistedConfig = structuredClone(this.config);
+      if (this.io.update) {
+        const saved = this.io.update((latest) => applyConfigDelta(latest, before, desired));
+        this.config = structuredClone(saved.config);
+        this.persistedConfig = structuredClone(saved.config);
+        this.configHealth = saved.health;
+        this.repairAvailable = saved.canRepair;
+      } else {
+        this.io.save(desired);
+        this.persistedConfig = structuredClone(desired);
+      }
     } catch (err) {
+      // Keep the last durable in-memory snapshot, but re-read health: the
+      // primary may have become corrupt after this store was constructed.
       this.config = structuredClone(this.persistedConfig);
+      try {
+        const current = this.readConfig();
+        this.configHealth = current.health;
+        this.repairAvailable = current.canRepair;
+      } catch {
+        this.configHealth = "unrecoverable";
+        this.repairAvailable = false;
+      }
       throw err;
     }
+  }
+
+  private readConfig(): ConfigLoadResult {
+    const loaded = this.io.load();
+    return "health" in loaded && "canRepair" in loaded
+      ? loaded
+      : { config: loaded, health: "healthy", canRepair: false };
   }
 
   /** Apply the last known tool-expansion state while shortcut coupling is active. */
@@ -566,5 +639,26 @@ export class ConfigStore {
     }
     this.applyConcurrency();
     this.manager?.setRetentionMinutes(this.agent.finishedRetentionMinutes);
+  }
+}
+
+/** Apply only this store mutation's changed fields to a freshly locked snapshot. */
+function applyConfigDelta(latest: SubagentsConfig, before: SubagentsConfig, desired: SubagentsConfig): void {
+  applyObjectDelta(latest.agent as Record<string, unknown>, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
+  applyObjectDelta(latest.concurrency as Record<string, unknown>, before.concurrency as Record<string, unknown>, desired.concurrency as Record<string, unknown>);
+  latest.thinkingOverrides ??= {};
+  applyObjectDelta(
+    latest.thinkingOverrides as Record<string, unknown>,
+    (before.thinkingOverrides ?? {}) as Record<string, unknown>,
+    (desired.thinkingOverrides ?? {}) as Record<string, unknown>,
+  );
+}
+
+function applyObjectDelta(latest: Record<string, unknown>, before: Record<string, unknown>, desired: Record<string, unknown>): void {
+  const keys = new Set([...Object.keys(before), ...Object.keys(desired)]);
+  for (const key of keys) {
+    if (Object.is(before[key], desired[key])) continue;
+    if (Object.hasOwn(desired, key)) latest[key] = structuredClone(desired[key]);
+    else delete latest[key];
   }
 }

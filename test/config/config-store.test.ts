@@ -336,6 +336,35 @@ describe("ConfigStore persisted mutations", () => {
     expect(retentions).toEqual([15]);
   });
 
+  it("adopts the transaction commit before applying manager effects", () => {
+    const disk = defaultConfig();
+    const updates: string[] = [];
+    const io: ConfigIO = {
+      load: () => ({ config: structuredClone(disk), health: "healthy", canRepair: false }),
+      save: () => { throw new Error("legacy save should not run"); },
+      update: (change) => {
+        const latest = structuredClone(disk);
+        latest.agent.showCost = true; // concurrent writer's independent field
+        change(latest);
+        disk.agent = structuredClone(latest.agent);
+        disk.concurrency = structuredClone(latest.concurrency);
+        updates.push("committed");
+        return { config: latest, health: "healthy", canRepair: false };
+      },
+    };
+    const { m, concurrencies } = managerStub();
+    const store = new ConfigStore(io);
+    store.setDeps({ manager: m });
+    concurrencies.length = 0;
+
+    store.mutate.concurrency.setDefault(8);
+
+    expect(updates).toEqual(["committed"]);
+    expect(store.agent.showCost).toBe(true);
+    expect(store.concurrency).toEqual({ default: 8 });
+    expect(concurrencies).toEqual([{ default: 8 }]);
+  });
+
   it("rolls back RAM and suppresses widget and manager effects when saving fails", () => {
     const disk = defaultConfig();
     const io: ConfigIO = {
@@ -358,6 +387,30 @@ describe("ConfigStore persisted mutations", () => {
     expect(store.concurrency).toEqual({ default: 4 });
     expect(disk.concurrency).toEqual({ default: 4 });
     expect(concurrencies).toHaveLength(0);
+  });
+
+  it("updates recovery health after a failed update finds a newly corrupt primary without losing rollback", () => {
+    const durable = defaultConfig();
+    const backup = defaultConfig();
+    backup.agent.showCost = true;
+    let primaryBecameCorrupt = false;
+    const io: ConfigIO = {
+      load: () => primaryBecameCorrupt
+        ? { config: structuredClone(backup), health: "using-backup", canRepair: true }
+        : { config: structuredClone(durable), health: "healthy", canRepair: false },
+      save: () => { throw new Error("legacy save should not run"); },
+      update: () => {
+        primaryBecameCorrupt = true;
+        throw new Error("primary became corrupt");
+      },
+      repair: () => ({ config: structuredClone(backup), health: "healthy", canRepair: false }),
+    };
+    const store = new ConfigStore(io);
+
+    expect(() => store.mutate.agent.setShowCost(true)).toThrow("primary became corrupt");
+    expect(store.agent.showCost).toBe(false);
+    expect(store.health).toBe("using-backup");
+    expect(store.canRepair).toBe(true);
   });
 
   it("setFinishedRetentionMinutes clamps to minimum 1", () => {
@@ -698,6 +751,29 @@ describe("ConfigStore agent properties", () => {
 /* ------------------------------------------------------------------ */
 
 describe("ConfigStore lifecycle", () => {
+  it("repairs only a backup-backed config and preserves session overrides", () => {
+    const backup = defaultConfig();
+    backup.agent.showCost = true;
+    let repaired = false;
+    const io: ConfigIO = {
+      load: () => ({ config: structuredClone(backup), health: "using-backup", canRepair: true }),
+      save: () => undefined,
+      repair: () => {
+        repaired = true;
+        return { config: structuredClone(backup), health: "healthy", canRepair: false };
+      },
+    };
+    const store = new ConfigStore(io);
+    store.mutate.session.setOverride("reviewer", "session/model");
+
+    store.repair();
+
+    expect(repaired).toBe(true);
+    expect(store.health).toBe("healthy");
+    expect(store.agent.showCost).toBe(true);
+    expect(store.sessionModelOverride("reviewer")).toBe("session/model");
+  });
+
   it("reload re-reads disk and resets session overrides", () => {
     const { io, current } = memIO();
     const store = new ConfigStore(io);
