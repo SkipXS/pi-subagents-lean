@@ -24,7 +24,13 @@ function main(): void {
       join(tempRoot, "package.json"),
       JSON.stringify(productionManifest(manifest), null, 2),
     );
-    execFileSync(npm, ["install", "--omit=dev", "--package-lock=false", "--ignore-scripts"], {
+    const installArgs = ["install", "--omit=dev", "--package-lock=false", "--ignore-scripts"];
+    // npm's automatic peer installation repeatedly corrupts nested package
+    // extraction on hosted Windows runners. The separate package smoke installs
+    // and loads the extension with its real Pi peers on both platforms; this
+    // check only needs to validate the production dependency manifest there.
+    if (process.platform === "win32") installArgs.push("--legacy-peer-deps");
+    execFileSync(npm, installArgs, {
       cwd: tempRoot,
       stdio: "inherit",
       timeout: COMMAND_TIMEOUT_MS,
