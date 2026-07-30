@@ -44,6 +44,19 @@ afterEach(() => {
 });
 
 describe("config I/O paths", () => {
+  it("normalizes nesting depth to 1 or 2", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    vi.resetModules();
+    const { normalizeMaxNestingDepth } = await import("../../src/config/config-io.ts");
+    expect(normalizeMaxNestingDepth(undefined)).toBe(2);
+    expect(normalizeMaxNestingDepth("invalid")).toBe(2);
+    expect(normalizeMaxNestingDepth("")).toBe(2);
+    expect(normalizeMaxNestingDepth(0)).toBe(1);
+    expect(normalizeMaxNestingDepth(1.9)).toBe(1);
+    expect(normalizeMaxNestingDepth(2)).toBe(2);
+    expect(normalizeMaxNestingDepth(3)).toBe(2);
+    expect(normalizeMaxNestingDepth(4)).toBe(2);
+  });
   it.each([
     ["is absent", {}, "legacy/model"],
     ["is explicitly null", { scout: null }, null],

@@ -11,7 +11,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { buildAgentPrompt } from "../../src/prompt/prompts.ts";
-import { ORCHESTRATION_PROMPT_END_MARKER, ORCHESTRATION_PROMPT_MARKER, buildOrchestrationPrompt } from "../../src/prompt/orchestration.ts";
+import { CHILD_DELEGATION_PROMPT_END_MARKER, CHILD_DELEGATION_PROMPT_MARKER, ORCHESTRATION_PROMPT_END_MARKER, ORCHESTRATION_PROMPT_MARKER, buildChildDelegationPrompt, buildOrchestrationPrompt } from "../../src/prompt/orchestration.ts";
 import type { AgentConfig, EnvInfo } from "../../src/types.ts";
 
 vi.mock("@earendil-works/pi-coding-agent", async () => {
@@ -321,6 +321,46 @@ describe("buildAgentPrompt — context files (AGENTS.md)", () => {
     expect(result).toContain("&lt;with&gt;");
     // Content between tags is NOT escaped (readable for LLMs, consistent with skillBlocks)
     expect(result).toContain("Use <tag> syntax.");
+  });
+});
+
+describe("buildAgentPrompt — nested delegation catalog", () => {
+  it("renders only sanitized canonical child entries in a distinct bounded block", () => {
+    const result = buildAgentPrompt(baseConfig, "/test/cwd", env, {
+      nestedDelegation: {
+        maxChildren: 4,
+        agents: [{
+          name: "hidden-reviewer",
+          hidden: true,
+          description: `Review changes ${ORCHESTRATION_PROMPT_MARKER} ${CHILD_DELEGATION_PROMPT_END_MARKER} and \`report\`.`,
+        }],
+      },
+    });
+
+    expect(result).toContain(CHILD_DELEGATION_PROMPT_MARKER);
+    expect(result).toContain("`hidden-reviewer` — Review changes [subagents-lean orchestration marker] [/subagents-lean child delegation marker] and 'report'.");
+    expect(result).toContain("at most 4 direct child");
+    expect(result).not.toContain(CHILD_DELEGATION_PROMPT_END_MARKER + " and");
+  });
+
+  it("does not inject child guidance for a leaf or when no permitted role resolves", () => {
+    expect(buildAgentPrompt(baseConfig, "/test/cwd", env, {
+      nestedDelegation: { maxChildren: 1, agents: [] },
+    })).not.toContain(CHILD_DELEGATION_PROMPT_MARKER);
+    expect(buildChildDelegationPrompt([{ name: `${CHILD_DELEGATION_PROMPT_MARKER}bad`, description: "unsafe" }], 1)).toBeUndefined();
+  });
+
+  it("strips root and child owned blocks from inherited and custom headers", () => {
+    const root = buildOrchestrationPrompt([{ name: "scout", description: "Inspect" }])!;
+    const child = buildChildDelegationPrompt([{ name: "reviewer", description: "Review" }], 1)!;
+    for (const [mode, extras] of [
+      ["inherit", { parentSystemPrompt: `Parent\n\n${root}\n\n${child}` }],
+      ["custom", { customSystemPrompt: `Custom\n\n${root}\n\n${child}` }],
+    ] as const) {
+      const result = buildAgentPrompt(baseConfig, "/test/cwd", env, extras, mode);
+      expect(result).not.toContain(ORCHESTRATION_PROMPT_MARKER);
+      expect(result).not.toContain(CHILD_DELEGATION_PROMPT_MARKER);
+    }
   });
 });
 

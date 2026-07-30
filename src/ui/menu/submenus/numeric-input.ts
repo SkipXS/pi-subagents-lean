@@ -23,7 +23,7 @@ import { validateNumeric } from "../helpers.js";
  */
 export function createNumericSubmenu(
   ctx: ExtensionCommandContext,
-  optionsOrCallback?: { min?: number; required?: boolean; default?: number; onValid?: (parsed: number) => boolean | void } | ((parsed: number) => boolean | void),
+  optionsOrCallback?: { min?: number; max?: number; required?: boolean; default?: number; onValid?: (parsed: number) => boolean | void } | ((parsed: number) => boolean | void),
   onValid?: (parsed: number) => boolean | void,
   onEmpty?: () => boolean | void,
 ): (initialValue: string, done: (selectedValue?: string) => void) => Component {
@@ -32,7 +32,10 @@ export function createNumericSubmenu(
     : { onValid, ...optionsOrCallback };
   const min = opts.min ?? 1;
   const required = opts.required ?? false;
-  const fmtLabel = (n: number) => (n === 0 ? "\u2265 0" : `\u2265 ${n}`);
+  const max = opts.max;
+  const fmtLabel = (n: number) => max === undefined
+    ? (n === 0 ? "\u2265 0" : `\u2265 ${n}`)
+    : `${n}–${max}`;
   const onError = (msg: string) => ctx.ui.notify(msg, "error");
 
   return (initialValue, done) => {
@@ -55,7 +58,7 @@ export function createNumericSubmenu(
         return;
       }
       const parsed = validateNumeric(trimmed, min);
-      if (parsed === undefined) {
+      if (parsed === undefined || (max !== undefined && parsed > max)) {
         onError(`Invalid value \u2014 must be a number ${fmtLabel(min)}`);
         return;
       }

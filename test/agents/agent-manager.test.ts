@@ -58,6 +58,38 @@ function mockRunResult(overrides?: Partial<MockRunResult>): MockRunResult {
 
 import { AgentManager } from "../../src/agents/agent-manager.js";
 import type { ConcurrencyConfig, OnAgentComplete } from "../../src/agents/agent-manager.js";
+import type { AgentHierarchy, AgentRecord } from "../../src/types.js";
+import { SpawnCoordinator } from "../../src/spawn/spawn-coordinator.js";
+import {
+  createSubagentRuntimeContext,
+  enterSubagentSpawn,
+  exitSubagentSpawn,
+  getCoordinator,
+  getManager,
+  getPiInstance,
+  getSessionCtx,
+  getStore,
+  getSubagentRuntimeContext,
+  getWidget,
+  isInsideSubagentSpawn,
+  runWithSubagentRuntime,
+  setCoordinator,
+  setManager,
+  setPiInstance,
+  setSessionCtx,
+  setWidget,
+} from "../../src/shell.js";
+import { createNestedAgentExecutor } from "../../src/agents/tool-execution.js";
+import { createNestedAgentProxy } from "../../src/agents/nested-agent-proxy.js";
+import { registerAgents } from "../../src/agents/agent-types.js";
+
+const childSettings = () => getStore().createSubagentRuntimeSettings();
+
+/** Manager-created records always have hierarchy, unlike the public legacy shape. */
+function managedHierarchy(record: AgentRecord): AgentHierarchy {
+  if (!record.hierarchy) throw new Error("Expected manager-created record hierarchy");
+  return record.hierarchy;
+}
 
 describe("AgentManager", () => {
   let manager: AgentManager;
@@ -66,11 +98,226 @@ describe("AgentManager", () => {
   beforeEach(() => {
     mockModules.resetUuidCounter();
     mockModules.mockRunAgent.mockReset();
+    registerAgents(new Map([
+      ["scout", { name: "scout", description: "", systemPrompt: "" }],
+      ["reviewer", { name: "reviewer", description: "", systemPrompt: "" }],
+    ]));
     onComplete = vi.fn<OnAgentComplete>();
   });
 
   afterEach(() => {
     manager?.dispose();
+  });
+
+  it("denies root shell API, session, store, and every setter in a child runtime", async () => {
+    const settings = childSettings();
+    await runWithSubagentRuntime(createSubagentRuntimeContext(
+      async () => ({ content: [] }),
+      settings,
+    ), async () => {
+      expect(() => getPiInstance()).toThrow("Root ExtensionAPI is unavailable");
+      expect(() => getSessionCtx()).toThrow("Root session context is unavailable");
+      expect(() => getStore()).toThrow("Root ConfigStore is unavailable");
+      expect(() => setPiInstance({} as any)).toThrow("Root ExtensionAPI setter is unavailable");
+      expect(() => setSessionCtx({} as any)).toThrow("Root session context setter is unavailable");
+      expect(() => setManager(null)).toThrow("Root manager setter is unavailable");
+      expect(() => setWidget(null)).toThrow("Root widget setter is unavailable");
+      expect(() => setCoordinator(null)).toThrow("Root coordinator setter is unavailable");
+      expect(getManager()).toBeNull();
+      expect(getCoordinator()).toBeNull();
+      expect(getWidget()).toBeNull();
+      expect(Object.keys(settings).sort()).toEqual(["agent", "modelFor", "thinkingSettingFor"]);
+    });
+  });
+
+  it("does not let deprecated spawn hooks clear ALS shell guards", async () => {
+    manager = new AgentManager(onComplete);
+    const pi = fakePi();
+    const ctx = fakeCtx();
+
+    enterSubagentSpawn();
+    await runWithSubagentRuntime(createSubagentRuntimeContext(
+      async () => ({ content: [] }),
+      childSettings(),
+    ), async () => {
+      // This consumes the legacy marker, but must not affect ALS isolation.
+      exitSubagentSpawn();
+      expect(isInsideSubagentSpawn()).toBe(true);
+      expect(() => getPiInstance()).toThrow("Root ExtensionAPI is unavailable");
+      expect(() => manager.spawn(pi, ctx, "scout", "bypass", { description: "bypass" }))
+        .toThrow("Root agent spawning is unavailable from a child runtime");
+    });
+
+    expect(isInsideSubagentSpawn()).toBe(false);
+  });
+
+  it("rejects direct root manager and coordinator spawns inside a child runtime", async () => {
+    manager = new AgentManager(onComplete);
+    const coordinator = new SpawnCoordinator(manager);
+    const pi = fakePi();
+    const ctx = fakeCtx();
+
+    await runWithSubagentRuntime(createSubagentRuntimeContext(
+      async () => ({ content: [] }),
+      childSettings(),
+    ), async () => {
+      expect(() => manager.spawn(pi, ctx, "scout", "bypass", { description: "bypass" }))
+        .toThrow("Root agent spawning is unavailable from a child runtime");
+      await expect(coordinator.spawn(pi, ctx, {
+        type: "scout", prompt: "bypass", description: "bypass", graceTurns: 6, runInBackground: false,
+      })).rejects.toThrow("Root agent spawning is unavailable from a child runtime");
+    });
+
+    expect(manager.listAgents()).toHaveLength(0);
+    expect(mockModules.mockRunAgent).not.toHaveBeenCalled();
+    coordinator.dispose();
+  });
+
+  it("rejects unregistered ALS values without clearing active child isolation", async () => {
+    manager = new AgentManager(onComplete);
+    const coordinator = new SpawnCoordinator(manager);
+    const pi = fakePi();
+    const ctx = fakeCtx();
+    const settings = childSettings();
+    const runtime = createSubagentRuntimeContext(async () => ({ content: [] }), settings);
+    expect(Object.isFrozen(runtime)).toBe(true);
+    expect(Object.keys(runtime).sort()).toEqual(["executeNestedAgent", "isChildRuntime", "settings"]);
+    const forgedRuntime = {
+      isChildRuntime: true,
+      executeNestedAgent: async () => ({ content: [] }),
+      settings,
+    };
+
+    const expectChildIsolation = async () => {
+      expect(() => getPiInstance()).toThrow("Root ExtensionAPI is unavailable");
+      expect(() => getSessionCtx()).toThrow("Root session context is unavailable");
+      expect(() => getStore()).toThrow("Root ConfigStore is unavailable");
+      expect(getManager()).toBeNull();
+      expect(getCoordinator()).toBeNull();
+      expect(getWidget()).toBeNull();
+      expect(() => setPiInstance({} as any)).toThrow("Root ExtensionAPI setter is unavailable");
+      expect(() => setSessionCtx({} as any)).toThrow("Root session context setter is unavailable");
+      expect(() => setManager(null)).toThrow("Root manager setter is unavailable");
+      expect(() => setWidget(null)).toThrow("Root widget setter is unavailable");
+      expect(() => setCoordinator(null)).toThrow("Root coordinator setter is unavailable");
+      expect(() => manager.spawn(pi, ctx, "scout", "bypass", { description: "bypass" }))
+        .toThrow("Root agent spawning is unavailable from a child runtime");
+      await expect(coordinator.spawn(pi, ctx, {
+        type: "scout", prompt: "bypass", description: "bypass", graceTurns: 6, runInBackground: false,
+      })).rejects.toThrow("Root agent spawning is unavailable from a child runtime");
+    };
+
+    try {
+      await runWithSubagentRuntime(runtime, async () => {
+        for (const invalidContext of [undefined, null, forgedRuntime]) {
+          let callbackRan = false;
+          expect(() => runWithSubagentRuntime(invalidContext, async () => {
+            callbackRan = true;
+          })).toThrow("Invalid child subagent runtime context");
+          expect(callbackRan).toBe(false);
+          await expectChildIsolation();
+        }
+
+        const currentRuntime = getSubagentRuntimeContext();
+        expect(currentRuntime).toBe(runtime);
+        await runWithSubagentRuntime(currentRuntime, async () => {
+          await expectChildIsolation();
+        });
+      });
+
+      expect(manager.listAgents()).toHaveLength(0);
+      expect(mockModules.mockRunAgent).not.toHaveBeenCalled();
+    } finally {
+      coordinator.dispose();
+    }
+  });
+
+  it("captures a registered delegating root config and canonical role for direct manager spawns", () => {
+    const parentRun = makeResolvablePromise();
+    const childRun = makeResolvablePromise();
+    const delegator = {
+      name: "Implementer", description: "delegates", systemPrompt: "captured parent",
+      delegateTo: ["scout"], maxChildAgents: 1,
+    };
+    registerAgents(new Map<string, any>([
+      ["implementer", delegator],
+      ["scout", { name: "scout", description: "", systemPrompt: "captured child" }],
+    ]));
+    mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+    manager = new AgentManager(undefined, { default: 1 });
+
+    const parentId = manager.spawn(fakePi(), fakeCtx(), "IMPLEMENTER", "parent", { description: "parent" });
+    // Mutating the registered source after acceptance cannot alter the private
+    // ledger or the queued runner's detached config snapshot.
+    delegator.systemPrompt = "mutated parent";
+    delegator.delegateTo[0] = "reviewer";
+
+    const parent = manager.getRecord(parentId)!;
+    expect(parent.display.type).toBe("implementer");
+    expect(managedHierarchy(parent).delegateTo).toEqual(["scout"]);
+    expect(mockModules.mockRunAgent.mock.calls[0]?.[1]).toBe("implementer");
+    expect(mockModules.mockRunAgent.mock.calls[0]?.[3].agentConfig).toMatchObject({
+      name: "Implementer", systemPrompt: "captured parent", delegateTo: ["scout"], maxChildAgents: 1,
+    });
+
+    expect(manager.preflightNested(parentId, "scout")).toEqual(expect.objectContaining({ ok: true, type: "scout" }));
+    const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", { description: "child" });
+    expect(managedHierarchy(manager.getRecord(childId)!).parentId).toBe(parentId);
+    childRun.resolve(mockRunResult());
+    parentRun.resolve(mockRunResult());
+  });
+
+  it("withholds root shell controls in child ALS while the bound nested proxy remains usable", async () => {
+    const parentRun = makeResolvablePromise();
+    const otherParentRun = makeResolvablePromise();
+    manager = new AgentManager(undefined, { default: 3 });
+    const coordinator = new SpawnCoordinator(manager);
+    setManager(manager);
+    setCoordinator(coordinator);
+    const parentConfig = { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 };
+    mockModules.mockRunAgent
+      .mockReturnValueOnce(parentRun.promise)
+      .mockReturnValueOnce(otherParentRun.promise)
+      .mockResolvedValueOnce(mockRunResult());
+
+    try {
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", { description: "parent", agentConfig: parentConfig });
+      const otherParentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "other", { description: "other", agentConfig: parentConfig });
+      const runtime = createSubagentRuntimeContext(
+        createNestedAgentExecutor(parentId, fakePi(), manager, coordinator),
+        childSettings(),
+      );
+
+      await runWithSubagentRuntime(runtime, async () => {
+        expect(getManager()).toBeNull();
+        expect(getCoordinator()).toBeNull();
+        expect(getWidget()).toBeNull();
+        // The root ConfigStore itself is unavailable; child settings are the
+        // only configuration surface in the runtime context.
+        expect(() => getStore()).toThrow("Root ConfigStore is unavailable");
+        expect(getManager()?.spawnNested(otherParentId, fakePi(), fakeCtx(), "scout", "bypass", { description: "bypass" })).toBeUndefined();
+        expect(getCoordinator()?.spawnNested(otherParentId, fakePi(), fakeCtx(), {
+          type: "scout", prompt: "bypass", description: "bypass", graceTurns: 6, runInBackground: false,
+        })).toBeUndefined();
+
+        const proxy: any = createNestedAgentProxy(runtime);
+        const result = await proxy.execute("nested", {
+          agent: "scout", prompt: "allowed child",
+        }, undefined, undefined, fakeCtx());
+        expect(result).not.toHaveProperty("isError");
+      });
+
+      const children = managedHierarchy(manager.getRecord(parentId)!).childIds;
+      expect(children).toHaveLength(1);
+      expect(managedHierarchy(manager.getRecord(children[0]!)!).parentId).toBe(parentId);
+      expect(managedHierarchy(manager.getRecord(otherParentId)!).childIds).toEqual([]);
+      parentRun.resolve(mockRunResult());
+      otherParentRun.resolve(mockRunResult());
+    } finally {
+      setCoordinator(null);
+      setManager(null);
+      coordinator.dispose();
+    }
   });
 
   // ── Concurrency ──
@@ -696,6 +943,10 @@ describe("AgentManager steering and shutdown", () => {
   beforeEach(() => {
     mockModules.resetUuidCounter();
     mockModules.mockRunAgent.mockReset();
+    registerAgents(new Map([
+      ["scout", { name: "scout", description: "", systemPrompt: "" }],
+      ["reviewer", { name: "reviewer", description: "", systemPrompt: "" }],
+    ]));
   });
 
   afterEach(() => {
@@ -790,6 +1041,483 @@ describe("AgentManager steering and shutdown", () => {
     deferred.resolve(mockRunResult({ session, aborted: true }));
     await record.execution.promise;
     expect(record.lifecycle.status).toBe("stopped");
+  });
+
+  describe("spawnNested", () => {
+    const parentConfig = { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 };
+    const childConfig = { name: "scout", description: "", systemPrompt: "" };
+
+    it("rejects background children and missing or stopped parents", async () => {
+      manager = new AgentManager(undefined, { default: 1 });
+      const options = { description: "child", agentConfig: childConfig };
+
+      expect(() => manager.spawnNested("missing", fakePi(), fakeCtx(), "scout", "child", options))
+        .toThrow("Nested agent parent is no longer running");
+
+      mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentConfig: parentConfig,
+      });
+      await manager.getRecord(parentId)!.execution.promise;
+
+      expect(() => manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", options))
+        .toThrow("Nested agent parent is no longer running");
+
+      mockModules.mockRunAgent.mockReturnValue(new Promise(() => {}));
+      const activeParent = manager.spawn(fakePi(), fakeCtx(), "implementer", "active parent", {
+        description: "active parent", agentConfig: parentConfig,
+      });
+      expect(() => manager.spawnNested(activeParent, fakePi(), fakeCtx(), "scout", "child", {
+        ...options, isBackground: true,
+      })).toThrow("Nested agents must run in the foreground");
+    });
+
+    it("keeps its total child budget on the parent after sequential completion", async () => {
+      const parentRun = makeResolvablePromise();
+      const childRun = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+      manager = new AgentManager(undefined, { default: 1 });
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentConfig: parentConfig,
+      });
+      const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+        description: "child", agentConfig: { ...childConfig, maxChildAgents: 99 },
+      });
+
+      childRun.resolve(mockRunResult());
+      await manager.getRecord(childId)!.execution.promise;
+
+      // The child cannot expand the manager-owned budget, and completed direct
+      // children still count against the parent's total allowance.
+      expect(() => manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "another child", {
+        description: "another child", agentConfig: { ...childConfig, maxChildAgents: 99 },
+      })).toThrow("Child-agent budget exhausted");
+      parentRun.resolve(mockRunResult());
+    });
+
+    it("rejects a second concurrently active child even when budget remains", () => {
+      const parentRun = makeResolvablePromise();
+      const childRun = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+      manager = new AgentManager(undefined, { default: 1 });
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentConfig: { ...parentConfig, maxChildAgents: 2 },
+      });
+      manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "first child", {
+        description: "first child", agentConfig: childConfig,
+      });
+
+      expect(() => manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "second child", {
+        description: "second child", agentConfig: childConfig,
+      })).toThrow("This agent already has an active child");
+    });
+
+    it("centrally preflights captured catalog permissions, budget, and active children", async () => {
+      const parentRun = makeResolvablePromise();
+      const childRun = makeResolvablePromise();
+      const catalog = new Map<string, any>([
+        ["scout", { name: "scout", description: "", systemPrompt: "" }],
+        ["reviewer", { name: "reviewer", description: "", systemPrompt: "" }],
+      ]);
+      mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+      manager = new AgentManager(undefined, { default: 1 });
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentCatalog: catalog,
+        agentConfig: { ...parentConfig, maxChildAgents: 1 },
+      });
+
+      expect(manager.preflightNested(parentId, "reviewer")).toEqual(expect.objectContaining({
+        ok: false, error: 'Agent "reviewer" is not allowed. Allowed child agents: scout',
+      }));
+      expect(manager.preflightNested(parentId, "scout")).toEqual(expect.objectContaining({ ok: true, type: "scout" }));
+      manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", { description: "child" });
+      expect(manager.preflightNested(parentId, "scout")).toEqual(expect.objectContaining({
+        ok: false, error: "This agent already has an active child",
+      }));
+
+      childRun.resolve(mockRunResult());
+      await managedHierarchy(manager.getRecord(parentId)!).childIds.map((id) => manager.getRecord(id)!.execution.promise)[0];
+      expect(manager.preflightNested(parentId, "scout")).toEqual(expect.objectContaining({
+        ok: false, error: "Child-agent budget exhausted",
+      }));
+      parentRun.resolve(mockRunResult());
+    });
+
+    it("enforces its configured cap at nested preflight despite a caller-supplied cap", () => {
+      const parentRun = makeResolvablePromise();
+      const childRun = makeResolvablePromise();
+      const catalog = new Map<string, any>([
+        ["scout", { name: "scout", description: "", systemPrompt: "", delegateTo: ["reviewer"] }],
+        ["reviewer", { name: "reviewer", description: "", systemPrompt: "" }],
+      ]);
+      mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+      manager = new AgentManager(undefined, { default: 1 }, undefined, 0, 2);
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentCatalog: catalog, agentConfig: parentConfig,
+      });
+      const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+        description: "child", ...({ maxNestingDepth: 2 } as any),
+      });
+      manager.setMaxNestingDepth(1);
+
+      // The legacy third preflight argument is untrusted and ignored at runtime.
+      expect((manager.preflightNested as any)(childId, "reviewer", 2)).toEqual(expect.objectContaining({
+        ok: false, error: "Maximum nesting depth reached",
+      }));
+      expect(() => manager.spawnNested(childId, fakePi(), fakeCtx(), "reviewer", "grandchild", {
+        description: "grandchild", ...({ maxNestingDepth: 2 } as any),
+      })).toThrow("Maximum nesting depth reached");
+    });
+
+    it("prevents a depth-2 parent from spawning a child even when called directly", () => {
+      const parentRun = makeResolvablePromise();
+      const childRun = makeResolvablePromise();
+      const catalog = new Map<string, any>([
+        ["scout", { name: "scout", description: "", systemPrompt: "", delegateTo: ["reviewer"] }],
+        ["reviewer", { name: "reviewer", description: "", systemPrompt: "" }],
+      ]);
+      mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+      manager = new AgentManager(undefined, { default: 1 });
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentCatalog: catalog, agentConfig: parentConfig,
+      });
+      const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", { description: "child" });
+
+      expect(() => manager.spawnNested(childId, fakePi(), fakeCtx(), "reviewer", "grandchild", { description: "grandchild" }))
+        .toThrow("Maximum nesting depth reached");
+    });
+
+    it("keeps nested authorization and accounting in its private ledger when public records are mutated", async () => {
+      const parentRun = makeResolvablePromise();
+      const childRun = makeResolvablePromise();
+      const catalog = new Map<string, any>([
+        ["scout", { name: "scout", description: "captured child", systemPrompt: "captured prompt" }],
+        ["reviewer", { name: "reviewer", description: "", systemPrompt: "" }],
+      ]);
+      mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+      manager = new AgentManager(undefined, { default: 1 });
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentCatalog: catalog, agentConfig: parentConfig,
+      });
+      const publicParent = manager.getRecord(parentId)!;
+      const publicParentHierarchy = managedHierarchy(publicParent);
+      publicParentHierarchy.depth = 0;
+      publicParentHierarchy.delegateTo = ["reviewer"];
+      publicParentHierarchy.maxChildAgents = 99;
+      publicParentHierarchy.childIds = [];
+      (publicParentHierarchy.agentCatalog as Map<string, any>).set("reviewer", { name: "reviewer", description: "", systemPrompt: "forged" });
+      publicParent.lifecycle.status = "completed";
+
+      expect(manager.preflightNested(parentId, "reviewer")).toEqual(expect.objectContaining({
+        ok: false, error: 'Agent "reviewer" is not allowed. Allowed child agents: scout',
+      }));
+      const preflight = manager.preflightNested(parentId, "scout");
+      expect(preflight.ok).toBe(true);
+      if (!preflight.ok) throw new Error(preflight.error);
+      preflight.agentConfig.systemPrompt = "forged child config";
+      const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+        description: "child", agentConfig: { name: "scout", description: "", systemPrompt: "caller config" },
+      });
+      const child = manager.getRecord(childId)!;
+      const childHierarchy = managedHierarchy(child);
+      childHierarchy.depth = 1;
+      childHierarchy.delegateTo = ["reviewer"];
+      childHierarchy.maxChildAgents = 99;
+      childHierarchy.childIds = [];
+      (childHierarchy.agentCatalog as Map<string, any>).set("reviewer", { name: "reviewer", description: "", systemPrompt: "forged" });
+      child.lifecycle.status = "running";
+
+      // The child uses a fresh private config, and a forged child hierarchy
+      // cannot turn a depth-2 child into a delegating root.
+      expect(mockModules.mockRunAgent.mock.calls[1][3].agentConfig.systemPrompt).toBe("captured prompt");
+      expect(manager.preflightNested(childId, "reviewer")).toEqual(expect.objectContaining({
+        ok: false, error: "Maximum nesting depth reached",
+      }));
+
+      childRun.resolve(mockRunResult());
+      await child.execution.promise;
+      publicParentHierarchy.childIds = [];
+      publicParentHierarchy.maxChildAgents = 99;
+      publicParent.lifecycle.status = "running";
+      expect(manager.preflightNested(parentId, "scout")).toEqual(expect.objectContaining({
+        ok: false, error: "Child-agent budget exhausted",
+      }));
+
+      parentRun.resolve(mockRunResult());
+      await manager.getRecord(parentId)!.execution.promise;
+      publicParent.lifecycle.status = "running";
+      expect(manager.preflightNested(parentId, "scout")).toEqual(expect.objectContaining({
+        ok: false, error: "Nested agent parent is no longer running",
+      }));
+    });
+
+    it("inherits a parent worktree at the direct manager nested boundary", () => {
+      const parentRun = makeResolvablePromise();
+      const childRun = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+      manager = new AgentManager(undefined, { default: 1 });
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentConfig: parentConfig, worktreePath: "/parent-worktree", worktreeLabel: "parent-label",
+      });
+      const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+        description: "child", worktreePath: "/caller-worktree", worktreeLabel: "caller-label",
+      });
+
+      expect(mockModules.mockRunAgent.mock.calls[1][3].cwd).toBe("/parent-worktree");
+      expect(manager.getRecord(childId)?.display).toMatchObject({ worktreePath: "/parent-worktree", worktreeLabel: "parent-label" });
+    });
+
+    it("clears a parent waiting child when an already-aborted nested signal prevents startup", () => {
+      const parentRun = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise);
+      manager = new AgentManager(undefined, { default: 1 });
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentConfig: parentConfig,
+      });
+      const abort = new AbortController();
+      abort.abort();
+      const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+        description: "child", signal: abort.signal,
+      });
+
+      expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(1);
+      expect(manager.getRecord(childId)?.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent", settled: true });
+      expect(managedHierarchy(manager.getRecord(parentId)!).waitingOnChildId).toBeUndefined();
+    });
+
+    it("rolls back parent hierarchy state when nested startup throws", () => {
+      const parentRun = makeResolvablePromise();
+      const childRun = makeResolvablePromise();
+      mockModules.mockRunAgent
+        .mockReturnValueOnce(parentRun.promise)
+        .mockImplementationOnce(() => { throw new Error("child startup failed"); })
+        .mockReturnValueOnce(childRun.promise);
+      manager = new AgentManager(undefined, { default: 1 });
+      const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+        description: "parent", agentConfig: parentConfig,
+      });
+      const parent = manager.getRecord(parentId)!;
+
+      expect(() => manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "broken child", {
+        description: "broken child", agentConfig: childConfig,
+      })).toThrow("child startup failed");
+      expect(managedHierarchy(parent).childIds).toEqual([]);
+      expect(managedHierarchy(parent).waitingOnChildId).toBeUndefined();
+      expect(manager.getTotalAgentCount()).toBe(1);
+
+      expect(() => manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "replacement child", {
+        description: "replacement child", agentConfig: childConfig,
+      })).not.toThrow();
+    });
+  });
+
+  it("keeps a parent active and clears its waiting child after stopping that child", async () => {
+    const parentRun = makeResolvablePromise();
+    const childRun = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
+    manager = new AgentManager(undefined, { default: 1 });
+    const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+      description: "parent",
+      agentConfig: { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"] },
+    });
+    const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+      description: "child", agentConfig: { name: "scout", description: "", systemPrompt: "" },
+    });
+
+    expect(managedHierarchy(manager.getRecord(parentId)!).waitingOnChildId).toBe(childId);
+    expect(manager.abort(childId, "user")).toBe(true);
+    expect(manager.getRecord(parentId)?.lifecycle.status).toBe("running");
+    childRun.resolve(mockRunResult({ aborted: true }));
+    await manager.getRecord(childId)!.execution.promise;
+    expect(managedHierarchy(manager.getRecord(parentId)!).waitingOnChildId).toBeUndefined();
+    expect(manager.getRecord(parentId)?.lifecycle.status).toBe("running");
+
+    parentRun.resolve(mockRunResult());
+    await manager.getRecord(parentId)!.execution.promise;
+  });
+
+  it("holds a handed-off slot until a stopped parent's child settles, then drains", async () => {
+    const parentRun = makeResolvablePromise();
+    const childRun = makeResolvablePromise();
+    const queuedRun = makeResolvablePromise();
+    mockModules.mockRunAgent
+      .mockReturnValueOnce(parentRun.promise)
+      .mockReturnValueOnce(childRun.promise)
+      .mockReturnValueOnce(queuedRun.promise);
+    manager = new AgentManager(undefined, { default: 1 });
+    const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+      description: "parent",
+      agentConfig: { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 },
+    });
+    const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+      description: "child",
+      agentConfig: { name: "scout", description: "", systemPrompt: "" },
+    });
+
+    expect(manager.getRecord(childId)?.hierarchy).toMatchObject({ parentId, depth: 2, usesParentSlot: true });
+    const queuedId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "queued", { description: "queued" });
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("queued");
+
+    expect(manager.abort(parentId, "user")).toBe(true);
+    // The parent runner settles first, while the stopped borrowed child is
+    // still unwinding. The unrelated queued agent must not start yet.
+    parentRun.resolve(mockRunResult({ aborted: true }));
+    await manager.getRecord(parentId)!.execution.promise;
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("queued");
+
+    childRun.resolve(mockRunResult({ aborted: true }));
+    await vi.waitFor(() => expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("running"));
+    queuedRun.resolve(mockRunResult());
+    await manager.getRecord(queuedId)!.execution.promise;
+  });
+
+  it("lets four full owner chains borrow their slots without starting a fifth root", async () => {
+    const parentRuns = Array.from({ length: 4 }, makeResolvablePromise);
+    const childRuns = Array.from({ length: 4 }, makeResolvablePromise);
+    const queuedRun = makeResolvablePromise();
+    mockModules.mockRunAgent
+      .mockImplementationOnce(() => parentRuns[0]!.promise)
+      .mockImplementationOnce(() => parentRuns[1]!.promise)
+      .mockImplementationOnce(() => parentRuns[2]!.promise)
+      .mockImplementationOnce(() => parentRuns[3]!.promise)
+      .mockImplementationOnce(() => childRuns[0]!.promise)
+      .mockImplementationOnce(() => childRuns[1]!.promise)
+      .mockImplementationOnce(() => childRuns[2]!.promise)
+      .mockImplementationOnce(() => childRuns[3]!.promise)
+      .mockImplementationOnce(() => queuedRun.promise);
+    manager = new AgentManager(undefined, { default: 4 });
+    const parentConfig = { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 };
+    const childConfig = { name: "scout", description: "", systemPrompt: "" };
+
+    const parentIds = parentRuns.map((_, index) => manager.spawn(fakePi(), fakeCtx(), "implementer", `parent ${index}`, {
+      description: `parent ${index}`, agentConfig: parentConfig,
+    }));
+    const childIds = parentIds.map((parentId, index) => manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", `child ${index}`, {
+      description: `child ${index}`, agentConfig: childConfig,
+    }));
+    const queuedId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "queued root", { description: "queued root" });
+
+    // Four roots consume the four global slots, but every foreground child
+    // starts immediately on its parent's slot rather than joining the queue.
+    expect(parentIds.every((id) => manager.getRecord(id)?.lifecycle.status === "running")).toBe(true);
+    expect(childIds.every((id) => manager.getRecord(id)?.lifecycle.status === "running")).toBe(true);
+    expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(8);
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("queued");
+
+    // Settled roots still retain their slots while their borrowed children run.
+    parentRuns.forEach((run) => run.resolve(mockRunResult()));
+    await Promise.all(parentIds.map((id) => manager.getRecord(id)!.execution.promise));
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("queued");
+
+    childRuns.forEach((run) => run.resolve(mockRunResult()));
+    await Promise.all(childIds.map((id) => manager.getRecord(id)!.execution.promise));
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("running");
+    expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(9);
+
+    queuedRun.resolve(mockRunResult());
+    await manager.getRecord(queuedId)!.execution.promise;
+  });
+
+  it("holds a root slot through parent/child cancellation until the child settles", async () => {
+    const onComplete = vi.fn();
+    const parentRun = makeResolvablePromise();
+    const childRun = makeResolvablePromise();
+    const queuedRun = makeResolvablePromise();
+    mockModules.mockRunAgent
+      .mockReturnValueOnce(parentRun.promise)
+      .mockReturnValueOnce(childRun.promise)
+      .mockReturnValueOnce(queuedRun.promise);
+    manager = new AgentManager(onComplete, { default: 1 });
+    const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+      description: "parent",
+      agentConfig: { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 },
+    });
+    const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+      description: "child", agentConfig: { name: "scout", description: "", systemPrompt: "" },
+    });
+    const queuedId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "queued root", { description: "queued root" });
+    const records = [parentId, childId, queuedId].map((id) => manager.getRecord(id)!);
+    records.forEach((record, index) => { record.stats.lifetimeUsage.cost = (index + 1) / 10; });
+
+    expect(manager.abort(parentId, "user")).toBe(true);
+    expect(manager.getRecord(childId)?.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent" });
+    parentRun.resolve(mockRunResult({ aborted: true }));
+    await manager.getRecord(parentId)!.execution.promise;
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("queued");
+
+    childRun.resolve(mockRunResult({ aborted: true }));
+    await manager.getRecord(childId)!.execution.promise;
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("running");
+    queuedRun.resolve(mockRunResult());
+    await manager.getRecord(queuedId)!.execution.promise;
+    expect(manager.getTotalAgentCount()).toBe(3);
+    expect(manager.getTotalAgentCost()).toBeCloseTo(0.6);
+    expect(onComplete).toHaveBeenCalledTimes(3);
+  });
+
+  it("aborts parent and child controllers when the manager is disposed", async () => {
+    const parentRun = makeResolvablePromise();
+    const childRun = makeResolvablePromise();
+    mockModules.mockRunAgent
+      .mockReturnValueOnce(parentRun.promise)
+      .mockReturnValueOnce(childRun.promise);
+    manager = new AgentManager(undefined, { default: 1 });
+    const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+      description: "parent",
+      agentConfig: { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 },
+    });
+    const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+      description: "child", agentConfig: { name: "scout", description: "", systemPrompt: "" },
+    });
+    const promises = [parentId, childId].map((id) => manager.getRecord(id)!.execution.promise!);
+    const signals = mockModules.mockRunAgent.mock.calls.map((call) => call[3].signal as AbortSignal);
+
+    manager.dispose();
+
+    expect(signals).toHaveLength(2);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(manager.listAgents()).toEqual([]);
+
+    parentRun.resolve(mockRunResult({ aborted: true }));
+    childRun.resolve(mockRunResult({ aborted: true }));
+    await Promise.all(promises);
+  });
+
+  it("releases a parent slot after its settled child is evicted by retention", async () => {
+    const parentRun = makeResolvablePromise();
+    const childRun = makeResolvablePromise();
+    const queuedRun = makeResolvablePromise();
+    mockModules.mockRunAgent
+      .mockReturnValueOnce(parentRun.promise)
+      .mockReturnValueOnce(childRun.promise)
+      .mockReturnValueOnce(queuedRun.promise);
+    manager = new AgentManager(undefined, { default: 1 });
+    const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+      description: "parent",
+      agentConfig: { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 },
+    });
+    const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+      description: "child",
+      agentConfig: { name: "scout", description: "", systemPrompt: "" },
+    });
+
+    childRun.resolve(mockRunResult());
+    await manager.getRecord(childId)!.execution.promise;
+    const child = manager.getRecord(childId)!;
+    child.lifecycle.completedAt = Date.now() - 2 * 60_000;
+    manager.setRetentionMinutes(1);
+    (manager as any).cleanup();
+    expect(manager.getRecord(childId)).toBeUndefined();
+
+    const queuedId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "queued", { description: "queued" });
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("queued");
+
+    parentRun.resolve(mockRunResult());
+    await manager.getRecord(parentId)!.execution.promise;
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("running");
+
+    queuedRun.resolve(mockRunResult());
+    await manager.getRecord(queuedId)!.execution.promise;
   });
 
   it("forwards record callbacks and aborts an active controller on dispose", async () => {

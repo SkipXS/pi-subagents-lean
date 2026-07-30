@@ -18,6 +18,10 @@ import { validateWorktreePath } from "../spawn/worktree-validator.js";
 
 import { parseModelKey, findModelInRegistry, parseThinkingLevel } from "../utils.js";
 import { normalizeThinkingLevel } from "../models/thinking.js";
+import { runWithSubagentRuntime, type NestedAgentExecutor, type SubagentRuntimeContext } from "../shell.js";
+import type { SubagentRuntimeSettings } from "../config/config-store.js";
+import type { AgentManager } from "./agent-manager.js";
+import type { SpawnCoordinator } from "../spawn/spawn-coordinator.js";
 import {
   getPiInstance,
   getSessionCtx,
@@ -63,10 +67,16 @@ export function buildAgentDetails(
   record: AgentRecord,
   opts?: { includeStats?: boolean; includeStatus?: boolean },
 ): Record<string, unknown> {
+  const hierarchy = record.hierarchy;
   const details: Record<string, unknown> = {
     type: record.display.type,
     description: record.display.description,
   };
+  if (opts?.includeStats || opts?.includeStatus) {
+    details.depth = hierarchy?.depth ?? 1;
+    if (hierarchy?.parentId) details.parentId = hierarchy.parentId;
+    if (hierarchy?.waitingOnChildId) details.waitingOnChildId = hierarchy.waitingOnChildId;
+  }
 
   if (record.display.worktreePath) {
     details.worktreePath = record.display.worktreePath;
@@ -180,6 +190,7 @@ export async function executeAgentTool(
   // registry for a worktree name: it may be an override of a parent type.
   let resolvedType: string | undefined;
   let agentConfig: AgentConfig | undefined;
+  let agentCatalog: ReadonlyMap<string, AgentConfig> | undefined;
   if (trustedWorktreeDir) {
     const catalog = await resolveAgentCatalog(trustedWorktreeDir, {
       disableDefaultAgents: getStore().agent.disableDefaultAgents,
@@ -187,6 +198,9 @@ export async function executeAgentTool(
     if (signal?.aborted) return cancelledResult();
     resolvedType = resolveTypeInCatalog(catalog, type);
     agentConfig = resolvedType ? catalog.get(resolvedType) : undefined;
+    // Retain this invocation-local overlay with the parent record. Nested
+    // children must resolve roles against the same worktree definitions.
+    agentCatalog = new Map(catalog);
   } else {
     resolvedType = resolveType(type);
     if (!resolvedType) {
@@ -248,6 +262,7 @@ export async function executeAgentTool(
     graceTurns: getStore().agent.graceTurns,
     worktreePath: validatedWorktreePath,
     worktreeLabel,
+    agentCatalog,
     invocation: { modelName, thinkingLevel, maxTurns },
     runInBackground: runInBackground || getStore().agent.forceBackground,
     signal,
@@ -289,6 +304,102 @@ export async function executeAgentTool(
   }
 
   return successResult(formatResultContent(record), details);
+}
+
+// ============================================================================
+// Nested Agent proxy
+// ============================================================================
+
+/**
+ * Bind root-owned collaborators to the only operation exposed to a child
+ * runtime. The returned closure always acts for this parent and cannot become
+ * a general root-spawn capability.
+ */
+export function createNestedAgentExecutor(
+  parentId: string,
+  pi: Parameters<AgentManager["spawn"]>[0],
+  manager: Pick<AgentManager, "preflightNested">,
+  coordinator: Pick<SpawnCoordinator, "spawnNested">,
+  settings = getStore().createSubagentRuntimeSettings(),
+): NestedAgentExecutor {
+  return (params, signal, ctx) => executeBoundNestedAgent(parentId, pi, manager, coordinator, settings, params, signal, ctx);
+}
+
+/** Invoke the child runtime's scoped nested-Agent capability. */
+export async function executeNestedAgentTool(
+  runtime: SubagentRuntimeContext,
+  _toolCallId: string,
+  params: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  _onUpdate: ((update: any) => void) | undefined,
+  ctx: ExtensionContext,
+): Promise<any> {
+  const executeNestedAgent = runtime.executeNestedAgent;
+  if (!executeNestedAgent) return errorResult("Nested agent execution is unavailable");
+  // Tool callbacks can be invoked after session setup has returned, so enter
+  // the captured child context again before using the bound capability.
+  return runWithSubagentRuntime(runtime, () => executeNestedAgent(params, signal, ctx));
+}
+
+async function executeBoundNestedAgent(
+  parentId: string,
+  pi: Parameters<AgentManager["spawn"]>[0],
+  manager: Pick<AgentManager, "preflightNested">,
+  coordinator: Pick<SpawnCoordinator, "spawnNested">,
+  settings: SubagentRuntimeSettings,
+  params: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  ctx: ExtensionContext,
+): Promise<any> {
+  if (signal?.aborted) return cancelledResult();
+  if (params.run_in_background === true) return errorResult("Nested agents must run in the foreground");
+  if (typeof params.worktree_path === "string" && params.worktree_path.trim() !== "") {
+    return errorResult("Nested agents cannot select a worktree");
+  }
+
+  const requestedType = typeof params.agent === "string" ? params.agent.trim() : "";
+  const preflight = manager.preflightNested(parentId, requestedType);
+  if (!preflight.ok) return errorResult(preflight.error);
+  const { type: resolvedType, agentConfig } = preflight;
+
+  const prompt = typeof params.prompt === "string" ? params.prompt : "";
+  if (!prompt.trim()) return errorResult("Agent prompt is required");
+  const description = (typeof params.description === "string" && params.description.trim())
+    || prompt.split("\n")[0]!.slice(0, 80) || prompt.slice(0, 80);
+  const parentModelId = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+  const model = findModelInRegistry(
+    settings.modelFor(resolvedType, parentModelId, agentConfig),
+    ctx.modelRegistry,
+    ctx.model,
+  );
+  const thinkingLevel = settings.thinkingSettingFor(
+    resolvedType, ctx.thinkingLevel, agentConfig,
+  ).value;
+
+  try {
+    const { record } = await coordinator.spawnNested(parentId, pi, ctx, {
+      type: resolvedType,
+      agentConfig,
+      prompt,
+      description,
+      model,
+      modelKey: model ? `${model.provider}/${model.id}` : undefined,
+      maxTurns: agentConfig.maxTurns,
+      thinkingLevel,
+      graceTurns: settings.agent.graceTurns,
+      // AgentManager unconditionally inherits the private parent worktree and
+      // catalog at the nested boundary; nested callers cannot choose either.
+      invocation: { modelName: model?.id, thinkingLevel, maxTurns: agentConfig.maxTurns },
+      runInBackground: false,
+      signal,
+    });
+    const details = buildAgentDetails(record, { includeStats: true });
+    if (signal?.aborted || record.lifecycle.status === "aborted" || record.lifecycle.status === "stopped") return cancelledResult(details);
+    if (record.lifecycle.status === "error") return errorResult(`Agent failed: ${record.error || "unknown error"}`, details);
+    return successResult(formatResultContent(record), details);
+  } catch (err) {
+    return errorResult(err instanceof Error ? err.message : String(err));
+  }
 }
 
 // ============================================================================

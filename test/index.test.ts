@@ -406,15 +406,13 @@ describe("Agent tool schema — worktree_path", () => {
 /*  Subagent spawn guard (prevents shell clobbering)                  */
 /* ------------------------------------------------------------------ */
 
-describe("subagent spawn guard", () => {
-  // The real shell module is used here (index.test.ts does not mock shell.js),
-  // so toggling the spawn flag drives the same counter the factory reads.
+describe("subagent runtime context", () => {
+  // The real shell module carries context through AsyncLocalStorage, so
+  // concurrent child setup cannot affect a parent extension runtime.
   let shell: typeof import("../src/shell.js");
 
   beforeEach(async () => {
     shell = await import("../src/shell.js");
-    // Defensive: start every test from a clean depth.
-    while (shell.isInsideSubagentSpawn()) shell.exitSubagentSpawn();
   });
 
   it("registers tools and listeners for the parent session", async () => {
@@ -426,39 +424,38 @@ describe("subagent spawn guard", () => {
     expect(api.listeners.some((l) => l.event === "session_shutdown")).toBe(true);
   });
 
-  it("stays inert when loaded inside a subagent spawn", async () => {
-    shell.enterSubagentSpawn();
-    try {
-      const api = createMockExtensionAPI();
-      await loadExtension(api.api);
-
-      // No tools, no event handlers: the subagent must not clobber the parent shell
-      // (setPiInstance/setSessionCtx happen via the factory + session_start handler).
-      expect(api.tools).toHaveLength(0);
-      expect(api.listeners).toHaveLength(0);
-    } finally {
-      shell.exitSubagentSpawn();
-    }
-    expect(shell.isInsideSubagentSpawn()).toBe(false);
-  });
-
-  it("is inert for nested spawns and recovers when depth returns to 0", async () => {
-    shell.enterSubagentSpawn();
-    shell.enterSubagentSpawn(); // nested
-    try {
-      const api = createMockExtensionAPI();
-      await loadExtension(api.api);
-      expect(api.tools).toHaveLength(0);
-    } finally {
-      shell.exitSubagentSpawn();
-      shell.exitSubagentSpawn();
-    }
-
-    // Parent load works again once no subagent is in flight
+  it("stays inert in a child runtime because Agent is a session custom tool", async () => {
     const api = createMockExtensionAPI();
-    await loadExtension(api.api);
-    expect(api.tools.length).toBeGreaterThan(0);
+    await shell.runWithSubagentRuntime(shell.createSubagentRuntimeContext(
+      vi.fn(),
+      shell.getStore().createSubagentRuntimeSettings(),
+    ), async () => { await loadExtension(api.api); });
+    expect(api.tools).toHaveLength(0);
+    expect(api.listeners).toHaveLength(0);
   });
+
+  it("keeps deprecated spawn hooks as inert-registration compatibility", async () => {
+    shell.enterSubagentSpawn();
+    shell.enterSubagentSpawn();
+    try {
+      expect(shell.isInsideSubagentSpawn()).toBe(true);
+      const childApi = createMockExtensionAPI();
+      await loadExtension(childApi.api);
+      expect(childApi.tools).toHaveLength(0);
+      expect(childApi.listeners).toHaveLength(0);
+
+      shell.exitSubagentSpawn();
+      expect(shell.isInsideSubagentSpawn()).toBe(true);
+    } finally {
+      shell.exitSubagentSpawn();
+    }
+
+    expect(shell.isInsideSubagentSpawn()).toBe(false);
+    const rootApi = createMockExtensionAPI();
+    await loadExtension(rootApi.api);
+    expect(rootApi.tools.length).toBeGreaterThan(0);
+  });
+
 });
 
 /* ------------------------------------------------------------------ */

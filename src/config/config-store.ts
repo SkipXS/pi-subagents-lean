@@ -29,6 +29,7 @@ import { parseThinkingLevel } from "../utils.js";
 import {
   VALID_SYSTEM_PROMPT_MODES,
   DEFAULT_CONCURRENCY,
+  normalizeMaxNestingDepth,
   loadConfig,
   saveConfigAtomic,
   updateConfigAtomic,
@@ -103,9 +104,27 @@ export interface ResolvedAgentSettings {
   readonly outputThinkingBufferSize: number;
   /** Minutes to retain finished agents before cleanup eviction. */
   readonly finishedRetentionMinutes: number;
+  /** Maximum subagent depth; valid values are 1 or 2. */
+  readonly maxNestingDepth: number;
 }
 
 /** Side-effect targets, injected after construction. */
+/**
+ * Detached settings available to a child agent runtime. This deliberately
+ * contains values and pure resolvers only: it is not a ConfigStore view and
+ * cannot reach persistence, dependencies, or session mutation methods.
+ */
+export interface SubagentRuntimeSettings {
+  readonly agent: Readonly<ResolvedAgentSettings>;
+  modelFor(type: string, parentModelId: string, agentConfig?: { model?: string }, explicitModel?: string): string;
+  thinkingSettingFor(
+    type: string,
+    parentThinking: ThinkingLevel | undefined,
+    agentConfig?: { thinkingLevel?: ThinkingLevel },
+    explicitThinking?: ThinkingLevel,
+  ): ResolvedSetting<ThinkingLevel | undefined>;
+}
+
 export interface ConfigStoreDeps {
   widget?: AgentWidget;
   manager?: AgentManager;
@@ -120,8 +139,10 @@ export class ConfigStore {
   private sessionOverrides: SessionModelOverrides = { default: null };
   private sessionThinkingOverrides: SessionThinkingOverrides = {};
   private sessionShowCost: boolean | undefined;
-  private widget?: AgentWidget;
-  private manager?: AgentManager;
+  // These are shell-owned control collaborators. ECMAScript private fields
+  // keep getStore() from becoming an indirect route to them in child runtimes.
+  #widget?: AgentWidget;
+  #manager?: AgentManager;
   /** Last known tool-expansion state, for ctrl+o compact sync. */
   private lastToolsExpanded: boolean | undefined;
 
@@ -184,6 +205,7 @@ export class ConfigStore {
       showTime: a.showTime !== false,
       outputThinkingBufferSize: a.outputThinkingBufferSize ?? 0,
       finishedRetentionMinutes: a.finishedRetentionMinutes ?? 10,
+      maxNestingDepth: normalizeMaxNestingDepth(a.maxNestingDepth),
     };
   }
 
@@ -239,6 +261,37 @@ export class ConfigStore {
 
   modelFor(type: string, parentModelId: string, agentConfig?: { model?: string }, explicitModel?: string): string {
     return this.modelSettingFor(type, parentModelId, agentConfig, explicitModel).value;
+  }
+
+  /**
+   * Capture the small, immutable settings surface needed by an isolated child.
+   * Resolver closures use cloned config and session overrides, so reloads and
+   * later root mutations cannot alter an already-started child.
+   */
+  createSubagentRuntimeSettings(): SubagentRuntimeSettings {
+    const config = structuredClone(this.config);
+    const sessionOverrides = structuredClone(this.sessionOverrides);
+    const sessionThinkingOverrides = structuredClone(this.sessionThinkingOverrides);
+    const agent = Object.freeze({ ...this.agent });
+    return Object.freeze({
+      agent,
+      modelFor: (type: string, parentModelId: string, agentConfig?: { model?: string }, explicitModel?: string) => resolveModelSetting({
+        subagentType: type,
+        explicitModel,
+        agentConfig,
+        config,
+        parentModelId,
+        sessionOverrides,
+      }).value,
+      thinkingSettingFor: (type: string, parentThinking: ThinkingLevel | undefined, agentConfig?: { thinkingLevel?: ThinkingLevel }, explicitThinking?: ThinkingLevel) => resolveThinkingSetting({
+        subagentType: type,
+        explicitThinking,
+        agentConfig,
+        config,
+        parentThinking,
+        sessionOverrides: sessionThinkingOverrides,
+      }),
+    });
   }
 
   thinkingSettingFor(
@@ -326,7 +379,7 @@ export class ConfigStore {
         this.config.agent.showCost = enabled;
         this.persist();
         this.sessionShowCost = undefined;
-        this.widget?.setShowCost(enabled);
+        this.#widget?.setShowCost(enabled);
         this.syncWidgetStatsVisibility();
       },
       setGraceTurns: (n: number): void => {
@@ -387,7 +440,12 @@ export class ConfigStore {
         const n = Math.max(1, minutes);
         this.config.agent.finishedRetentionMinutes = n;
         this.persist();
-        this.manager?.setRetentionMinutes(n);
+        this.#manager?.setRetentionMinutes(n);
+      },
+      setMaxNestingDepth: (depth: number): void => {
+        this.config.agent.maxNestingDepth = normalizeMaxNestingDepth(depth);
+        this.persist();
+        this.#manager?.setMaxNestingDepth(this.config.agent.maxNestingDepth);
       },
     },
     widget: {
@@ -471,13 +529,13 @@ export class ConfigStore {
       /** Set a session showCost override. Not persisted. */
       setShowCost: (enabled: boolean): void => {
         this.sessionShowCost = enabled;
-        this.widget?.setShowCost(enabled);
+        this.#widget?.setShowCost(enabled);
         this.syncWidgetStatsVisibility();
       },
       /** Clear session showCost override, reverting to config value. */
       clearShowCost: (): void => {
         this.sessionShowCost = undefined;
-        this.widget?.setShowCost(this.config.agent.showCost === true);
+        this.#widget?.setShowCost(this.config.agent.showCost === true);
         this.syncWidgetStatsVisibility();
       },
     },
@@ -514,15 +572,15 @@ export class ConfigStore {
 
   /** Inject side-effect targets. Re-syncs whatever deps are present (lazy widget/manager). */
   setDeps(deps: ConfigStoreDeps): void {
-    if (deps.widget !== undefined) this.widget = deps.widget;
-    if (deps.manager !== undefined) this.manager = deps.manager;
+    if (deps.widget !== undefined) this.#widget = deps.widget;
+    if (deps.manager !== undefined) this.#manager = deps.manager;
     this.syncAllDeps();
   }
 
   /** Drop deps at session_shutdown. The widget/manager are disposed by the composition root. */
   dispose(): void {
-    this.widget = undefined;
-    this.manager = undefined;
+    this.#widget = undefined;
+    this.#manager = undefined;
   }
 
   // ── Private helpers ────────────────────────────────────────────
@@ -583,13 +641,13 @@ export class ConfigStore {
     if (this.config.agent.widgetShortcut === true
       && this.config.agent.widgetCompact !== true
       && this.lastToolsExpanded !== undefined) {
-      this.widget?.setCompactMode(!this.lastToolsExpanded);
+      this.#widget?.setCompactMode(!this.lastToolsExpanded);
     }
   }
 
   /** Push widget display settings (compact, shortcut, max lines) to the widget. */
   private syncWidgetSettings(): void {
-    const w = this.widget;
+    const w = this.#widget;
     if (!w) return;
     const a = this.agent;
     w.setForceCompact(a.widgetCompact);
@@ -604,7 +662,7 @@ export class ConfigStore {
 
   /** Push stats visibility flags to the widget. */
   private syncWidgetStatsVisibility(): void {
-    const w = this.widget;
+    const w = this.#widget;
     if (!w) return;
     const a = this.agent;
     w.setStatsVisibility({
@@ -626,19 +684,20 @@ export class ConfigStore {
   }
 
   private applyConcurrency(): void {
-    this.manager?.setConcurrency(this.config.concurrency);
+    this.#manager?.setConcurrency(this.config.concurrency);
   }
 
   /** Full re-sync of all present deps. Used by reload/setDeps. */
   private syncAllDeps(): void {
-    if (this.widget) {
-      this.widget.setShowCost(this.agent.showCost);
+    if (this.#widget) {
+      this.#widget.setShowCost(this.agent.showCost);
       this.syncWidgetSettings();
       this.syncCompactModeFromToolsExpanded();
       this.syncWidgetStatsVisibility();
     }
     this.applyConcurrency();
-    this.manager?.setRetentionMinutes(this.agent.finishedRetentionMinutes);
+    this.#manager?.setRetentionMinutes(this.agent.finishedRetentionMinutes);
+    this.#manager?.setMaxNestingDepth(this.agent.maxNestingDepth);
   }
 }
 

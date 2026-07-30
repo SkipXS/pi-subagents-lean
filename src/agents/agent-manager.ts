@@ -8,6 +8,7 @@ import { runAgent } from "./agent-runner.js";
 import { AgentOutputLog } from "./output-file.js";
 import {
   type AgentRecord,
+  type AgentHierarchy,
   type AgentStatus,
   type CompactionInfo,
   type RunCallbacks,
@@ -16,10 +17,12 @@ import {
   type SpawnConfig,
   type ToolActivity,
 } from "../types.js";
-import { snapshotAgentConfig } from "./agent-types.js";
-import type { SubagentType } from "./types.js";
+import { resolveTypeInCatalog, snapshotAgentConfig, snapshotRegisteredAgentCatalog } from "./agent-types.js";
+import { getEffectiveMaxChildAgents, type AgentConfig, type SubagentType } from "./types.js";
 import { addUsage, getLifetimeTotal, getSessionUsageSnapshot, type AgentUsage } from "./usage.js";
 import { errorMessage } from "../utils.js";
+import { getSubagentRuntimeContext, type NestedAgentExecutor } from "../shell.js";
+import type { SubagentRuntimeSettings } from "../config/config-store.js";
 
 /** How often to check for expired agent records (milliseconds). */
 const CLEANUP_INTERVAL_MS = 60_000;
@@ -30,10 +33,17 @@ const DEFAULT_RETENTION_MINUTES = 10;
 /** UUID prefix length for agent IDs stored in the agents map (uniqueness). */
 const AGENT_ID_PREFIX_LENGTH = 17;
 
-
+/** Detach all mutable config fields before retaining a worktree catalog. */
+function snapshotAgentCatalog(catalog?: ReadonlyMap<string, AgentConfig>): ReadonlyMap<string, AgentConfig> | undefined {
+  if (!catalog) return undefined;
+  return new Map([...catalog].map(([name, config]) => [name, snapshotAgentConfig(config)]));
+}
 
 /** Default global concurrency limit when not specified in config. */
 const DEFAULT_CONCURRENCY_LIMIT = 4;
+
+/** Nested execution is permanently limited to root children and their children. */
+const HARD_MAX_NESTING_DEPTH = 2;
 
 /** Whether the agent status is terminal (no longer running or queued). */
 function isTerminalStatus(status: AgentStatus): boolean {
@@ -46,6 +56,11 @@ export interface ConcurrencyConfig {
 }
 
 export type OnAgentComplete = (record: AgentRecord) => void;
+/**
+ * Internal records always carry the hierarchy projection; public AgentRecord
+ * remains compatible with records created before nested delegation.
+ */
+type ManagedAgentRecord = AgentRecord & { hierarchy: AgentHierarchy };
 /** Invoked immediately before a settled record is evicted. */
 export type OnAgentEvicted = (record: AgentRecord) => void;
 type OnAgentStart = (record: AgentRecord) => void;
@@ -54,6 +69,27 @@ type OnAgentStart = (record: AgentRecord) => void;
 interface ConcurrencySlot {
   limit: number;
   running: number;
+}
+
+/**
+ * Manager-only nested execution state. AgentRecord is intentionally a mutable
+ * UI projection, so no authorization, ownership, or slot decision may read it.
+ */
+interface NestedControl {
+  id: string;
+  depth: number;
+  parentId?: string;
+  childIds: Set<string>;
+  waitingOnChildId?: string;
+  delegateTo: readonly string[];
+  maxChildAgents: number;
+  agentCatalog: ReadonlyMap<string, AgentConfig>;
+  slotOwnerId?: string;
+  usesParentSlot: boolean;
+  worktreePath?: string;
+  worktreeLabel?: string;
+  status: AgentStatus;
+  settled: boolean;
 }
 
 interface SpawnArgs {
@@ -68,10 +104,31 @@ export interface SpawnOptions extends SpawnConfig, RunCallbacks {
   isBackground?: boolean;
   /** Parent abort signal — when aborted, the subagent is also stopped. */
   signal?: AbortSignal;
+  /** Internal coordinator capability factory, invoked only after the manager assigns the parent ID. */
+  nestedExecutorFactory?: (parentId: string) => NestedAgentExecutor;
+  /** Detached settings captured by the coordinator before child ALS setup. */
+  runtimeSettings?: SubagentRuntimeSettings;
+}
+
+/** Validated nested-spawn policy and catalog resolution owned by AgentManager. */
+export type NestedSpawnPreflight =
+  /** agentConfig is a detached copy; the manager never exposes its catalog or parent control. */
+  | { ok: true; type: SubagentType; agentConfig: AgentConfig }
+  | { ok: false; error: string };
+
+/** Normalize the trusted configured cap without exceeding the runtime hard cap. */
+function nestedDepthLimit(value: unknown): number {
+  const numberValue = typeof value === "number"
+    ? value
+    : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  if (!Number.isFinite(numberValue)) return HARD_MAX_NESTING_DEPTH;
+  return Math.min(HARD_MAX_NESTING_DEPTH, Math.max(1, Math.floor(numberValue)));
 }
 
 export class AgentManager {
-  private agents = new Map<string, AgentRecord>();
+  private agents = new Map<string, ManagedAgentRecord>();
+  /** Authoritative control ledger, deliberately separate from public records. */
+  private nestedControls = new Map<string, NestedControl>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onRecordEvicted?: OnAgentEvicted;
@@ -95,14 +152,22 @@ export class AgentManager {
   /** Parent-signal listeners, retained so they can be removed at terminal states. */
   private parentAbortListeners = new Map<string, { signal: AbortSignal; listener: () => void }>();
 
+  /** Root records whose slot is retained until their borrowed descendants settle. */
+  private heldBorrowedSlots = new Set<string>();
+
+  /** Trusted effective configured cap; nested callers cannot override it. */
+  private maxNestingDepth: number;
+
   constructor(
     onComplete?: OnAgentComplete,
     concurrency?: ConcurrencyConfig,
     onStart?: OnAgentStart,
     private bufferSize: number = 0,
+    maxNestingDepth?: number,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
+    this.maxNestingDepth = nestedDepthLimit(maxNestingDepth);
     this.concurrencySlot = {
       limit: Math.max(1, concurrency?.default ?? DEFAULT_CONCURRENCY_LIMIT),
       running: 0,
@@ -123,6 +188,11 @@ export class AgentManager {
     this.drainQueue();
   }
 
+  /** Update the trusted configured nesting cap for subsequent nested spawns. */
+  setMaxNestingDepth(depth: number): void {
+    this.maxNestingDepth = nestedDepthLimit(depth);
+  }
+
   /**
    * Spawn an agent and return its ID immediately (for background use).
    * If the global concurrency limit is reached, the agent is queued.
@@ -134,38 +204,176 @@ export class AgentManager {
     prompt: string,
     options: SpawnOptions,
   ): string {
+    if (getSubagentRuntimeContext()) {
+      throw new Error("Root agent spawning is unavailable from a child runtime");
+    }
+    return this.spawnInternal(pi, ctx, type, prompt, options);
+  }
+
+  /**
+   * Start a foreground child under an existing parent. The child borrows the
+   * parent's already-counted global slot, so nested work never consumes an
+   * additional concurrency slot or waits behind unrelated queued work.
+   */
+  spawnNested(
+    parentId: string,
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    type: SubagentType,
+    prompt: string,
+    options: SpawnOptions,
+  ): string {
+    // Foreground policy is enforced here as well as in coordinator/tool input
+    // validation so no alternate caller can create a background child.
+    if (options.isBackground) throw new Error("Nested agents must run in the foreground");
+    const preflight = this.preflightNested(parentId, type);
+    if (!preflight.ok) throw new Error(preflight.error);
+    // Ignore caller-provided child definitions, catalogs, and worktree. The
+    // control ledger resolves all of them from the accepted parent snapshot.
+    return this.spawnInternal(pi, ctx, preflight.type, prompt, {
+      ...options,
+      agentConfig: preflight.agentConfig,
+    }, parentId);
+  }
+
+  /**
+   * Validate every manager-owned nested-spawn constraint against the parent
+   * record captured at root acceptance. Callers use this to prepare a child,
+   * while spawnNested repeats it immediately before execution to prevent bypass.
+   */
+  preflightNested(
+    parentId: string,
+    requestedType: string,
+  ): NestedSpawnPreflight {
+    const parent = this.nestedControls.get(parentId);
+    if (!parent || parent.status !== "running") {
+      return { ok: false, error: "Nested agent parent is no longer running" };
+    }
+    if (parent.depth >= this.maxNestingDepth) {
+      return { ok: false, error: "Maximum nesting depth reached" };
+    }
+    if (parent.maxChildAgents < 1 || parent.delegateTo.length === 0) {
+      return { ok: false, error: "This agent is not permitted to delegate" };
+    }
+
+    const permittedRoles = parent.delegateTo
+      .map((name) => resolveTypeInCatalog(parent.agentCatalog, name))
+      .filter((name): name is string => name !== undefined);
+    if (permittedRoles.length === 0) {
+      return { ok: false, error: "This agent is not permitted to delegate" };
+    }
+
+    const type = resolveTypeInCatalog(parent.agentCatalog, requestedType.trim());
+    if (!type || !parent.agentCatalog.has(type)) {
+      return { ok: false, error: `Unknown agent type: ${requestedType || "(missing)"}` };
+    }
+    if (!permittedRoles.includes(type)) {
+      return { ok: false, error: `Agent "${requestedType}" is not allowed. Allowed child agents: ${permittedRoles.join(", ")}` };
+    }
+    if ([...parent.childIds].some((id) => {
+      const child = this.nestedControls.get(id);
+      return child?.status === "running" || child?.status === "queued";
+    })) {
+      return { ok: false, error: "This agent already has an active child" };
+    }
+    if (parent.childIds.size >= parent.maxChildAgents) {
+      return { ok: false, error: "Child-agent budget exhausted" };
+    }
+    // Never expose the private catalog's config object to a caller.
+    return { ok: true, type, agentConfig: snapshotAgentConfig(parent.agentCatalog.get(type)!) };
+  }
+
+  private spawnInternal(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    type: SubagentType,
+    prompt: string,
+    options: SpawnOptions,
+    parentId?: string,
+  ): string {
+    const parent = parentId ? this.nestedControls.get(parentId) : undefined;
+    // spawnNested always preflights first; keep this invariant explicit for
+    // alternate internal callers rather than falling back to public records.
+    if (parentId && !parent) throw new Error("Nested agent parent is no longer running");
     const id = randomUUID().slice(0, AGENT_ID_PREFIX_LENGTH);
     const abortController = new AbortController();
     // Copy mutable frontmatter arrays before this request can sit in the queue.
-    const frozenOptions = options.agentConfig
-      ? { ...options, agentConfig: snapshotAgentConfig(options.agentConfig) }
-      : options;
+    const frozenOptions: SpawnOptions = {
+      ...options,
+      agentConfig: options.agentConfig && snapshotAgentConfig(options.agentConfig),
+      agentCatalog: snapshotAgentCatalog(options.agentCatalog),
+    };
     const args: SpawnArgs = { pi, ctx, type, prompt, options: frozenOptions };
 
-    // Check global concurrency — applies to every foreground and background agent.
-    const queued = this.concurrencySlot.running >= this.concurrencySlot.limit;
+    // Nested foreground children borrow their parent's slot. Root agents use
+    // the normal global queue, including all foreground/background variants.
+    const queued = !parent && this.concurrencySlot.running >= this.concurrencySlot.limit;
     let resolveQueued: ((result: string) => void) | undefined;
     const queuedPromise = queued
       ? new Promise<string>((resolve) => { resolveQueued = resolve; })
       : undefined;
 
-    const record: AgentRecord = {
+    const rootCatalog = snapshotAgentCatalog(frozenOptions.agentCatalog ?? snapshotRegisteredAgentCatalog())!;
+    // Direct manager callers can omit agentConfig. Resolve the canonical role
+    // and its config from the catalog captured at acceptance, not the mutable
+    // registry that may change before a queued runner starts.
+    const canonicalType = parent ? type : resolveTypeInCatalog(rootCatalog, type) ?? type;
+    const resolvedConfig = parent
+      ? parent.agentCatalog.get(canonicalType) ?? frozenOptions.agentConfig
+      : frozenOptions.agentConfig ?? rootCatalog.get(canonicalType);
+    const agentConfig = resolvedConfig && snapshotAgentConfig(resolvedConfig);
+    // The queued runner receives a private copy, never a caller's nested
+    // config object or the catalog entry itself.
+    frozenOptions.agentConfig = agentConfig && snapshotAgentConfig(agentConfig);
+    const maxChildAgents = getEffectiveMaxChildAgents(agentConfig ?? {
+      delegateTo: [],
+      maxChildAgents: undefined,
+    });
+    const control: NestedControl = {
+      id,
+      depth: parent ? parent.depth + 1 : 1,
+      parentId: parent?.id,
+      childIds: new Set(),
+      delegateTo: [...(agentConfig?.delegateTo ?? [])],
+      maxChildAgents,
+      agentCatalog: parent ? snapshotAgentCatalog(parent.agentCatalog)! : rootCatalog,
+      slotOwnerId: parent ? (parent.slotOwnerId ?? parent.id) : undefined,
+      usesParentSlot: parent !== undefined,
+      // Nested callers cannot escape the parent worktree, even when using the
+      // manager directly rather than the tool/coordinator path.
+      worktreePath: parent ? parent.worktreePath : frozenOptions.worktreePath,
+      worktreeLabel: parent ? parent.worktreeLabel : frozenOptions.worktreeLabel,
+      status: queued ? "queued" : "running",
+      settled: false,
+    };
+    const record: ManagedAgentRecord = {
       id,
       lifecycle: {
-        status: queued ? "queued" : "running",
+        status: control.status,
         startedAt: Date.now(),
         settled: false,
       },
       display: {
-        type,
+        type: canonicalType,
         description: options.description,
         invocation: options.invocation,
-        worktreePath: options.worktreePath,
-        worktreeLabel: options.worktreeLabel,
+        worktreePath: control.worktreePath,
+        worktreeLabel: control.worktreeLabel,
       },
       execution: {
         abortController,
         promise: queuedPromise,
+      },
+      hierarchy: {
+        depth: control.depth,
+        parentId: control.parentId,
+        childIds: [],
+        delegateTo: [...control.delegateTo],
+        maxChildAgents: control.maxChildAgents,
+        // This is UI compatibility only. The ledger owns the private catalog.
+        agentCatalog: snapshotAgentCatalog(control.agentCatalog)!,
+        slotOwnerId: control.slotOwnerId,
+        usesParentSlot: control.usesParentSlot,
       },
       stats: {
         lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
@@ -177,6 +385,12 @@ export class AgentManager {
       },
     };
     this.agents.set(id, record);
+    this.nestedControls.set(id, control);
+    if (parent) {
+      parent.childIds.add(id);
+      parent.waitingOnChildId = id;
+      this.syncHierarchy(this.agents.get(parent.id), parent);
+    }
 
     // Add a queued entry before binding the parent signal: an already-aborted
     // signal must be able to remove and settle it immediately.
@@ -190,9 +404,11 @@ export class AgentManager {
     this.bindParentAbortSignal(id, options.signal);
     // AbortSignal does not dispatch a past abort event, so bindParentAbortSignal
     // stops an already-aborted parent synchronously. Do not start it afterwards.
-    if (record.lifecycle.status !== "running") {
-      // No runner was created to reach startAgent's completion handler.
-      record.lifecycle.settled = true;
+    if (control.status !== "running") {
+      // No runner was created to reach startAgent's completion handler. This
+      // includes an already-aborted nested parent, so clear its waiting state.
+      this.setSettled(record, control);
+      this.clearParentWaitingChild(control);
       this.safeNotifyComplete(record);
       this.totalAgentCount++;
       return id;
@@ -203,14 +419,54 @@ export class AgentManager {
     try {
       this.startAgent(id, record, args, this.concurrencySlot);
     } catch (err) {
-      this.concurrencySlot.running--;
+      if (!control.usesParentSlot) this.concurrencySlot.running--;
+      if (parent) {
+        parent.childIds.delete(id);
+        if (parent.waitingOnChildId === id) parent.waitingOnChildId = undefined;
+        this.syncHierarchy(this.agents.get(parent.id), parent);
+      }
       this.clearParentAbortSignal(id);
       this.agents.delete(id);
+      this.nestedControls.delete(id);
       this.drainQueue();
       throw err;
     }
     this.totalAgentCount++;
     return id;
+  }
+
+  /** Update the mutable UI projection without ever reading it for control. */
+  private syncHierarchy(record: ManagedAgentRecord | undefined, control: NestedControl): void {
+    if (!record) return;
+    record.hierarchy = {
+      depth: control.depth,
+      parentId: control.parentId,
+      childIds: [...control.childIds],
+      waitingOnChildId: control.waitingOnChildId,
+      delegateTo: [...control.delegateTo],
+      maxChildAgents: control.maxChildAgents,
+      agentCatalog: snapshotAgentCatalog(control.agentCatalog)!,
+      slotOwnerId: control.slotOwnerId,
+      usesParentSlot: control.usesParentSlot,
+    };
+  }
+
+  private setStatus(record: ManagedAgentRecord, control: NestedControl, status: AgentStatus): void {
+    control.status = status;
+    record.lifecycle.status = status;
+  }
+
+  private setSettled(record: ManagedAgentRecord, control: NestedControl): void {
+    control.settled = true;
+    record.lifecycle.settled = true;
+  }
+
+  private clearParentWaitingChild(control: NestedControl): void {
+    if (!control.parentId) return;
+    const parent = this.nestedControls.get(control.parentId);
+    if (!parent || parent.waitingOnChildId !== control.id) return;
+    parent.waitingOnChildId = undefined;
+    this.syncHierarchy(this.agents.get(parent.id), parent);
   }
 
   /**
@@ -219,13 +475,14 @@ export class AgentManager {
    */
   private startAgent(
     id: string,
-    record: AgentRecord,
+    record: ManagedAgentRecord,
     { pi, ctx, type, prompt, options }: SpawnArgs,
     concurrencySlot: ConcurrencySlot,
   ) {
-    concurrencySlot.running++;
+    const control = this.nestedControls.get(id)!;
+    if (!control.usesParentSlot) concurrencySlot.running++;
 
-    record.lifecycle.status = "running";
+    this.setStatus(record, control, "running");
     record.lifecycle.startedAt = Date.now();
 
     // Output logs are optional telemetry. A filesystem failure must not prevent
@@ -237,16 +494,22 @@ export class AgentManager {
 
     this.onStart?.(record);
 
-    const promise = runAgent(ctx, type, prompt, {
+    const promise = runAgent(ctx, record.display.type, prompt, {
       pi,
       agentId: id,
+      nestingDepth: control.depth,
       agentConfig: options.agentConfig,
+      nestedExecutor: options.nestedExecutorFactory?.(id),
+      runtimeSettings: options.runtimeSettings,
       model: options.model,
       maxTurns: options.maxTurns,
       maxTokens: options.maxTokens,
       thinkingLevel: options.thinkingLevel,
-      cwd: options.worktreePath,
+      cwd: control.worktreePath,
       graceTurns: options.graceTurns,
+      // The runner/runtime gets its own catalog projection; it must not gain a
+      // mutable reference to the manager's authorization ledger.
+      agentCatalog: snapshotAgentCatalog(control.agentCatalog),
       signal: record.execution.abortController!.signal,
       ...this.createRecordCallbacks(record, options),
       onTurnEnd: (turnCount) => {
@@ -275,8 +538,8 @@ export class AgentManager {
     })
       .then(({ responseText, session, aborted, turnLimited }) => {
         // Don't overwrite status if externally stopped via abort()
-        if (record.lifecycle.status !== "stopped") {
-          record.lifecycle.status = aborted ? "aborted" : turnLimited ? "turn_limited" : "completed";
+        if (control.status !== "stopped") {
+          this.setStatus(record, control, aborted ? "aborted" : turnLimited ? "turn_limited" : "completed");
         }
         record.result = responseText;
         record.execution.session = session;
@@ -284,9 +547,14 @@ export class AgentManager {
         return responseText;
       })
       .catch((err) => {
+        // A failed parent cannot retain an independently running child.
+        for (const childId of control.childIds) {
+          const child = this.agents.get(childId);
+          if (child) this.stopAgent(child, "parent");
+        }
         // Don't overwrite status if externally stopped via abort()
-        if (record.lifecycle.status !== "stopped") {
-          record.lifecycle.status = "error";
+        if (control.status !== "stopped") {
+          this.setStatus(record, control, "error");
         }
         record.error = errorMessage(err);
         record.lifecycle.completedAt ??= Date.now();
@@ -318,14 +586,19 @@ export class AgentManager {
 
         // The runner has now fully settled, including after a prior stop().
         // Retention may safely release its execution handles from this point.
-        record.lifecycle.settled = true;
+        this.setSettled(record, control);
+        this.clearParentWaitingChild(control);
 
-        // Decrement global concurrency count
-        concurrencySlot.running--;
+        // A stopped parent can settle before its borrowed child has finished
+        // observing cancellation. Retain its global slot until every descendant
+        // has settled, then drain exactly once.
+        const releasedSlot = control.usesParentSlot
+          ? this.tryReleaseHeldOwnerSlot(record, concurrencySlot)
+          : this.releaseOwnerSlotWhenDescendantsSettle(record, concurrencySlot);
         this.clearParentAbortSignal(id);
 
         this.safeNotifyComplete(record);
-        this.drainQueue();
+        if (releasedSlot) this.drainQueue();
       });
 
     record.execution.promise = promise;
@@ -363,7 +636,7 @@ export class AgentManager {
    * When options are provided, also forwards events to the caller.
    */
   private createRecordCallbacks(
-    record: AgentRecord,
+    record: ManagedAgentRecord,
     options?: Pick<SpawnOptions, "onToolActivity" | "onAssistantUsage" | "onCompaction">,
   ): {
     onToolActivity: (activity: ToolActivity) => void;
@@ -398,13 +671,52 @@ export class AgentManager {
     };
   }
 
+  /** True when a retained descendant still has runner work to settle. */
+  private hasUnsettledDescendant(record: ManagedAgentRecord): boolean {
+    const control = this.nestedControls.get(record.id);
+    if (!control) return false;
+    for (const childId of control.childIds) {
+      const child = this.agents.get(childId);
+      const childControl = this.nestedControls.get(childId);
+      // Settled terminal children may be evicted by retention while their
+      // parent is still running. An absent child therefore cannot retain the
+      // parent's borrowed slot; active children are never eviction-eligible.
+      if (child && childControl && (!childControl.settled || this.hasUnsettledDescendant(child))) return true;
+    }
+    return false;
+  }
+
+  /** Release a root-owned slot now, or retain it for an in-flight borrowed child. */
+  private releaseOwnerSlotWhenDescendantsSettle(record: ManagedAgentRecord, slot: ConcurrencySlot): boolean {
+    if (this.hasUnsettledDescendant(record)) {
+      this.heldBorrowedSlots.add(record.id);
+      return false;
+    }
+    slot.running--;
+    return true;
+  }
+
+  /** A nested completion may be the final event needed to release its root's slot. */
+  private tryReleaseHeldOwnerSlot(record: ManagedAgentRecord, slot: ConcurrencySlot): boolean {
+    const control = this.nestedControls.get(record.id);
+    const ownerId = control?.slotOwnerId;
+    if (!ownerId || !this.heldBorrowedSlots.has(ownerId)) return false;
+    const owner = this.agents.get(ownerId);
+    const ownerControl = this.nestedControls.get(ownerId);
+    if (!owner || !ownerControl?.settled || this.hasUnsettledDescendant(owner)) return false;
+    this.heldBorrowedSlots.delete(ownerId);
+    slot.running--;
+    return true;
+  }
+
   /** Start queued agents while global capacity is available. */
   private drainQueue() {
     const started = new Set<string>();
     for (const entry of this.queue) {
       if (this.concurrencySlot.running >= this.concurrencySlot.limit) break;
       const record = this.agents.get(entry.id);
-      if (!record || record.lifecycle.status !== "queued") continue;
+      const control = this.nestedControls.get(entry.id);
+      if (!record || !control || control.status !== "queued") continue;
 
       try {
         const promise = this.startAgent(entry.id, record, entry.args, this.concurrencySlot);
@@ -412,11 +724,11 @@ export class AgentManager {
         started.add(entry.id);
       } catch (err) {
         // Late failure — surface on the record so the user can see it
-        this.concurrencySlot.running--;
-        record.lifecycle.status = "error";
+        if (!control.usesParentSlot) this.concurrencySlot.running--;
+        this.setStatus(record, control, "error");
         record.error = errorMessage(err);
         record.lifecycle.completedAt = Date.now();
-        record.lifecycle.settled = true;
+        this.setSettled(record, control);
         entry.resolve("");
         started.add(entry.id);
         this.clearParentAbortSignal(entry.id);
@@ -433,9 +745,8 @@ export class AgentManager {
    */
   async steer(id: string, message: string): Promise<boolean> {
     const record = this.agents.get(id);
-    if (!record) return false;
-
-    if (record.lifecycle.status !== "running") return false;
+    const control = this.nestedControls.get(id);
+    if (!record || control?.status !== "running") return false;
 
     if (!record.execution.session) {
       // Session not yet created — queue the steer
@@ -493,30 +804,41 @@ export class AgentManager {
    * Stop an agent by aborting its session or removing it from the queue.
    * Returns true if the agent was stopped, false if it wasn't running/queued.
    */
-  private stopAgent(record: AgentRecord, stoppedBy?: StopInitiator): boolean {
-    const wasQueued = record.lifecycle.status === "queued";
+  private stopAgent(record: ManagedAgentRecord, stoppedBy?: StopInitiator): boolean {
+    const control = this.nestedControls.get(record.id);
+    if (!control) return false;
+    // A parent owns every descendant's lifetime. Stop descendants first so a
+    // suspended foreground parent can never leave an orphaned child running.
+    for (const childId of control.childIds) {
+      const child = this.agents.get(childId);
+      if (child) this.stopAgent(child, "parent");
+    }
+    const wasQueued = control.status === "queued";
     if (wasQueued) {
       const queuedEntry = this.queue.find(q => q.id === record.id);
       queuedEntry?.resolve("");
       this.queue = this.queue.filter(q => q.id !== record.id);
-    } else if (record.lifecycle.status !== "running") {
+    } else if (control.status !== "running") {
       return false;
     } else {
       record.execution.abortController?.abort();
     }
-    record.lifecycle.status = "stopped";
+    this.setStatus(record, control, "stopped");
     record.lifecycle.stoppedBy = stoppedBy;
     record.lifecycle.completedAt = Date.now();
     // Queued work has no runner to settle. A running agent remains unsettled
     // until startAgent's finally block has observed the runner completion.
-    if (wasQueued) record.lifecycle.settled = true;
+    if (wasQueued) {
+      this.setSettled(record, control);
+      this.clearParentWaitingChild(control);
+    }
     this.clearParentAbortSignal(record.id);
     if (wasQueued) this.safeNotifyComplete(record);
     return true;
   }
 
   /** Release execution-only handles while preserving result, lifecycle, and display metadata. */
-  private releaseExecution(record: AgentRecord): void {
+  private releaseExecution(record: ManagedAgentRecord): void {
     this.clearParentAbortSignal(record.id);
     record.execution.session?.dispose();
     record.execution.session = undefined;
@@ -527,21 +849,23 @@ export class AgentManager {
   }
 
   /** Dispose a record's session and remove it from the map. */
-  private removeRecord(id: string, record: AgentRecord): void {
+  private removeRecord(id: string, record: ManagedAgentRecord): void {
     try { this.onRecordEvicted?.(record); } catch { /* coordinator cleanup is best-effort */ }
     this.releaseExecution(record);
     this.agents.delete(id);
+    this.nestedControls.delete(id);
   }
 
   private cleanup() {
     const cutoff = Date.now() - this.retentionMinutes * 60_000;
     for (const [id, record] of this.agents) {
-      if (!isTerminalStatus(record.lifecycle.status)) continue;
+      const control = this.nestedControls.get(id);
+      if (!control || !isTerminalStatus(control.status)) continue;
       if ((record.lifecycle.completedAt ?? 0) >= cutoff) continue;
       // A stopped runner is terminal before runAgent settles. Never dispose its
       // session or promise early: it still owns the concurrency slot and may be
       // executing final callbacks.
-      if (!record.lifecycle.settled) continue;
+      if (!control.settled || this.heldBorrowedSlots.has(id)) continue;
       // Retention is a hard bound on terminal result text and metadata. Delivery
       // failures remain retryable only until this configured cutoff.
       this.removeRecord(id, record);
@@ -562,5 +886,7 @@ export class AgentManager {
       this.removeRecord(id, record);
     }
     this.agents.clear();
+    this.nestedControls.clear();
+    this.heldBorrowedSlots.clear();
   }
 }

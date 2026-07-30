@@ -406,6 +406,40 @@ describe("widget rendering format", () => {
     });
   });
 
+  it("keeps newest-first roots while rendering a newer child directly below its parent in full and compact modes", () => {
+    const base = new Date(2024, 0, 2, 9, 0).getTime();
+    const parent = makeRunningAgent("parent");
+    parent.display.description = "Parent agent";
+    parent.lifecycle.startedAt = base;
+    const child = makeRunningAgent("child");
+    child.display.description = "Child agent";
+    child.lifecycle.startedAt = base + 3_000;
+    child.hierarchy = { parentId: "parent" };
+    const otherRoot = makeRunningAgent("other");
+    otherRoot.display.description = "Other root";
+    otherRoot.lifecycle.startedAt = base + 2_000;
+    for (const agent of [parent, child, otherRoot]) activity.set(agent.id, makeActivity(agent.id));
+    (manager as any).listAgents = () => [child, otherRoot, parent];
+
+    const fullLines = (widget as any).renderWidget(makeMockTUI(), makePlainTheme());
+    const parentIndex = fullLines.findIndex((line: string) => line.includes("Parent agent"));
+    const childIndex = fullLines.findIndex((line: string) => line.includes("Child agent"));
+    const otherRootIndex = fullLines.findIndex((line: string) => line.includes("Other root"));
+    expect(otherRootIndex).toBeLessThan(parentIndex);
+    expect(parentIndex).toBeLessThan(childIndex);
+    expect(fullLines[childIndex]).toMatch(/^ └/);
+    expect(fullLines[parentIndex]).toMatch(/^  /);
+
+    widget.setWidgetShortcut(true);
+    widget.setCompactMode(true);
+    const compactLines = (widget as any).renderWidget(makeMockTUI(), makePlainTheme());
+    const compactParentIndex = compactLines.findIndex((line: string) => line.includes("Parent agent"));
+    const compactChildIndex = compactLines.findIndex((line: string) => line.includes("Child agent"));
+    expect(compactParentIndex).toBeLessThan(compactChildIndex);
+    expect(compactLines[compactChildIndex]).toMatch(/^ └/);
+    expect(compactLines[compactParentIndex]).toMatch(/^  /);
+  });
+
   it("preserves manager order for equal startedAt values across statuses", () => {
     const startedAt = new Date(2024, 0, 2, 9, 0).getTime();
     const queued = makeQueuedAgent("queued");

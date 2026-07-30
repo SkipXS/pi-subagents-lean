@@ -28,6 +28,7 @@ import { getAgentStatusDisplay, getDisplayName, truncateDesc } from "../format.j
 import { buildSelectListTheme, createDelegatingComponent } from "./helpers.js";
 import { getCoordinator, getManager, getStore } from "../../shell.js";
 import type { Theme } from "../types.js";
+import { orderAgentsByHierarchy, visibleNestedAgentIds } from "../agent-hierarchy.js";
 
 /**
  * Show a ConversationViewer for an agent's session snapshot.
@@ -267,10 +268,12 @@ export async function showRunningAgentsMenu(
   const running = agents.filter(
     (r) => r.lifecycle.status === "running" || r.lifecycle.status === "queued",
   );
+  const orderedAgents = orderAgentsByHierarchy(agents);
+  const visibleNestedIds = visibleNestedAgentIds(agents);
 
   await ctx.ui.custom((_tui, theme, _kb, done) => {
     const buildAgentItems = (): SelectItem[] => {
-      const items: SelectItem[] = agents.map((record) => {
+      const items: SelectItem[] = orderedAgents.map((record) => {
         const elapsed = Math.round((Date.now() - record.lifecycle.startedAt) / 1000);
         const { icon: statusIcon } = getAgentStatusDisplay(record.lifecycle.status);
         const descLen = getStore().agent.widgetDescLengthFull;
@@ -281,7 +284,7 @@ export async function showRunningAgentsMenu(
         const delivery = record.delivery ? ` · delivery ${record.delivery.state}` : "";
         return {
           value: record.id,
-          label: `${statusIcon} ${record.id.slice(0, SHORT_ID_LENGTH)}  ${getDisplayName(record.display.type)}  ${record.lifecycle.status}  ${elapsed}s${delivery}${suffix}`,
+          label: `${visibleNestedIds.has(record.id) ? "↳ " : ""}${statusIcon} ${record.id.slice(0, SHORT_ID_LENGTH)}  ${getDisplayName(record.display.type)}  ${record.lifecycle.status}  ${elapsed}s${delivery}${suffix}`,
         };
       });
       if (running.length > 0) {

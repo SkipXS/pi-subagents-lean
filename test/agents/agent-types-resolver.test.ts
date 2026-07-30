@@ -29,6 +29,37 @@ describe("EXCLUDED_TOOL_NAMES", () => {
   });
 });
 
+describe("nested Agent proxy visibility", () => {
+  it("keeps the locally registered Agent proxy visible for an eligible child even with a tools whitelist", () => {
+    expect(resolveVisibleTools({
+      activeTools: ["read", "Agent"], tools: ["read"], allowNestedAgent: true,
+    })).toEqual(["read", "Agent"]);
+    expect(resolveSessionAllowedTools({
+      registeredTools: ["read"], tools: ["read"], allowNestedAgent: true,
+    })).toEqual(["read", "Agent"]);
+  });
+
+  it("keeps the proxy through unrestricted and blacklist policies", () => {
+    for (const tools of [undefined, true] as const) {
+      expect(resolveSessionAllowedTools({
+        registeredTools: ["read"], tools, allowNestedAgent: true,
+      })).toEqual(["read", "Agent"]);
+    }
+    expect(resolveVisibleTools({
+      activeTools: ["read", "Agent"], excludeTools: ["read"], allowNestedAgent: true,
+    })).toEqual(["Agent"]);
+  });
+
+  it("retains Agent as the sole control tool when an eligible delegator has tools disabled", () => {
+    expect(resolveVisibleTools({
+      activeTools: ["read", "Agent"], tools: false, allowNestedAgent: true,
+    })).toEqual(["Agent"]);
+    expect(resolveSessionAllowedTools({
+      registeredTools: ["read"], tools: false, allowNestedAgent: true,
+    })).toEqual(["Agent"]);
+  });
+});
+
 describe("BUILTIN_TOOL_NAMES", () => {
   it("is exported and non-empty", () => {
     expect(BUILTIN_TOOL_NAMES.length).toBeGreaterThan(0);

@@ -9,7 +9,7 @@ import type { EnvInfo } from "../types.js";
 import type { AgentConfig, SystemPromptMode } from "../agents/types.js";
 import type { SkillMeta, PreloadedSkill } from "./skill-loader.js";
 import { formatSkillsForPrompt, type Skill } from "@earendil-works/pi-coding-agent";
-import { stripOrchestrationPromptBlocks } from "./orchestration.js";
+import { buildChildDelegationPrompt, stripOrchestrationPromptBlocks, type OrchestrationAgent } from "./orchestration.js";
 
 /** Extra sections to inject into the system prompt (skills). */
 export interface PromptExtras {
@@ -23,6 +23,8 @@ export interface PromptExtras {
   customSystemPrompt?: string;
   /** Project context files (AGENTS.md) for custom mode. */
   contextFiles?: Array<{ path: string; content: string }>;
+  /** Sanitized catalog shown only to an eligible nested parent. */
+  nestedDelegation?: { agents: OrchestrationAgent[]; maxChildren: number };
 }
 
 /**
@@ -142,6 +144,11 @@ export function buildAgentPrompt(
 
   // Agent's own system prompt wrapped in <agent_instructions> tags
   const agentInstructions = `\n<agent_instructions>\n${config.systemPrompt}\n</agent_instructions>`;
+  const nestedDelegation = extras?.nestedDelegation;
+  const delegationBlock = nestedDelegation
+    ? buildChildDelegationPrompt(nestedDelegation.agents, nestedDelegation.maxChildren)
+    : undefined;
+  const delegationSuffix = delegationBlock ? `\n\n${delegationBlock}` : "";
 
   // Project context files (AGENTS.md) — placed after agent_instructions, before extras
   let contextSuffix = "";
@@ -176,7 +183,7 @@ export function buildAgentPrompt(
     : `You are a Pi, an expert coding sub-agent.\nYou have been invoked to handle a specific task autonomously.\n\n${envBlock}`;
 
   // active_agent goes AFTER shared prefix (header + env + context) for KV cache
-  return `${basePrompt}${contextSuffix}\n${activeAgentTag}\n${agentInstructions}${extrasSuffix}`;
+  return `${basePrompt}${contextSuffix}\n${activeAgentTag}\n${agentInstructions}${delegationSuffix}${extrasSuffix}`;
 }
 
 function escapeXml(value: string): string {

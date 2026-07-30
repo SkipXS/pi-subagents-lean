@@ -16,6 +16,9 @@ const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lean.json");
 
 export const CUSTOM_PROMPT_PATH = path.join(CONFIG_DIR, "subagents-lean-prompt.md");
 export const DEFAULT_GRACE_TURNS = 6;
+/** Initial subagents are depth 1; the default permits one nested layer. */
+export const DEFAULT_MAX_NESTING_DEPTH = 2;
+export const MAX_NESTING_DEPTH = 2;
 export const VALID_SYSTEM_PROMPT_MODES = new Set<string>(["replace", "inherit", "custom"]);
 export const DEFAULT_CONCURRENCY: SubagentsConfig["concurrency"] = { default: 4 };
 
@@ -43,6 +46,7 @@ const DEFAULT_AGENT: SubagentsConfig["agent"] = {
   showTime: true,
   outputThinkingBufferSize: 0,
   finishedRetentionMinutes: 10,
+  maxNestingDepth: DEFAULT_MAX_NESTING_DEPTH,
 };
 
 export type ConfigHealth = "healthy" | "using-backup" | "unrecoverable";
@@ -270,7 +274,18 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
   const defaultThinking = parseThinkingLevel(agent.defaultThinking);
   if (defaultThinking === undefined) delete agent.defaultThinking;
   else agent.defaultThinking = defaultThinking;
+  agent.maxNestingDepth = normalizeMaxNestingDepth(agent.maxNestingDepth);
   return { agent, thinkingOverrides: { ...(raw.thinkingOverrides ?? {}) }, concurrency };
+}
+
+/** Keep nesting bounded: 1 permits root children only; 2 permits one child layer. */
+export function normalizeMaxNestingDepth(value: unknown): number {
+  const n = typeof value === "number"
+    ? value
+    : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isFinite(n)
+    ? Math.min(MAX_NESTING_DEPTH, Math.max(1, Math.floor(n)))
+    : DEFAULT_MAX_NESTING_DEPTH;
 }
 
 function replaceConfig(target: SubagentsConfig, source: SubagentsConfig): void {

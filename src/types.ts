@@ -43,8 +43,32 @@ export interface AgentRecord {
   display: AgentDisplayInfo;
   /** Execution internals: session, abort controller, pending steers. */
   execution: AgentExecutionState;
+  /**
+   * Parent/child ownership and slot-handoff metadata. Optional for source
+   * compatibility with records created before nested delegation existed.
+   */
+  hierarchy?: AgentHierarchy;
   /** Accumulated statistics: usage, tool uses, turns. */
   stats: AgentAccumulatedStats;
+}
+
+/** Mutable UI hierarchy projection. AgentManager retains separate authoritative nested controls. */
+export interface AgentHierarchy {
+  /** First-level agents are depth 1; each nested generation increments it. */
+  depth: number;
+  parentId?: string;
+  childIds: string[];
+  /** Direct foreground child currently awaited by this parent, if any. */
+  waitingOnChildId?: string;
+  /** Captured parent frontmatter policy, unaffected by later registry refreshes. */
+  delegateTo: string[];
+  maxChildAgents: number;
+  /** Catalog projection captured when this root invocation was accepted; not an authorization source. */
+  agentCatalog: ReadonlyMap<string, AgentConfig>;
+  /** Root record which owns this borrowed global concurrency slot. */
+  slotOwnerId?: string;
+  /** Child execution borrows an ancestor's existing global concurrency slot. */
+  usesParentSlot?: boolean;
 }
 
 export interface EnvInfo {
@@ -78,6 +102,8 @@ export interface SpawnConfig extends RunTunables {
   modelKey?: string;
   worktreePath?: string;
   worktreeLabel?: string;
+  /** Immutable full catalog captured for this invocation, including a trusted worktree overlay when selected. */
+  agentCatalog?: ReadonlyMap<string, AgentConfig>;
   invocation?: AgentInvocation;
 }
 

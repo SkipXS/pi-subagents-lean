@@ -269,6 +269,7 @@ vi.mock("../src/shell.js", () => {
         setShowTime(enabled: boolean) { mockModules.mockConfig.agent.showTime = enabled; },
         setOutputThinkingBufferSize(size: number) { mockModules.mockConfig.agent.outputThinkingBufferSize = size; },
         setFinishedRetentionMinutes(n: number) { mockModules.mockConfig.agent.finishedRetentionMinutes = n; },
+        setMaxNestingDepth(n: number) { mockModules.mockConfig.agent.maxNestingDepth = n; },
       },
       widget: {
         setCompact(enabled: boolean) { mockModules.mockConfig.agent.widgetCompact = enabled; },

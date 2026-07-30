@@ -111,6 +111,48 @@ describe("showRunningAgentsMenu — SelectList migration", () => {
     expect(selectListCalls[0].items[1].value).toBe("agent-2");
   });
 
+  it("keeps roots in manager order and places each child directly after its parent", async () => {
+    const child = makeRecord({
+      id: "child-agent",
+      display: { type: "reviewer", description: "Child" },
+      hierarchy: { parentId: "parent-agent" },
+    });
+    const parent = makeRecord({
+      id: "parent-agent",
+      display: { type: "implementer", description: "Parent" },
+    });
+    const otherRoot = makeRecord({
+      id: "other-root",
+      display: { type: "scout", description: "Other root" },
+    });
+    mockModules.mockManager.listAgents.mockReturnValue([child, parent, otherRoot]);
+
+    await showRunningAgentsMenu(createMockCtx());
+
+    const items = selectListCalls[0].items;
+    expect(items.map((item: any) => item.value)).toEqual(["parent-agent", "child-agent", "other-root"]);
+    expect(items[0].label.startsWith("↳")).toBe(false);
+    expect(items[1].label.startsWith("↳ ")).toBe(true);
+  });
+
+  it("marks only validated visible nested relationships", async () => {
+    const root = makeRecord({ id: "root", hierarchy: undefined });
+    const child = makeRecord({ id: "child", hierarchy: { parentId: "root" } });
+    const orphan = makeRecord({ id: "orphan", hierarchy: { parentId: "evicted" } });
+    const self = makeRecord({ id: "self", hierarchy: { parentId: "self" } });
+    const cycleA = makeRecord({ id: "cycle-a", hierarchy: { parentId: "cycle-b" } });
+    const cycleB = makeRecord({ id: "cycle-b", hierarchy: { parentId: "cycle-a" } });
+    mockModules.mockManager.listAgents.mockReturnValue([child, orphan, self, cycleA, cycleB, root]);
+
+    await showRunningAgentsMenu(createMockCtx());
+
+    const labels = new Map(selectListCalls[0].items.map((item: any) => [item.value, item.label]));
+    expect(labels.get("child")).toMatch(/^↳ /);
+    for (const id of ["root", "orphan", "self", "cycle-a", "cycle-b"]) {
+      expect(labels.get(id)).not.toMatch(/^↳ /);
+    }
+  });
+
   it("uses the configured display name and shared lifecycle icons in labels", async () => {
     vi.mocked(getDisplayName).mockImplementation((type) => `Display ${type}`);
     const statuses = [

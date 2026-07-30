@@ -35,6 +35,10 @@ export interface AgentConfig {
   maxTurns?: number;
   /** Max output tokens per LLM response. Passed to provider as max_tokens or max_completion_tokens. */
   maxTokens?: number;
+  /** Roles this agent may delegate to from its isolated child runtime. */
+  delegateTo?: string[];
+  /** Maximum total direct children this agent may create. */
+  maxChildAgents?: number;
   systemPrompt: string;
 
   /** true = this is an embedded default agent (informational) */
@@ -43,6 +47,19 @@ export interface AgentConfig {
   hidden?: boolean;
   /** Where this agent was loaded from */
   source?: "default" | "project" | "global";
+}
+
+/**
+ * Resolve a delegation policy after frontmatter layers have merged. An omitted
+ * child limit permits one child only when the role explicitly delegates;
+ * leaves always have no child capacity, even if a stale limit is present.
+ */
+export function getEffectiveMaxChildAgents(config: Pick<AgentConfig, "delegateTo" | "maxChildAgents">): number {
+  if (!config.delegateTo?.length) return 0;
+  if (config.maxChildAgents === undefined) return 1;
+  return Number.isFinite(config.maxChildAgents)
+    ? Math.max(0, Math.floor(config.maxChildAgents))
+    : 0;
 }
 
 export interface AgentInvocation {

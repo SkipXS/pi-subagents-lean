@@ -35,6 +35,8 @@ export interface AgentConfigFromMd {
   thinking?: ThinkingLevel;
   max_turns?: number;
   max_tokens?: number;
+  delegate_to?: string[];
+  max_child_agents?: number;
   hidden?: boolean;
   /** Prompt body, when the Markdown file contains non-empty content after frontmatter. */
   systemPrompt?: string;
@@ -281,6 +283,8 @@ export function parseAgentFile(
     thinking: parseThinkingLevel(parseString(frontmatter, "thinking")),
     max_turns: parseNumber(frontmatter, "max_turns"),
     max_tokens: parseNumber(frontmatter, "max_tokens"),
+    delegate_to: parseStringArray(frontmatter, "delegate_to"),
+    max_child_agents: parseNumber(frontmatter, "max_child_agents"),
     hidden: parseBoolean(frontmatter, "hidden"),
     // An absent body is not an override: retain a lower-precedence prompt.
     systemPrompt: body || undefined,
@@ -420,6 +424,10 @@ function fromMd(md: AgentConfigFromMd): Partial<AgentConfig> {
     thinkingLevel: md.thinking,
     maxTurns: md.max_turns,
     maxTokens: md.max_tokens,
+    delegateTo: md.delegate_to,
+    maxChildAgents: md.max_child_agents === undefined
+      ? undefined
+      : Number.isFinite(md.max_child_agents) ? Math.max(0, Math.floor(md.max_child_agents)) : 0,
     hidden: md.hidden,
     systemPrompt: md.systemPrompt,
     source: md.source === "user" ? "global" : md.source,
