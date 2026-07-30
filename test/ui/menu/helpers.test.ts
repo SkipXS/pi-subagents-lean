@@ -2,8 +2,9 @@
  * helpers.test.ts — Tests for ui/menu/helpers.ts.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
+  applyPersistedSetting,
   buildModelOptions,
   buildSelectListTheme,
   buildSettingsListTheme,
@@ -15,6 +16,23 @@ const mockTheme = {
   fg: (color: string, text: string) => `[${color}:${text}]`,
   bold: (text: string) => `**${text}**`,
 };
+
+describe("applyPersistedSetting", () => {
+  it("reports prompt lock contention and restores the optimistic menu value", () => {
+    const notify = vi.fn();
+    const restoreUi = vi.fn();
+    const ctx = { ui: { notify } } as any;
+
+    expect(applyPersistedSetting(
+      ctx,
+      () => { throw new Error("Config is busy; retry the setting in a moment."); },
+      "unreachable",
+      restoreUi,
+    )).toBe(false);
+    expect(restoreUi).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledWith("Failed to save setting: Config is busy; retry the setting in a moment.", "error");
+  });
+});
 
 describe("buildModelOptions", () => {
   it("keeps inherit-parent first and ignores malformed provider/model keys", () => {

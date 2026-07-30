@@ -9,12 +9,13 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.d.ts"],
       reporter: ["text", "json-summary", "lcov"],
-      // Baseline from the full cross-platform suite; raise these as gaps close.
+      // Global floors retain implementation freedom while guarding meaningful
+      // regressions across the full extension; avoid brittle per-file gates.
       thresholds: {
-        statements: 79,
-        branches: 69,
-        functions: 75,
-        lines: 80,
+        statements: 80,
+        branches: 74,
+        functions: 78,
+        lines: 81,
       },
     },
   },

@@ -321,6 +321,8 @@ vi.mock("../src/shell.js", () => {
             graceTurns: intent.graceTurns,
             worktreePath: intent.worktreePath,
             worktreeLabel: intent.worktreeLabel,
+            worktreeParentCwd: intent.worktreeParentCwd,
+            worktreeSelectionPath: intent.worktreeSelectionPath,
             agentConfig: intent.agentConfig,
             invocation: intent.invocation,
           },

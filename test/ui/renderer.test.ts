@@ -251,6 +251,29 @@ describe("renderer", () => {
     expect(getAgentStatusDisplay).toHaveBeenCalledWith("stopped");
   });
 
+  it("falls back safely for malformed external renderer payloads", () => {
+    expect(() => renderAgentToolResult({
+      content: undefined as any,
+      details: "not-details" as any,
+    }, { expanded: true }, noopTheme, SHOW_COST)).not.toThrow();
+    expect(textInstances.at(-1)?.text).toBe("✓ ");
+
+    expect(() => renderSubagentResult({
+      content: 42 as any,
+      details: { type: Symbol("hostile"), description: {}, outputFile: 1, worktreePath: [] } as any,
+    }, { expanded: true }, noopTheme, SHOW_COST)).not.toThrow();
+    expect(textInstances.map((t) => t.text).join("\n")).not.toContain("Symbol(hostile)");
+
+    expect(() => renderSubagentResult({
+      content: "result",
+      details: {
+        type: "builder", description: "Build", turnCount: 1, status: "unknown",
+        latestCacheHitRate: "not-a-number", contextPercent: "bad", durationMs: Infinity,
+      } as any,
+    }, { expanded: false }, noopTheme, SHOW_COST)).not.toThrow();
+    expect(textInstances.map((t) => t.text).join("\n")).toContain("✓ Builder");
+  });
+
   it("does not render worktree line when worktreePath is absent", () => {
     const message = {
       content: "Agent output",

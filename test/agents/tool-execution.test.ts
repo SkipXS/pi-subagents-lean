@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { WorktreeValidationResult } from "../../src/spawn/worktree-validator.js";
 import { fakeCtx } from "../fixtures.ts";
 
 /* ------------------------------------------------------------------ */
@@ -23,6 +24,7 @@ import { fakeCtx } from "../fixtures.ts";
 // Use vi.hoisted so mock factories can reference these at hoisting time
 const {
   mockValidateWorktreePath,
+  mockRevalidateWorktreePath,
   mockSpawn,
   mockGetRecord,
   mockDiscoverNewAgents,
@@ -36,6 +38,9 @@ const {
   mockNestedPreflight,
 } = vi.hoisted(() => ({
   mockValidateWorktreePath: vi.fn(),
+  mockRevalidateWorktreePath: vi.fn(async (_pi: unknown, path: string): Promise<WorktreeValidationResult> => ({
+    ok: true, resolvedPath: path, worktreeRoot: path, label: "feature",
+  })),
   mockSpawn: vi.fn().mockReturnValue("agent-id-123"),
   mockGetRecord: vi.fn(),
   mockDiscoverNewAgents: vi.fn(),
@@ -65,6 +70,8 @@ const {
       graceTurns: intent.graceTurns,
       worktreePath: intent.worktreePath,
       worktreeLabel: intent.worktreeLabel,
+      worktreeParentCwd: intent.worktreeParentCwd,
+      worktreeSelectionPath: intent.worktreeSelectionPath,
       isBackground: intent.runInBackground,
       signal: intent.signal,
     });
@@ -80,6 +87,7 @@ const {
 
 vi.mock("../../src/spawn/worktree-validator.js", () => ({
   validateWorktreePath: mockValidateWorktreePath,
+  revalidateWorktreePath: mockRevalidateWorktreePath,
   computeLabel: vi.fn((resolved: string, root: string) => {
     if (resolved === root) return root.split("/").pop() || root;
     const rel = resolved.slice(root.length + 1);
@@ -696,6 +704,41 @@ describe("executeAgentTool — worktree_path validation", () => {
       model: { provider: "openai", id: "gpt-4o" },
       thinkingLevel: "high",
       invocation: { modelName: "gpt-4o" },
+    });
+  });
+
+  it("does not load a worktree overlay or spawn when revalidation finds a deleted path", async () => {
+    mockValidateWorktreePath.mockResolvedValueOnce({
+      ok: true, resolvedPath: "/wt/feature", worktreeRoot: "/wt/feature", label: "feature",
+    });
+    mockRevalidateWorktreePath.mockResolvedValueOnce({
+      ok: false, error: "worktree_path does not exist: the specified path was not found on disk",
+    });
+    ctx.isProjectTrusted = () => true;
+
+    const result = await executeAgentTool("tc-worktree-deleted", makeParams({ worktree_path: "/wt/feature" }), undefined, undefined, ctx);
+
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content[0].text).toContain("does not exist");
+    expect(mockResolveAgentCatalog).not.toHaveBeenCalled();
+    expect(mockCoordinatorSpawn).not.toHaveBeenCalled();
+  });
+
+  it("retains the raw selection with its canonical worktree for runner revalidation", async () => {
+    mockValidateWorktreePath.mockResolvedValueOnce({
+      ok: true, resolvedPath: "/real/worktree", worktreeRoot: "/real/worktree", label: "worktree",
+    });
+    mockRevalidateWorktreePath.mockResolvedValueOnce({
+      ok: true, resolvedPath: "/real/worktree", worktreeRoot: "/real/worktree", label: "worktree",
+    });
+    ctx.isProjectTrusted = () => true;
+
+    await executeAgentTool("tc-worktree-metadata", makeParams({ worktree_path: "/links/worktree" }), undefined, undefined, ctx);
+
+    expect(mockSpawn.mock.calls[0][4]).toMatchObject({
+      worktreePath: "/real/worktree",
+      worktreeSelectionPath: "/links/worktree",
+      worktreeParentCwd: "/home/test/project",
     });
   });
 

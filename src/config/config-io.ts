@@ -21,6 +21,8 @@ export const DEFAULT_MAX_NESTING_DEPTH = 2;
 export const MAX_NESTING_DEPTH = 2;
 export const VALID_SYSTEM_PROMPT_MODES = new Set<string>(["replace", "inherit", "custom"]);
 export const DEFAULT_CONCURRENCY: SubagentsConfig["concurrency"] = { default: 4 };
+/** Persisted menu changes must fail promptly rather than freeze Pi's synchronous TUI on lock contention. */
+export const UI_CONFIG_LOCK_TIMEOUT_MS = 0;
 
 const DEFAULT_AGENT: SubagentsConfig["agent"] = {
   default: null,
@@ -76,7 +78,7 @@ export interface ConfigFileIO {
 
 export class ConfigLockTimeoutError extends Error {
   constructor() {
-    super("Timed out waiting for the local config lock.");
+    super("Config is busy; retry the setting in a moment.");
     this.name = "ConfigLockTimeoutError";
   }
 }
@@ -207,7 +209,9 @@ export function createConfigFileIO(configDir: string = CONFIG_DIR, options: Conf
   };
 }
 
-const fileIO = createConfigFileIO();
+// ConfigStore mutations are invoked from synchronous menu callbacks. Retrying
+// here would block Pi's event loop, so surface contention immediately instead.
+const fileIO = createConfigFileIO(CONFIG_DIR, { lockTimeoutMs: UI_CONFIG_LOCK_TIMEOUT_MS });
 
 /** Load config plus explicit recovery state. */
 export function loadConfig(): ConfigLoadResult {

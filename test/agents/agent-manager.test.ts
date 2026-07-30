@@ -1284,13 +1284,20 @@ describe("AgentManager steering and shutdown", () => {
       mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockReturnValueOnce(childRun.promise);
       manager = new AgentManager(undefined, { default: 1 });
       const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
-        description: "parent", agentConfig: parentConfig, worktreePath: "/parent-worktree", worktreeLabel: "parent-label",
+        description: "parent", agentConfig: parentConfig,
+        worktreePath: "/parent-worktree", worktreeLabel: "parent-label",
+        worktreeParentCwd: "/parent-repo", worktreeSelectionPath: "/links/parent-worktree",
       });
       const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
         description: "child", worktreePath: "/caller-worktree", worktreeLabel: "caller-label",
+        worktreeParentCwd: "/caller-repo", worktreeSelectionPath: "/links/caller-worktree",
       });
 
-      expect(mockModules.mockRunAgent.mock.calls[1][3].cwd).toBe("/parent-worktree");
+      expect(mockModules.mockRunAgent.mock.calls[1][3]).toMatchObject({
+        cwd: "/parent-worktree",
+        worktreeParentCwd: "/parent-repo",
+        worktreeSelectionPath: "/links/parent-worktree",
+      });
       expect(manager.getRecord(childId)?.display).toMatchObject({ worktreePath: "/parent-worktree", worktreeLabel: "parent-label" });
     });
 

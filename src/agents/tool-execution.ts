@@ -14,7 +14,7 @@ import { SHORT_ID_LENGTH } from "../types.js";
 import type { AgentConfig } from "./types.js";
 import { resolveType, getAgentConfig, discoverNewAgents, resolveAgentCatalog, resolveTypeInCatalog } from "./agent-types.js";
 import { getSessionUsageSnapshot } from "./usage.js";
-import { validateWorktreePath } from "../spawn/worktree-validator.js";
+import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-validator.js";
 
 import { parseModelKey, findModelInRegistry, parseThinkingLevel } from "../utils.js";
 import { normalizeThinkingLevel } from "../models/thinking.js";
@@ -161,11 +161,11 @@ export async function executeAgentTool(
 
   // Validate worktree_path early — needed for on-demand agent discovery
   const rawWorktreePath = params.worktree_path as string | undefined;
+  const parentCwd = getSessionCtx()?.cwd ?? ctx.cwd;
   let validatedWorktreePath: string | undefined;
   let worktreeLabel: string | undefined;
   if (rawWorktreePath && rawWorktreePath.trim() !== "") {
     try {
-      const parentCwd = getSessionCtx()?.cwd ?? ctx.cwd;
       const warnings: string[] = [];
       const onWarning = (msg: string) => { warnings.push(msg); };
       const validation = await validateWorktreePath(getPiInstance(), rawWorktreePath, parentCwd, onWarning);
@@ -200,7 +200,14 @@ export async function executeAgentTool(
   let agentConfig: AgentConfig | undefined;
   let agentCatalog: ReadonlyMap<string, AgentConfig> | undefined;
   if (trustedWorktreeDir) {
-    const catalog = await resolveAgentCatalog(trustedWorktreeDir, {
+    // Repeat validation directly before reading project-controlled overlays.
+    // A deleted or swapped path must not contribute an agent definition.
+    const validation = await revalidateWorktreePath(getPiInstance(), rawWorktreePath!, parentCwd, validatedWorktreePath!);
+    if (signal?.aborted) return cancelledResult();
+    if (!validation.ok || !validation.resolvedPath) return errorResult(validation.ok ? "worktree_path validation failed" : validation.error);
+    validatedWorktreePath = validation.resolvedPath;
+    worktreeLabel = validation.label;
+    const catalog = await resolveAgentCatalog(`${validatedWorktreePath}/.pi/agents`, {
       disableDefaultAgents: getStore().agent.disableDefaultAgents,
     });
     if (signal?.aborted) return cancelledResult();
@@ -275,6 +282,8 @@ export async function executeAgentTool(
     graceTurns: getStore().agent.graceTurns,
     worktreePath: validatedWorktreePath,
     worktreeLabel,
+    worktreeParentCwd: validatedWorktreePath ? parentCwd : undefined,
+    worktreeSelectionPath: validatedWorktreePath ? rawWorktreePath : undefined,
     agentCatalog,
     invocation: { modelName, thinkingLevel, maxTurns },
     runInBackground: runInBackground || getStore().agent.forceBackground,

@@ -102,6 +102,10 @@ export interface SpawnConfig extends RunTunables {
   modelKey?: string;
   worktreePath?: string;
   worktreeLabel?: string;
+  /** Parent repository cwd used to revalidate a selected worktree at runner start. */
+  worktreeParentCwd?: string;
+  /** Original selected path retained to detect a later symlink/path retarget. */
+  worktreeSelectionPath?: string;
   /** Immutable full catalog captured for this invocation, including a trusted worktree overlay when selected. */
   agentCatalog?: ReadonlyMap<string, AgentConfig>;
   invocation?: AgentInvocation;

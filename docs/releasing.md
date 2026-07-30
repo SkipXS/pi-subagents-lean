@@ -27,17 +27,18 @@ GitHub release. Publishing and releasing require separate, explicit approval.
 
    `package:smoke` packs the allowlisted files, installs the tarball in an
    isolated project, and loads the installed extension through Pi's public
-   extension loader. `release:validate` checks the version tag and changelog
-   metadata without making network or registry changes.
+   extension loader. `release:validate` checks the changelog metadata without
+   making network or registry changes; CI also checks a release tag when one is
+   pushed.
 5. Open and merge a pull request. Wait for every required `main` check to pass.
 
 ## Tag validation
 
 After explicit approval, create and push an annotated tag named exactly
 `v<version>` from the validated `main` commit. CI runs the normal cross-platform,
-minimum-Pi, coverage, and installed-tarball checks for `v*` tags. Its
-**Release metadata** job also rejects a tag that does not exactly match
-`package.json` or lacks the dated changelog entry.
+minimum-Pi, coverage, and installed-tarball checks for `v*` tags. The **Release
+metadata** job validates the dated changelog heading on every pull request and
+also rejects a tag that does not exactly match `package.json`.
 
 Do not publish a package, create a GitHub release, or push a tag as part of this
 checklist without the required approval.

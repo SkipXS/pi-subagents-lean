@@ -90,6 +90,27 @@ describe("shared agent setting precedence", () => {
     }
   });
 
+  it("does not let malformed persisted values shadow a valid session-global fallback", () => {
+    const malformed = {
+      ...baseConfig,
+      agent: { default: { unexpected: true }, forceBackground: false, reviewer: ["not-a-model"] },
+      thinkingOverrides: { reviewer: "invalid" },
+    } as unknown as SubagentsConfig;
+
+    expect(resolveModelSetting({
+      subagentType: "reviewer",
+      config: malformed,
+      parentModelId: "parent/model",
+      sessionOverrides: { default: "session/global-model" },
+    })).toEqual({ value: "session/global-model", source: "session-global" });
+    expect(resolveThinkingSetting({
+      subagentType: "reviewer",
+      config: malformed,
+      parentThinking: "minimal",
+      sessionOverrides: { default: "high" },
+    })).toEqual({ value: "high", source: "session-global" });
+  });
+
   it("uses the same precedence for thinking", () => {
     const common = {
       subagentType: "reviewer",

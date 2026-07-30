@@ -41,6 +41,7 @@ import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import { createNestedAgentProxy } from "./nested-agent-proxy.js";
 import { createNestedAgentExecutor } from "./tool-execution.js";
 import { DEFAULT_GRACE_TURNS, CUSTOM_PROMPT_PATH } from "../config/config-io.js";
+import { revalidateWorktreePath } from "../spawn/worktree-validator.js";
 
 // Cache: extension path → unscoped package name (lowercased), or undefined if not found
 const packageNameCache = new Map<string, string | undefined>();
@@ -130,6 +131,10 @@ interface RunOptions extends RunTunables, RunCallbacks, SupplementalUsageCallbac
   nestingDepth?: number;
   /** Override working directory (resolved worktree path). */
   cwd?: string;
+  /** Parent repo cwd retained for execution-boundary worktree revalidation. */
+  worktreeParentCwd?: string;
+  /** Original selected path, used to detect a retarget after queueing. */
+  worktreeSelectionPath?: string;
   /** Parent abort signal — when aborted, the subagent is also stopped. */
   signal?: AbortSignal;
   /** Immutable full catalog inherited from the root spawn boundary. */
@@ -764,7 +769,22 @@ async function runAgentImpl(
     bufferNotify(`agent "${type}": both extensions and exclude_extensions set — extensions (whitelist) wins`);
   }
 
-  const effectiveCwd = options.cwd ?? ctx.cwd;
+  // A worktree can be deleted, replaced, or have its symlink target swapped
+  // while an accepted spawn waits in the manager queue. Revalidate immediately
+  // before any worktree-local runner resource is loaded or a session is made.
+  let effectiveCwd = options.cwd ?? ctx.cwd;
+  if (options.cwd) {
+    const validation = await revalidateWorktreePath(
+      options.pi,
+      options.worktreeSelectionPath ?? options.cwd,
+      options.worktreeParentCwd ?? ctx.cwd,
+      options.cwd,
+    );
+    if (!validation.ok || !validation.resolvedPath) {
+      throw new Error(validation.ok ? "worktree_path validation failed" : validation.error);
+    }
+    effectiveCwd = validation.resolvedPath;
+  }
   const env = await detectEnv(options.pi, effectiveCwd);
 
   // Resolve system prompt mode + source prompts + context files
