@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+// A cold npm install of Pi's provider-heavy dependency tree can exceed two
+// minutes on hosted Windows runners.
+const COMMAND_TIMEOUT_MS = 300_000;
 
 export function productionManifest(manifest: Record<string, unknown>): Record<string, unknown> {
   const { devDependencies: _devDependencies, ...productionManifest } = manifest;
@@ -21,13 +24,20 @@ function main(): void {
       join(tempRoot, "package.json"),
       JSON.stringify(productionManifest(manifest), null, 2),
     );
-    execFileSync(npm, ["install", "--omit=dev", "--package-lock=false", "--ignore-scripts"], {
+    const installArgs = ["install", "--omit=dev", "--package-lock=false", "--ignore-scripts"];
+    // npm's automatic peer installation repeatedly corrupts nested package
+    // extraction on hosted Windows runners. The separate package smoke installs
+    // and loads the extension with its real Pi peers on both platforms; this
+    // check only needs to validate the production dependency manifest there.
+    if (process.platform === "win32") installArgs.push("--legacy-peer-deps");
+    execFileSync(npm, installArgs, {
       cwd: tempRoot,
       stdio: "inherit",
+      timeout: COMMAND_TIMEOUT_MS,
     });
     console.log("npm production install succeeded");
   } finally {
-    rmSync(tempRoot, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
   }
 }
 

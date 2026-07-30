@@ -151,7 +151,7 @@ describe("Agent tool registration", () => {
     extension(api.api as any);
     const tool = agentTool(api);
 
-    expect(tool).not.toHaveProperty("description");
+    expect(tool.description).toBe("Delegate a task to a specialized agent.");
     expect(tool).not.toHaveProperty("promptSnippet");
     expect(tool).not.toHaveProperty("promptGuidelines");
     expect(JSON.parse(JSON.stringify(tool.parameters))).toEqual({
@@ -222,14 +222,28 @@ describe("Agent tool registration", () => {
     const stop = api.tools.find(({ name }) => name === "StopAgent")!;
     const status = api.tools.find(({ name }) => name === "AgentStatus")!;
 
-    expect(stop.execute).toBe(state.executeStopAgentTool);
+    expect(stop.execute).not.toBe(state.executeStopAgentTool);
+    expect(stop.description).toBe("Stop a running or queued agent.");
     expect(stop.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
     expect(JSON.parse(JSON.stringify(stop.parameters))).toEqual({
       type: "object", additionalProperties: false, required: ["agent_id"], properties: { agent_id: { type: "string" } },
     });
-    expect(status.execute).toBe(state.executeAgentStatusTool);
+    expect(status.execute).not.toBe(state.executeAgentStatusTool);
+    expect(status.description).toBe("List subagents and their current status.");
     expect(status.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
     expect(JSON.parse(JSON.stringify(status.parameters))).toEqual({ type: "object", additionalProperties: false, properties: {} });
+  });
+
+  it("throws error results at Pi's registered public tool boundary", async () => {
+    const api = createApi();
+    extension(api.api as any);
+    state.executeAgentTool.mockResolvedValueOnce({
+      content: [{ type: "text", text: "agent failed clearly" }],
+      isError: true,
+    });
+
+    await expect(agentTool(api).execute("call", {}, undefined, undefined, sessionContext()))
+      .rejects.toThrow("agent failed clearly");
   });
 
   it("does not re-register when session_start refreshes a changed agent catalog", async () => {

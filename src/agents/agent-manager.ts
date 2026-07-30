@@ -855,7 +855,7 @@ export class AgentManager {
   /** Release execution-only handles while preserving result, lifecycle, and display metadata. */
   private releaseExecution(record: ManagedAgentRecord): void {
     this.clearParentAbortSignal(record.id);
-    record.execution.session?.dispose();
+    try { record.execution.session?.dispose(); } catch { /* disposal must not strand other records */ }
     record.execution.session = undefined;
     record.execution.abortController = undefined;
     record.execution.promise = undefined;

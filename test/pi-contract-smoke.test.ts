@@ -80,11 +80,22 @@ describe.sequential("Pi extension contract", () => {
       } as any);
       runner.bindCommandContext();
 
-      expect(runner.createContext().isIdle()).toBe(true);
+      const publicContext = runner.createContext();
+      expect(publicContext.isIdle()).toBe(true);
       expect(result.runtime.getActiveTools()).toEqual(["Agent"]);
       expect(activeToolsReads).toBe(1);
       expect(runner.getAllRegisteredTools().map((tool) => tool.definition.name).sort())
         .toEqual(["Agent", "AgentStatus", "StopAgent"]);
+      for (const { definition } of runner.getAllRegisteredTools()) {
+        expect(definition.description).toEqual(expect.any(String));
+        expect(definition.description.length).toBeGreaterThan(0);
+      }
+      await expect(runner.getToolDefinition("AgentStatus")!.execute(
+        "contract-status", {}, undefined, undefined, publicContext,
+      )).rejects.toThrow("root session is ready");
+      await expect(runner.getToolDefinition("StopAgent")!.execute(
+        "contract-stop", { agent_id: "missing" }, undefined, undefined, publicContext,
+      )).rejects.toThrow("root session is ready");
       expect(runner.getMessageRenderer("subagent-result")).toBeTypeOf("function");
       expect(runner.hasUI()).toBe(false);
       expect(runner.hasHandlers("tool_call")).toBe(true);

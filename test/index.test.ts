@@ -170,9 +170,9 @@ describe("Agent tool schema — stealth", () => {
 
   const agentTool = () => findTool(api, "Agent");
 
-  it("has no description (stealth)", () => {
+  it("has Pi's required description without extra prompt metadata", () => {
     expect(agentTool()).toBeDefined();
-    expect(agentTool()!.description).toBeUndefined();
+    expect(agentTool()!.description).toBe("Delegate a task to a specialized agent.");
   });
 
   it("has no promptSnippet", () => {

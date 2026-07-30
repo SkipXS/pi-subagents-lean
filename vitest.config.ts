@@ -9,13 +9,18 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.d.ts"],
       reporter: ["text", "json-summary", "lcov"],
-      // Global floors retain implementation freedom while guarding meaningful
-      // regressions across the full extension; avoid brittle per-file gates.
+      // Global floors plus conservative gates for failure- and race-critical
+      // modules. File floors sit below the reproducible Ubuntu baseline.
       thresholds: {
         statements: 80,
         branches: 74,
         functions: 78,
         lines: 81,
+        "src/registration.ts": { statements: 80, branches: 70, functions: 95, lines: 80 },
+        "src/agents/agent-manager.ts": { statements: 85, branches: 80, functions: 80, lines: 88 },
+        "src/config/config-io.ts": { statements: 68, branches: 80, functions: 73, lines: 70 },
+        "src/prompt/skill-loader.ts": { statements: 72, branches: 80, functions: 70, lines: 72 },
+        "src/spawn/spawn-coordinator.ts": { statements: 75, branches: 70, functions: 85, lines: 76 },
       },
     },
   },
