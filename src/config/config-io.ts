@@ -135,7 +135,7 @@ export function createConfigFileIO(configDir: string = CONFIG_DIR, options: Conf
           fs.renameSync(pendingPath, lockPath);
         } catch (err) {
           try { fs.rmSync(pendingPath, { recursive: true, force: true }); } catch { /* preserve the original error */ }
-          if (isLockContentionError(err, lockPath)) {
+          if (isPendingLockPublishContention(err)) {
             const contention = new Error("Lock was published by another process.") as NodeJS.ErrnoException;
             contention.code = "EEXIST";
             throw contention;
@@ -317,12 +317,11 @@ function removeStaleLock(lockPath: string, localHostname: string, currentTime: n
   return true;
 }
 
-function isLockContentionError(err: unknown, targetPath: string): boolean {
+function isPendingLockPublishContention(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException).code;
   // rename(directory, existing-directory) is EEXIST on Windows and commonly
-  // ENOTEMPTY on POSIX. Bun on Windows reports EPERM for the same condition.
-  if (code === "EEXIST" || code === "ENOTEMPTY") return true;
-  return code === "EPERM" && fs.existsSync(targetPath);
+  // ENOTEMPTY on POSIX. Bun on Windows reports EPERM for this same publish collision.
+  return code === "EEXIST" || code === "ENOTEMPTY" || code === "EPERM";
 }
 
 function parseOwner(bytes: Buffer): LockOwner | undefined {

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { join } from "node:path";
 
-const { mockGetAgentDir, mockMkdirSync, mockWriteFileSync, mockRenameSync, mockUnlinkSync, mockReadFileSync, mockRmSync, mockOpenSync, mockFsyncSync, mockCloseSync, mockExistsSync } = vi.hoisted(() => ({
+const { mockGetAgentDir, mockMkdirSync, mockWriteFileSync, mockRenameSync, mockUnlinkSync, mockReadFileSync, mockRmSync, mockOpenSync, mockFsyncSync, mockCloseSync } = vi.hoisted(() => ({
   mockGetAgentDir: vi.fn(),
   mockMkdirSync: vi.fn(),
   mockWriteFileSync: vi.fn(),
@@ -12,7 +12,6 @@ const { mockGetAgentDir, mockMkdirSync, mockWriteFileSync, mockRenameSync, mockU
   mockOpenSync: vi.fn(() => 1),
   mockFsyncSync: vi.fn(),
   mockCloseSync: vi.fn(),
-  mockExistsSync: vi.fn(() => false),
 }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -29,7 +28,6 @@ vi.mock("node:fs", () => ({
   openSync: mockOpenSync,
   fsyncSync: mockFsyncSync,
   closeSync: mockCloseSync,
-  existsSync: mockExistsSync,
 }));
 
 beforeEach(() => {
@@ -186,17 +184,15 @@ describe("config I/O paths", () => {
     }
   });
 
-  it("classifies Bun's EPERM lock collision as contention and cleans its pending directory", async () => {
+  it("classifies Bun's EPERM pending-lock publish collision as contention after the destination disappears", async () => {
     const agentDir = "/tmp/pi-agent";
     const configPath = join(agentDir, "subagents-lean.json");
     const lockPath = `${configPath}.lock`;
     const eperm = Object.assign(new Error("destination exists"), { code: "EPERM" });
     mockGetAgentDir.mockReturnValue(agentDir);
-    mockReadFileSync.mockReturnValue(JSON.stringify({ token: "other-owner", pid: 1, hostname: "other-host", createdAt: 0 }));
     mockRenameSync.mockImplementation((_source, target) => {
       if (target === lockPath) throw eperm;
     });
-    mockExistsSync.mockReturnValue(true);
     vi.resetModules();
 
     const { ConfigLockTimeoutError, createConfigFileIO } = await import("../../src/config/config-io.ts");
@@ -208,6 +204,35 @@ describe("config I/O paths", () => {
 
     const pendingPath = mockMkdirSync.mock.calls.find(([candidate]) => String(candidate).startsWith(`${lockPath}.pending-`))![0];
     expect(mockRmSync).toHaveBeenCalledWith(pendingPath, { recursive: true, force: true });
+    expect(mockRmSync).not.toHaveBeenCalledWith(lockPath, expect.anything());
+  });
+
+  it("propagates EPERM from the final config publish rename after acquiring the lock", async () => {
+    const agentDir = "/tmp/pi-agent";
+    const configPath = join(agentDir, "subagents-lean.json");
+    const lockPath = `${configPath}.lock`;
+    const eperm = Object.assign(new Error("config destination is protected"), { code: "EPERM" });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockGetAgentDir.mockReturnValue(agentDir);
+    mockRenameSync.mockImplementation((_source, target) => {
+      if (target === configPath) throw eperm;
+    });
+    vi.resetModules();
+
+    try {
+      const { ConfigLockTimeoutError, createConfigFileIO } = await import("../../src/config/config-io.ts");
+      let thrown: unknown;
+      try {
+        createConfigFileIO(agentDir, { lockTimeoutMs: 0 }).update(() => undefined);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(mockRenameSync.mock.calls.some(([, target]) => target === lockPath)).toBe(true);
+      expect(thrown).toBe(eperm);
+      expect(thrown).not.toBeInstanceOf(ConfigLockTimeoutError);
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it.each(["{broken", "null", "42", "[]", JSON.stringify({ agent: "not-an-object" })])("uses defaults and blocks saves for corrupt primary config %j", async (contents) => {
