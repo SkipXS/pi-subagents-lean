@@ -7,7 +7,9 @@ import { pathToFileURL } from "node:url";
 
 let testDir: string | undefined;
 
-const PROCESS_TIMEOUT_MS = 3_000;
+// Hosted Windows runners can take several seconds just to cold-start Bun.
+// The process deadline remains below the explicit test deadlines below.
+const PROCESS_TIMEOUT_MS = 10_000;
 
 function runBunScript(script: string, args: string[], label: string, timeoutMs = PROCESS_TIMEOUT_MS): Promise<void> {
   return new Promise((resolveRun, reject) => {
@@ -263,7 +265,7 @@ describe("config I/O with the real filesystem", () => {
     await Promise.all([run(), run()]);
     expect(existsSync(markerPath)).toBe(false);
     expect(createConfigFileIO(testDir!).load().health).toBe("healthy");
-  });
+  }, 15_000);
 
   it("serializes independent updates from real parallel writer processes", async () => {
     await loadConfigModule();
@@ -275,5 +277,5 @@ describe("config I/O with the real filesystem", () => {
 
     await Promise.all([run("showCost"), run("forceBackground")]);
     expect(JSON.parse(readFileSync(configPath, "utf8")).agent).toMatchObject({ showCost: true, forceBackground: true });
-  });
+  }, 15_000);
 });
