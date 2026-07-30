@@ -690,7 +690,7 @@ describe("ConversationViewer", () => {
       expect(text).not.toContain("@");
     });
 
-    it("uses the persisted Pi usage snapshot after completion", () => {
+    it("uses the persisted cumulative Pi usage snapshot after completion", () => {
       const session = makeMockSession([{ role: "user", content: "hello" }]);
       const record = makeMockRecord({
         lifecycle: { status: "completed", startedAt: 0, completedAt: 1000 },
@@ -698,7 +698,7 @@ describe("ConversationViewer", () => {
         stats: {
           lifetimeUsage: { input: 83000, output: 7100, cacheWrite: 12000, cost: 1.262 },
           cacheRead: 1300000,
-          latestCacheHitRate: 99.1,
+          latestCacheHitRate: 93.2,
           contextPercent: 23.4,
           contextWindow: 272000,
           autoCompactionEnabled: true,
@@ -710,7 +710,7 @@ describe("ConversationViewer", () => {
       });
       const viewer = new ConversationViewer(makeTui(), session, record, noopTheme, vi.fn());
       expect(viewer.render(200).join("\n"))
-        .toContain("↑83k ↓7.1k R1.3M W12k CH99.1% $1.262 (sub) 23.4%/272k (auto)");
+        .toContain("↑83k ↓7.1k R1.3M W12k CH93.2% $1.262 (sub) 23.4%/272k (auto)");
     });
   });
 

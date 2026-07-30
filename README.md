@@ -304,7 +304,7 @@ Persistent bar above the editor showing running, queued, and completed agents in
   ⠙ 09:42 Scout  description trunc…  3⚙︎  5≤30⟳ · ↑10k ↓1.8k R85k W3.0k CH89.2% $0.024 45.0%/128k (auto) · 1h 2m 3s  thinking…
 ```
 
-Turn format uses `≤` and `⟳` (`5≤30⟳` = 5 of 30 turns). Turn count is colored by usage: normal < 80%, warning 80–99%, error at 100%. The max is hidden when well below the limit. The contiguous usage group follows Pi: `↑input ↓output Rcache-read Wcache-write CHhit-rate $cost context/window (auto)`. Input visibility also controls cache fields; output, context, and cost remain independently configurable.
+Turn format uses `≤` and `⟳` (`5≤30⟳` = 5 of 30 turns). Turn count is colored by usage: normal < 80%, warning 80–99%, error at 100%. The max is hidden when well below the limit. The contiguous usage group follows Pi: `↑input ↓output Rcache-read Wcache-write CHhit-rate $cost context/window (auto)`, where `CHhit-rate` is cumulative for that agent session. Input visibility also controls cache fields; output, context, and cost remain independently configurable.
 
 Compact mode is active when **Force compact** is ON, or **ctrl+o shortcut** is ON and the user has collapsed tool expansion. Force compact always wins.
 
@@ -316,7 +316,7 @@ The conversation viewer streams thinking and response text live as deltas arrive
 
 **Viewer controls:** `↑`/`↓` or `k`/`j` scroll · `PgUp`/`PgDn` or `Shift+↑`/`Shift+↓` page · `g`/`G` or `Home`/`End` jump · `Enter` compose steering while running · `s` twice stop/abort · `q`/`Esc` close.
 
-**Stats line:** `15⟳ · ↑12k ↓8.0k R85k W3.0k CH89.2% $0.024 47.0%/128k (auto) · 47s`. Tools and turns form one counter group with two spaces between them; Pi footer metrics remain contiguous, with ` · ` separating the counter, Pi, and duration groups. The configured stats-visibility toggles also apply here, including **Cost display**. Foreground and background result cards use the same Pi-compatible usage group; `showCost` also controls their cost field, while the other visibility toggles are scoped to the widget and conversation viewer.
+**Stats line:** `15⟳ · ↑12k ↓8.0k R85k W3.0k CH89.2% $0.024 47.0%/128k (auto) · 47s`. Cache hit rate is cumulative for the displayed agent session. Tools and turns form one counter group with two spaces between them; Pi footer metrics remain contiguous, with ` · ` separating the counter, Pi, and duration groups. The configured stats-visibility toggles also apply here, including **Cost display**. Foreground and background result cards use the same Pi-compatible usage group; `showCost` also controls their cost field, while the other visibility toggles are scoped to the widget and conversation viewer.
 
 ## Configuration
 

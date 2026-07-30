@@ -113,7 +113,7 @@ function normalizeMaxTurns(n: number | undefined): number | undefined {
 
 /**
  * Internal usage channel for billable work that is not an assistant turn.
- * These usages must not affect assistant-only input-delta or cache-hit metrics.
+ * These usages must not affect assistant-only input-delta metrics.
  */
 interface SupplementalUsageCallbacks {
   onSupplementalUsage?: (usage: AgentUsage) => void;
