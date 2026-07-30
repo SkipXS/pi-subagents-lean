@@ -157,6 +157,20 @@ describe("config I/O with the real filesystem", () => {
     expect(existsSync(brokenOwner)).toBe(true);
   });
 
+  it("retains a lock whose owner token changes while an update holds it", async () => {
+    const { createConfigFileIO } = await loadConfigModule();
+    const configPath = join(testDir!, "subagents-lean.json");
+    const lockPath = `${configPath}.lock`;
+    const replacement = { token: "replacement-owner", pid: 1234, hostname: "replacement-host", createdAt: 0 };
+
+    createConfigFileIO(testDir!).update(() => {
+      writeFileSync(join(lockPath, "owner.json"), JSON.stringify(replacement), "utf8");
+    });
+
+    expect(existsSync(lockPath)).toBe(true);
+    expect(JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8"))).toEqual(replacement);
+  });
+
   it("only removes proven-dead local stale locks and times out for foreign locks", async () => {
     const { createConfigFileIO, ConfigLockTimeoutError } = await loadConfigModule();
     const configPath = join(testDir!, "subagents-lean.json");

@@ -186,6 +186,30 @@ describe("config I/O paths", () => {
     }
   });
 
+  it("classifies Bun's EPERM lock collision as contention and cleans its pending directory", async () => {
+    const agentDir = "/tmp/pi-agent";
+    const configPath = join(agentDir, "subagents-lean.json");
+    const lockPath = `${configPath}.lock`;
+    const eperm = Object.assign(new Error("destination exists"), { code: "EPERM" });
+    mockGetAgentDir.mockReturnValue(agentDir);
+    mockReadFileSync.mockReturnValue(JSON.stringify({ token: "other-owner", pid: 1, hostname: "other-host", createdAt: 0 }));
+    mockRenameSync.mockImplementation((_source, target) => {
+      if (target === lockPath) throw eperm;
+    });
+    mockExistsSync.mockReturnValue(true);
+    vi.resetModules();
+
+    const { ConfigLockTimeoutError, createConfigFileIO } = await import("../../src/config/config-io.ts");
+    expect(() => createConfigFileIO(agentDir, {
+      lockTimeoutMs: 0,
+      now: () => 0,
+      hostname: () => "local-host",
+    }).update(() => undefined)).toThrow(ConfigLockTimeoutError);
+
+    const pendingPath = mockMkdirSync.mock.calls.find(([candidate]) => String(candidate).startsWith(`${lockPath}.pending-`))![0];
+    expect(mockRmSync).toHaveBeenCalledWith(pendingPath, { recursive: true, force: true });
+  });
+
   it.each(["{broken", "null", "42", "[]", JSON.stringify({ agent: "not-an-object" })])("uses defaults and blocks saves for corrupt primary config %j", async (contents) => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(contents);
