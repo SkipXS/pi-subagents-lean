@@ -79,19 +79,54 @@ function widgetStub(): { w: AgentWidget; calls: string[] } {
   return { w: w as unknown as AgentWidget, calls };
 }
 
-function managerStub(): { m: AgentManager; concurrencies: unknown[]; retentions: number[] } {
+function managerStub(): { m: AgentManager; concurrencies: unknown[]; retentions: number[]; nestingDepths: number[] } {
   const concurrencies: unknown[] = [];
   const retentions: number[] = [];
+  const nestingDepths: number[] = [];
   const m = {
     setConcurrency: (c: unknown) => concurrencies.push(c),
     setRetentionMinutes: (n: number) => retentions.push(n),
+    setMaxNestingDepth: (n: number) => nestingDepths.push(n),
   };
-  return { m: m as unknown as AgentManager, concurrencies, retentions };
+  return { m: m as unknown as AgentManager, concurrencies, retentions, nestingDepths };
 }
 
 /* ------------------------------------------------------------------ */
 /*  Reads & defaults                                                   */
 /* ------------------------------------------------------------------ */
+
+describe("ConfigStore child runtime snapshot", () => {
+  it("is frozen, narrow, and stable after root settings mutate", () => {
+    const { io } = memIO({
+      agent: { ...defaultConfig().agent, default: "persisted/model", graceTurns: 3, showCost: true },
+      thinkingOverrides: { scout: "low" as any },
+      concurrency: { default: 4 },
+    });
+    const store = new ConfigStore(io);
+    store.mutate.session.setOverride("scout", "session/model");
+    store.mutate.session.setThinkingOverride("scout", "high" as any);
+    const snapshot = store.createSubagentRuntimeSettings();
+
+    expect(Object.keys(snapshot).sort()).toEqual(["agent", "modelFor", "thinkingSettingFor"]);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.agent)).toBe(true);
+    expect(snapshot.modelFor("scout", "parent/model")).toBe("session/model");
+    expect(snapshot.thinkingSettingFor("scout", undefined).value).toBe("high");
+
+    store.mutate.session.setOverride("scout", "later/model");
+    store.mutate.session.setThinkingOverride("scout", "low" as any);
+    store.mutate.agent.setGraceTurns(9);
+    store.mutate.agent.setShowCost(false);
+
+    expect(snapshot.modelFor("scout", "parent/model")).toBe("session/model");
+    expect(snapshot.thinkingSettingFor("scout", undefined).value).toBe("high");
+    expect(snapshot.agent).toMatchObject({ graceTurns: 3, showCost: true });
+    expect(snapshot).not.toHaveProperty("mutate");
+    expect(snapshot).not.toHaveProperty("setDeps");
+    expect(snapshot).not.toHaveProperty("reload");
+    expect(snapshot).not.toHaveProperty("dispose");
+  });
+});
 
 describe("ConfigStore reads", () => {
   it("bakes in scalar defaults when fields are absent", () => {
@@ -106,6 +141,7 @@ describe("ConfigStore reads", () => {
     expect(store.agent.widgetShortcut).toBe(false);
     expect(store.agent.defaultModel).toBeNull();
     expect(store.agent.finishedRetentionMinutes).toBe(10);
+    expect(store.agent.maxNestingDepth).toBe(2);
   });
 
   it("returns configured values when present", () => {
@@ -128,6 +164,22 @@ describe("ConfigStore reads", () => {
       concurrency: { default: 4 },
     });
     expect(new ConfigStore(io).agent.defaultThinking).toBeUndefined();
+  });
+
+  it("normalizes, persists, and forwards bounded nesting depth to the manager", () => {
+    const { io, current } = memIO();
+    const store = new ConfigStore(io);
+    const { m, nestingDepths } = managerStub();
+    store.setDeps({ manager: m });
+    expect(nestingDepths).toEqual([2]);
+    store.mutate.agent.setMaxNestingDepth(3);
+    expect(store.agent.maxNestingDepth).toBe(2);
+    expect(current().agent.maxNestingDepth).toBe(2);
+    store.mutate.agent.setMaxNestingDepth(4);
+    expect(store.agent.maxNestingDepth).toBe(2);
+    store.mutate.agent.setMaxNestingDepth(0);
+    expect(store.agent.maxNestingDepth).toBe(1);
+    expect(nestingDepths.at(-1)).toBe(1);
   });
 
   it("exposes only the global concurrency limit", () => {

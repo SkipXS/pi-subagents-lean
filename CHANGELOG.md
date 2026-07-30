@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Bounded nested delegation.** Delegating roles can expose a sanitized, worktree-local child catalog through a foreground-only `Agent` proxy. Parent/depth/waiting-child hierarchy is available in status details, and stopped children return cancellation rather than partial success.
+
+### Changed
+- **Deprecated shell compatibility.** `enterSubagentSpawn`, `exitSubagentSpawn`, and `isInsideSubagentSpawn` are again exported for source-path consumers. They only preserve inert extension registration; AsyncLocalStorage remains authoritative for child isolation and root shell guards.
+- **AgentRecord source compatibility.** `hierarchy` is optional for records created before nested delegation; manager-created records retain it internally.
+- **Nesting settings and manager enforcement.** `maxNestingDepth` defaults to 2 and normalizes only to 1 or 2; depth 2 is the hard runtime maximum. The manager centrally enforces captured-catalog permission, depth, budget, and active-child checks for every nested spawn. The bundled `implementer` may create up to four direct children; other delegators without an explicit limit default to one child.
+
 ## [0.1.0] - 2026-07-29
 
 ### Changed

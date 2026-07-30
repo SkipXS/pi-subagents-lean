@@ -508,6 +508,7 @@ export async function showSpawnAgentMenu(
                 graceTurns,
                 worktreePath: currentWorktreePath,
                 worktreeLabel: currentWorktreePath ? currentWorktreeLabel : undefined,
+                agentCatalog: finalCatalog,
                 invocation: {
                   modelName: model?.id,
                   thinkingLevel: thinking,

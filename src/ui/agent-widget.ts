@@ -10,6 +10,7 @@ import type { Theme } from "./types.js";
 import { formatCost, getSessionUsageSnapshot } from "../agents/usage.js";
 import { buildStatsCells, buildStatsLayout, formatStatsRow, formatThinkingTag, getAgentStatusDisplay, getDisplayName, truncateDesc, describeActivity, fgPreservingNestedStyles, type StatsCells, type StatsLayout, type StatsVisibility } from "./format.js";
 import type { LiveView } from "../spawn/spawn-coordinator.js";
+import { agentContinuationPrefix, agentHierarchyPrefix, orderAgentsByHierarchy } from "./agent-hierarchy.js";
 
 // Re-export Theme so existing consumers (searchable-select, result-viewer) don't break
 export type { Theme } from "./types.js";
@@ -265,7 +266,7 @@ export class AgentWidget {
     }
   }
 
-  /** Build the navigation roster in the same newest-first order as the widget. */
+  /** Build the navigation roster in the same root-first hierarchy order as the widget. */
   private buildRoster(): AgentRecord[] {
     return this.categorizeAgents().ordered;
   }
@@ -376,27 +377,27 @@ export class AgentWidget {
   }
 
   /**
-   * Categorize visible agents while retaining one global newest-first order.
-   * Equal timestamps keep the manager's original order, including across statuses.
+   * Categorize visible agents while preserving newest-first root ordering.
+   * Descendants immediately follow their parent; equal timestamps retain manager order.
    */
   private categorizeAgents() {
-    const ordered: AgentRecord[] = [];
+    const newestFirst: AgentRecord[] = [];
     const running: AgentRecord[] = [];
     const queued: AgentRecord[] = [];
     const finished: AgentRecord[] = [];
     for (const a of sortByStartedAt(this.manager.listAgents())) {
       if (a.lifecycle.status === "running") {
-        ordered.push(a);
+        newestFirst.push(a);
         running.push(a);
       } else if (a.lifecycle.status === "queued") {
-        ordered.push(a);
+        newestFirst.push(a);
         queued.push(a);
       } else if (a.lifecycle.completedAt) {
-        ordered.push(a);
+        newestFirst.push(a);
         finished.push(a);
       }
     }
-    return { ordered, running, queued, finished };
+    return { ordered: orderAgentsByHierarchy(newestFirst), running, queued, finished };
   }
 
   /** Build the icon and status suffix for a finished agent. */
@@ -561,6 +562,7 @@ export class AgentWidget {
   /** Build RenderBlocks for finished (completed/errored) agents. */
   private buildFinishedBlocks(
     finished: AgentRecord[],
+    visibleAgents: AgentRecord[],
     theme: Theme,
     w: number,
     layout: AgentColumnLayout,
@@ -573,12 +575,12 @@ export class AgentWidget {
       if (!this.isCompact()) {
         const parts = buildWorktreeOutputParts(a);
         if (parts.length > 0) {
-          continuations.push(truncate(theme.fg("dim", `    ${parts.join("  ")}`)));
+          continuations.push(truncate(theme.fg("dim", `${agentContinuationPrefix(a, visibleAgents)}  ${parts.join("  ")}`)));
         }
       }
       blocks.push({
         agent: a,
-        header: truncate(`  ${this.renderFinishedLine(a, theme, layout, statsLines.get(a.id) ?? "")}`),
+        header: truncate(`${agentHierarchyPrefix(a, visibleAgents)}${this.renderFinishedLine(a, theme, layout, statsLines.get(a.id) ?? "")}`),
         continuations,
       });
     }
@@ -588,6 +590,7 @@ export class AgentWidget {
   /** Build RenderBlocks for running agents. */
   private buildRunningBlocks(
     running: AgentRecord[],
+    visibleAgents: AgentRecord[],
     theme: Theme,
     w: number,
     frame: string,
@@ -608,7 +611,7 @@ export class AgentWidget {
       if (this.isCompact()) {
         // Compact: single line with activity inline, truncated description
         const desc = padToVisibleWidth(this.displayDescription(a, layout.descriptionWidth), layout.descriptionWidth);
-        const headerLine = `  ${theme.fg("accent", frame)}${this.renderStartTime(a, theme, "text")} ${theme.fg("text", theme.bold(name))}${NAME_COLUMN_GAP}${modelThinkingColumn}${theme.fg("text", desc)}  ${statsLine}  ${theme.fg("text", activity)}`;
+        const headerLine = `${agentHierarchyPrefix(a, visibleAgents)}${theme.fg("accent", frame)}${this.renderStartTime(a, theme, "text")} ${theme.fg("text", theme.bold(name))}${NAME_COLUMN_GAP}${modelThinkingColumn}${theme.fg("text", desc)}  ${statsLine}  ${theme.fg("text", activity)}`;
         blocks.push({
           agent: a,
           header: truncate(headerLine),
@@ -617,13 +620,14 @@ export class AgentWidget {
       } else {
         // Full: header + continuation lines
         const description = padToVisibleWidth(this.displayDescription(a, layout.descriptionWidth), layout.descriptionWidth);
-        const headerLine = `  ${theme.fg("accent", frame)}${this.renderStartTime(a, theme, "text")} ${theme.fg("text", theme.bold(name))}${NAME_COLUMN_GAP}${modelThinkingColumn}${theme.fg("text", description)}  ${statsLine}`;
+        const headerLine = `${agentHierarchyPrefix(a, visibleAgents)}${theme.fg("accent", frame)}${this.renderStartTime(a, theme, "text")} ${theme.fg("text", theme.bold(name))}${NAME_COLUMN_GAP}${modelThinkingColumn}${theme.fg("text", description)}  ${statsLine}`;
         const continuations: string[] = [];
+        const continuationPrefix = agentContinuationPrefix(a, visibleAgents);
         const parts = buildWorktreeOutputParts(a);
         if (parts.length > 0) {
-          continuations.push(truncate(theme.fg("text", "  │ " + parts.join("  "))));
+          continuations.push(truncate(theme.fg("text", `${continuationPrefix}│ ${parts.join("  ")}`)));
         }
-        continuations.push(truncate(theme.fg("text", "  └ " + activity)));
+        continuations.push(truncate(theme.fg("text", `${continuationPrefix}└ ${activity}`)));
         blocks.push({
           agent: a,
           header: truncate(headerLine),
@@ -669,9 +673,9 @@ export class AgentWidget {
       statsLines.set(agent.id, formatStatsRow(statCells.get(agent.id)!, statsLayout) ?? "");
     }
     const layout = this.buildAgentColumnLayout([...running, ...queued, ...finished], w, statsLines);
-    const finishedBlocks = this.buildFinishedBlocks(finished, theme, w, layout, statsLines);
-    const runningBlocks = this.buildRunningBlocks(running, theme, w, frame, layout, statsLines);
-    const queuedBlocks = this.buildQueuedIndividualBlocks(queued, theme, w, layout);
+    const finishedBlocks = this.buildFinishedBlocks(finished, ordered, theme, w, layout, statsLines);
+    const runningBlocks = this.buildRunningBlocks(running, ordered, theme, w, frame, layout, statsLines);
+    const queuedBlocks = this.buildQueuedIndividualBlocks(queued, ordered, theme, w, layout);
 
     const blocks = this.orderBlocks([
       ...runningBlocks,
@@ -726,7 +730,7 @@ export class AgentWidget {
 
   /** Build individual RenderBlocks for queued agents. */
   private buildQueuedIndividualBlocks(
-    queued: AgentRecord[], theme: Theme, w: number, layout: AgentColumnLayout,
+    queued: AgentRecord[], visibleAgents: AgentRecord[], theme: Theme, w: number, layout: AgentColumnLayout,
   ): RenderBlock[] {
     const truncate = (line: string) => truncateToWidth(line, w);
     const blocks: RenderBlock[] = [];
@@ -735,7 +739,7 @@ export class AgentWidget {
       const name = padToVisibleWidth(getDisplayName(a.display.type), layout.nameWidth);
       const modelThinking = padToVisibleWidth(this.displayModelThinking(a, layout.modelThinkingWidth), layout.modelThinkingWidth);
       const desc = padToVisibleWidth(this.displayDescription(a, layout.descriptionWidth), layout.descriptionWidth);
-      const header = `  ${theme.fg(statusDisplay.color, statusDisplay.icon)}${this.renderStartTime(a, theme, "dim")} ${theme.fg("dim", name)}${NAME_COLUMN_GAP}${this.renderModelThinkingColumn(modelThinking, theme, layout)}${theme.fg("dim", desc)}`;
+      const header = `${agentHierarchyPrefix(a, visibleAgents)}${theme.fg(statusDisplay.color, statusDisplay.icon)}${this.renderStartTime(a, theme, "dim")} ${theme.fg("dim", name)}${NAME_COLUMN_GAP}${this.renderModelThinkingColumn(modelThinking, theme, layout)}${theme.fg("dim", desc)}`;
       blocks.push({ agent: a, header: truncate(header), continuations: [] });
     }
     return blocks;
@@ -750,9 +754,8 @@ export class AgentWidget {
   private renderBlock(block: RenderBlock, _isLast: boolean, isHighlighted: boolean, theme: Theme): string[] {
     let header = block.header;
     if (isHighlighted) {
-      if (header.startsWith("  ")) {
-        header = "→ " + header.slice(2);
-      }
+      // Replace only the shared leading indent so a child keeps its └ branch.
+      header = header.startsWith(" ") ? `→${header.slice(1)}` : `→ ${header}`;
     }
     return [header, ...block.continuations];
   }

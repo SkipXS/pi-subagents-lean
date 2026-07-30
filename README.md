@@ -7,7 +7,7 @@
 Spawn specialized agents with isolated sessions, controlled tool access, and per-type models with low baseline token overhead.
 
 > [!NOTE]
-> This repository is the actively developed [`SkipXS/pi-subagents-lean`](https://github.com/SkipXS/pi-subagents-lean) fork and renamed successor of [`AlexParamonov/pi-subagents-lite`](https://github.com/AlexParamonov/pi-subagents-lite), which originated as a focused fork of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents). It deliberately keeps a smaller scope: immediate foreground/background execution, without scheduling or join modes. Subagents cannot spawn further subagents.
+> This repository is the actively developed [`SkipXS/pi-subagents-lean`](https://github.com/SkipXS/pi-subagents-lean) fork and renamed successor of [`AlexParamonov/pi-subagents-lite`](https://github.com/AlexParamonov/pi-subagents-lite), which originated as a focused fork of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents). It deliberately keeps a smaller scope: immediate foreground/background execution, without scheduling or join modes. Controlled role-based delegation is bounded by configured depth; the default permits one nested child layer (depth 2).
 
 ## Minimal-Fluff, Schema-First Design
 
@@ -26,6 +26,10 @@ It is intentionally **minimal fluff**, not zero context: by default, parent turn
 
 **Result:** foreground and background agents, custom agent types, global concurrency, cost tracking, steering, model overrides, and status visibility with a lean parent-session footprint.
 
+## Deprecated shell compatibility
+
+Published `src/shell` paths still export `enterSubagentSpawn`, `exitSubagentSpawn`, and `isInsideSubagentSpawn` for older integrations. They are deprecated: migrate child setup to the manager-created AsyncLocalStorage runtime. The legacy pair is only an inert-extension-registration marker, so use `enterSubagentSpawn()` and `exitSubagentSpawn()` in a `finally` block around old setup code. It cannot provide async isolation, access root shell controls, or clear an active child runtime's guards; AsyncLocalStorage remains authoritative.
+
 ## Features
 
 - **Three lean tool schemas** — `Agent` (spawn), `StopAgent` (stop), `AgentStatus` (list)
@@ -33,7 +37,8 @@ It is intentionally **minimal fluff**, not zero context: by default, parent turn
 - **Custom agent types** — `.md` files with flat YAML-style frontmatter (tools, model, thinking, turn/token limits)
 - **Manual spawn** — from `/agents`, no LLM round-trip; full control over model, thinking, turns, tokens, background
 - **Model & thinking resolution** — shared 6-level precedence chain; set once, forget
-- **Concurrency** — global agent slot limit with automatic queuing
+- **Controlled nesting** — only frontmatter-authorized roles can create one foreground child layer; parent and child share one concurrency slot
+- **Concurrency** — global agent slot limit with automatic queuing; nested foreground work borrows its parent slot
 - **Steering** — inject mid-execution guidance into running agents
 - **Cost & usage tracking** — input/output/cache tokens and dollar cost per agent (toggle in stats)
 - **Live widget** — persistent status bar with running/completed agents, full and compact modes
@@ -135,11 +140,11 @@ Bundled defaults ship as inspectable Markdown definitions and are enabled by def
 
 | Type | Purpose | Default policy |
 |---|---|---|
-| `architect` | Cross-component design and technical trade-offs | Read-only tools; no extensions or skills |
-| `scout` | Repository discovery, tracing, and failure investigation | Read-only tools; no extensions or skills |
-| `implementer` | Bounded code, test, configuration, or documentation changes | Read/write tools; no extensions or skills |
-| `reviewer` | Independent correctness, regression, and security review | Read-only tools; no extensions or skills |
-| `verifier` | Reproduction, checks, tests, and failure analysis | Read-only tools; no extensions or skills |
+| `architect` | Cross-component design and technical trade-offs | Read-only tools; no extensions or skills; may foreground-delegate to `scout` (max. 2 total, one active) |
+| `scout` | Repository discovery, tracing, and failure investigation | Read-only leaf; no extensions or skills |
+| `implementer` | Bounded code, test, configuration, or documentation changes | Read/write tools; no extensions or skills; may foreground-delegate to `scout`, `verifier`, or `reviewer` (max. 4 total, one active) |
+| `reviewer` | Independent correctness, regression, and security review | Read-only leaf; no extensions or skills |
+| `verifier` | Reproduction, checks, tests, and failure analysis | Read-only leaf; no extensions or skills |
 
 Here, “read-only tools” means `read`, `grep`, and `bash`; shell commands still depend on the agent instructions and project policy.
 
@@ -156,6 +161,8 @@ skills: false
 model: zai/glm-5.2
 thinking: high
 max_turns: 80
+delegate_to: [scout, reviewer]
+max_child_agents: 2
 ---
 
 You are a security review specialist. Analyze code for vulnerabilities,
@@ -181,7 +188,15 @@ A minimal agent — just `name` and `description` — gets all currently active 
 | `thinking` | string | inherit parent | One of: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
 | `max_turns` | number | unlimited | Soft turn limit. The agent receives a wrap-up steer at the limit and is hard-aborted after the configured grace turns (`graceTurns: 0` aborts on the next turn). |
 | `max_tokens` | number | unlimited | Max output tokens per LLM response. Injected into provider request payloads. |
+| `delegate_to` | `string[]` | none | Exact agent roles this agent may invoke from its child runtime. Omit to prohibit delegation. |
+| `max_child_agents` | number | `1` with `delegate_to`, otherwise `0` | Maximum total direct foreground children for this agent. Requires `delegate_to`; an omitted limit permits one child for a delegating role, while leaves always have capacity `0`; negative values normalize to `0`. |
 | `hidden` | `true` \| `false` | `false` | `true` removes the type from the parent orchestration catalog and spawn picker. It remains inspectable in catalog/settings views and callable by exact name. |
+
+### Nested delegation
+
+Nested delegation is opt-in per parent role: set `delegate_to` and, optionally, a positive `max_child_agents` (an omitted limit permits one child). The child sees the same fixed `Agent` schema, but its locally registered proxy accepts only canonically resolved listed roles (including explicitly allowed hidden roles), always runs foreground, inherits its parent CWD/worktree, and cannot select a worktree. A parent has at most one active child; nested background execution is not supported. Its concise catalog is sanitized and bounded; it has no `StopAgent` or `AgentStatus` registration. The proxy closes over the root manager and coordinator instead of creating child-global state. The manager centrally validates the captured parent catalog, permission, child budget, active-child state, and depth before every nested spawn; it records parent/depth/waiting-child hierarchy, borrows the parent's existing concurrency slot for the foreground handoff, and cascades parent cancellation to every descendant. Configure **Max nesting depth** under `/agents` → **Settings** → **Execution**: depth `1` permits root children only, while depth `2` (the default and hard maximum) permits their children. No agent can create a depth-3 child.
+
+The bundled `architect` role may delegate up to two focused discovery tasks to `scout`; the bundled `implementer` role may delegate up to four focused tasks to `scout`, `reviewer`, or `verifier`. Other bundled roles do not delegate unless their frontmatter is overridden.
 
 ### Tool control (`tools` / `exclude_tools`)
 
@@ -267,7 +282,7 @@ Management menu with four sections:
 - **Agent catalog** — inspect discovered agent definitions, effective model/thinking sources, and tool/skill/extension policies
 - **Settings**
   - **Agent settings** — agent availability plus effective model and thinking with global/per-agent session and saved overrides
-  - **Execution** — global concurrency, force background, default max turns, and grace turns
+  - **Execution** — global concurrency, force background, default max turns, bounded nesting depth, and grace turns
   - **Widget** — all appearance, sizing, behavior, and individual usage-stat controls in one menu
   - **System prompt, context, skills & extensions** — prompt construction, custom prompt-file creation, parent orchestration, context, and implicit resource loading
 
@@ -316,6 +331,7 @@ The conversation viewer streams thinking and response text live as deltas arrive
 | `defaultMaxTurns` | unlimited | Soft turn limit used when an agent definition does not set `max_turns`. |
 | `forceBackground` | `false` | Run every spawn in the background. |
 | `graceTurns` | `6` | Additional turns after the soft limit before hard abort. |
+| `maxNestingDepth` | `2` | `1` permits root children only; `2` permits their children. Values normalize to `1` or `2`; depth 2 is the hard runtime maximum. |
 | `disableDefaultAgents` | `false` | Exclude bundled types on the next parent turn and during discovery. |
 | `systemPromptMode` | `replace` | `replace`, `inherit`, or `custom`; custom content comes from `~/.pi/agent/subagents-lean-prompt.md`. |
 | `includeContextFiles` | `true` | Include applicable project and user `AGENTS.md` files in subagent context. |
@@ -334,6 +350,7 @@ The conversation viewer streams thinking and response text live as deltas arrive
     "defaultMaxTurns": 40,
     "forceBackground": true,
     "graceTurns": 6,
+    "maxNestingDepth": 2,
     "showCost": true,
     "showTools": false,
     "showTurns": true,

@@ -29,7 +29,7 @@ import { showExecutionMenu } from "../../../src/ui/menu/menu-execution.js";
 
 describe("showExecutionMenu", () => {
   beforeEach(() => {
-    mockModules.mockConfig.agent = { default: null, forceBackground: false, defaultMaxTurns: undefined, graceTurns: 6 };
+    mockModules.mockConfig.agent = { default: null, forceBackground: false, defaultMaxTurns: undefined, maxNestingDepth: 2, graceTurns: 6 };
     mockModules.mockConfig.concurrency = { default: 4 };
     settingsLists = [];
     inputs = [];
@@ -39,7 +39,7 @@ describe("showExecutionMenu", () => {
   it("contains the global execution defaults", async () => {
     await showExecutionMenu(createMockCtx());
     expect(settingsLists[0].items.map((item: any) => item.id)).toEqual([
-      "defaultConcurrency", "forceBackground", "defaultMaxTurns", "graceTurns",
+      "defaultConcurrency", "forceBackground", "defaultMaxTurns", "maxNestingDepth", "graceTurns",
     ]);
   });
 
@@ -66,6 +66,18 @@ describe("showExecutionMenu", () => {
     maxTurns.submenu("30", vi.fn());
     inputs[1].onSubmit("");
     expect(mockModules.mockConfig.agent.defaultMaxTurns).toBeUndefined();
+  });
+
+  it("sets bounded nesting depth", async () => {
+    await showExecutionMenu(createMockCtx());
+    const depth = settingsLists[0].items.find((item: any) => item.id === "maxNestingDepth");
+    depth.submenu("2", vi.fn());
+    inputs[0].onSubmit("2");
+    expect(mockModules.mockConfig.agent.maxNestingDepth).toBe(2);
+
+    depth.submenu("2", vi.fn());
+    inputs[1].onSubmit("3");
+    expect(mockModules.mockConfig.agent.maxNestingDepth).toBe(2);
   });
 
   it("sets grace turns and accepts zero", async () => {

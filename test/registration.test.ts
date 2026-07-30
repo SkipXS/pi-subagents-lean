@@ -79,6 +79,7 @@ vi.mock("../src/shell.js", () => ({
   getStore: state.getStore,
   getWidget: () => state.widget,
   isInsideSubagentSpawn: () => false,
+  getSubagentRuntimeContext: () => undefined,
   setCoordinator: vi.fn(),
   setManager: (manager: unknown) => { state.manager = manager; },
   setPiInstance: (pi: unknown) => { state.pi = pi; },

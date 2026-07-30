@@ -3,7 +3,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { SelectList, type SelectItem } from "@earendil-works/pi-tui";
 import { getAgentConfig, getAllTypes } from "../../agents/agent-types.js";
-import type { AgentConfig } from "../../agents/types.js";
+import { getEffectiveMaxChildAgents, type AgentConfig } from "../../agents/types.js";
 import type { SettingSource } from "../../models/model-precedence.js";
 import { normalizeThinkingLevel } from "../../models/thinking.js";
 import { buildOrchestrationPrompt } from "../../prompt/orchestration.js";
@@ -35,6 +35,15 @@ function formatPolicy(value: true | string[] | false, excluded?: string[]): stri
   if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "none";
   if (value === false) return "none";
   return excluded?.length ? `all except ${excluded.join(", ")}` : "all";
+}
+
+function formatDelegationPolicy(cfg: AgentConfig): string {
+  const allowedRoles = cfg.delegateTo?.map(sanitizeDisplayText).filter(Boolean) ?? [];
+  const budget = getEffectiveMaxChildAgents(cfg);
+  const policy = allowedRoles.length > 0
+    ? `allowed delegate_to: ${allowedRoles.join(", ")}`
+    : "leaf (no delegate_to)";
+  return `${policy}; effective total child budget: ${budget}; one foreground child at a time; depth 2 hard limit`;
 }
 
 function formatTools(
@@ -99,6 +108,7 @@ function formatAgentConfiguration(
   lines.push(`Skills: ${formatPolicy(skills)}${skillsNote}`);
   lines.push(`Preloaded skills: ${formatPolicy(cfg.preloadSkills ?? false)}`);
   lines.push(`Extensions: ${formatPolicy(extensions, Array.isArray(cfg.extensions) ? undefined : cfg.excludeExtensions)}`);
+  lines.push(`Delegation: ${formatDelegationPolicy(cfg)}`);
   if (cfg.source) lines.push(`Source: ${cfg.source}`);
   return lines.join("\n");
 }

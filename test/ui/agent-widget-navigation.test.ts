@@ -303,6 +303,21 @@ describe("navigation roster", () => {
     expect(widget.navSelect()?.id).toBe("f1");
   });
 
+  it("keeps navigation on a parent before its newer child", () => {
+    const parent = makeFinishedAgent("parent");
+    parent.lifecycle.startedAt = new Date(2024, 0, 2, 9, 1).getTime();
+    const child = makeFinishedAgent("child");
+    child.lifecycle.startedAt = new Date(2024, 0, 2, 9, 3).getTime();
+    child.hierarchy = { parentId: "parent" };
+    (manager as any).listAgents = () => [child, parent];
+
+    widget.navActivate();
+
+    expect(widget.navSelect()?.id).toBe("parent");
+    widget.navDown();
+    expect(widget.navSelect()?.id).toBe("child");
+  });
+
   it("preserves manager order for equal startedAt values across statuses", () => {
     const startedAt = new Date(2024, 0, 2, 9, 3).getTime();
     const queued = makeQueuedAgent("q1");
@@ -406,6 +421,20 @@ describe("navigation rendering", () => {
       const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
       const agentLine = lines[1];
       expect(agentLine).toContain("→");
+    });
+
+    it("keeps the navigation cursor and hierarchy branch on a selected nested row", () => {
+      const parent = makeFinishedAgent("parent");
+      const child = makeFinishedAgent("child");
+      child.hierarchy = { parentId: "parent" };
+      (manager as any).listAgents = () => [parent, child];
+      widget.navActivate();
+      widget.navDown();
+
+      const lines = (widget as any).renderWidget(makeMockTUI(), makeMockTheme());
+      const childLine = lines.find((line: string) => line.includes("Finished agent child"));
+      expect(childLine).toContain("→└");
+      expect(childLine).toContain("Finished agent child");
     });
 
     it("does not render '→' marker when navigation is inactive", () => {

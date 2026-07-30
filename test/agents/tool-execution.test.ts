@@ -32,6 +32,8 @@ const {
   mockModelSettingFor,
   mockThinkingSettingFor,
   mockCoordinatorSpawn,
+  mockCoordinatorSpawnNested,
+  mockNestedPreflight,
 } = vi.hoisted(() => ({
   mockValidateWorktreePath: vi.fn(),
   mockSpawn: vi.fn().mockReturnValue("agent-id-123"),
@@ -72,6 +74,8 @@ const {
     }
     return { agentId: id, record };
   }),
+  mockCoordinatorSpawnNested: vi.fn(),
+  mockNestedPreflight: vi.fn(),
 }));
 
 vi.mock("../../src/spawn/worktree-validator.js", () => ({
@@ -105,9 +109,15 @@ vi.mock("../../src/utils.js", () => ({
 }));
 
 vi.mock("../../src/shell.js", () => ({
+  createSubagentRuntimeContext: (executeNestedAgent: any, settings: any) => Object.freeze({
+    isChildRuntime: true as const,
+    executeNestedAgent,
+    settings,
+  }),
+  runWithSubagentRuntime: (_runtime: unknown, work: () => Promise<unknown>) => work(),
   getStore: () => ({
     get agent() {
-      return { graceTurns: 5, forceBackground: false };
+      return { graceTurns: 5, forceBackground: false, maxNestingDepth: 2 };
     },
     modelFor: mockModelFor,
     modelSettingFor: mockModelSettingFor,
@@ -128,6 +138,7 @@ vi.mock("../../src/shell.js", () => ({
   }),
   getCoordinator: () => ({
     spawn: mockCoordinatorSpawn,
+    spawnNested: mockCoordinatorSpawnNested,
     isBackground: vi.fn(() => false),
     scheduleNudge: vi.fn(),
     onAgentComplete: vi.fn(),
@@ -143,9 +154,16 @@ vi.mock("../../src/agents/usage.js", () => ({
 }));
 
 // Import after mocks are in place
-import { executeAgentTool, toolCallListener } from "../../src/agents/tool-execution.js";
+import { createNestedAgentExecutor, executeAgentTool, executeNestedAgentTool, toolCallListener } from "../../src/agents/tool-execution.js";
+import { createSubagentRuntimeContext } from "../../src/shell.js";
 import * as agentTypes from "../../src/agents/agent-types.js";
 import * as utils from "../../src/utils.js";
+
+const nestedRuntimeSettings = {
+  agent: { graceTurns: 5 },
+  modelFor: mockModelFor,
+  thinkingSettingFor: mockThinkingSettingFor,
+} as any;
 
 /* ------------------------------------------------------------------ */
 /*  Factories                                                         */
@@ -270,6 +288,208 @@ describe("executeAgentTool — explicit agent type", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("Unknown agent type: unknown-agent");
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+});
+
+describe("executeNestedAgentTool — guard matrix", () => {
+  const runtime = (_parent: any, coordinator = mockCoordinatorSpawnNested) => createSubagentRuntimeContext(
+    createNestedAgentExecutor(
+      "parent",
+      {} as any,
+      { preflightNested: mockNestedPreflight } as any,
+      { spawnNested: coordinator } as any,
+      nestedRuntimeSettings,
+    ),
+    nestedRuntimeSettings,
+  );
+  const parent = (overrides: Record<string, unknown> = {}) => ({
+    id: "parent",
+    display: { type: "implementer", description: "parent" },
+    lifecycle: { status: "running" },
+    hierarchy: {
+      depth: 1,
+      childIds: [],
+      delegateTo: ["scout"],
+      maxChildAgents: 1,
+      agentCatalog: new Map([["scout", { name: "scout", description: "Scout", systemPrompt: "" }]]),
+    },
+    ...overrides,
+  });
+  const nestedCtx = { modelRegistry: {}, model: undefined, thinkingLevel: undefined } as any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockNestedPreflight.mockImplementation((_parentId: string, type: string) => {
+      const currentParent = parent();
+      const resolvedType = currentParent.hierarchy.agentCatalog.has(type) ? type : undefined;
+      if (!resolvedType) return { ok: false, error: `Unknown agent type: ${type || "(missing)"}` };
+      return { ok: true, parent: currentParent, type: resolvedType, agentConfig: currentParent.hierarchy.agentCatalog.get(resolvedType) };
+    });
+  });
+
+  it("returns cancellation before inspecting nested input", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await executeNestedAgentTool(runtime(parent()), "call", {}, controller.signal, undefined, nestedCtx);
+
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+    expect(mockNestedPreflight).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["background", { run_in_background: true }, "Nested agents must run in the foreground"],
+    ["worktree", { worktree_path: "/other" }, "Nested agents cannot select a worktree"],
+  ])("rejects nested %s requests", async (_name, params, expected) => {
+    const result = await executeNestedAgentTool(runtime(parent()), "call", {
+      agent: "scout", prompt: "Inspect", ...params,
+    }, undefined, undefined, nestedCtx);
+
+    expect(result.content[0].text).toBe(expected);
+    expect(mockNestedPreflight).not.toHaveBeenCalled();
+  });
+
+  it("returns manager preflight errors before calling the coordinator", async () => {
+    mockNestedPreflight.mockReturnValueOnce({ ok: false, error: "Nested agent parent is no longer running" });
+    const invalidParent = await executeNestedAgentTool(runtime(parent()), "call", { agent: "scout", prompt: "Inspect" }, undefined, undefined, nestedCtx);
+    expect(invalidParent.content[0].text).toBe("Nested agent parent is no longer running");
+
+    // A depth-2 parent is the maximum allowed parent depth.
+    mockNestedPreflight.mockReturnValueOnce({ ok: false, error: "Maximum nesting depth reached" });
+    const atLimit = await executeNestedAgentTool(runtime(parent()), "call", { agent: "scout", prompt: "Inspect" }, undefined, undefined, nestedCtx);
+    expect(atLimit.content[0].text).toBe("Maximum nesting depth reached");
+    expect(mockCoordinatorSpawnNested).not.toHaveBeenCalled();
+  });
+
+  it("uses manager preflight for delegation-policy errors", async () => {
+    mockNestedPreflight.mockReturnValueOnce({ ok: false, error: "This agent is not permitted to delegate" });
+    const result = await executeNestedAgentTool(runtime(parent()), "call", { agent: "scout", prompt: "Inspect" }, undefined, undefined, nestedCtx);
+
+    expect(result.content[0].text).toBe("This agent is not permitted to delegate");
+    expect(mockCoordinatorSpawnNested).not.toHaveBeenCalled();
+  });
+
+  it("returns manager catalog permission errors without consulting the mutable registry", async () => {
+    mockNestedPreflight
+      .mockReturnValueOnce({ ok: false, error: "Unknown agent type: missing" })
+      .mockReturnValueOnce({ ok: false, error: 'Agent "scout" is not allowed. Allowed child agents: reviewer' });
+    const unknown = await executeNestedAgentTool(runtime(parent()), "call", { agent: "missing", prompt: "Inspect" }, undefined, undefined, nestedCtx);
+    expect(unknown.content[0].text).toBe("Unknown agent type: missing");
+    const unpermitted = await executeNestedAgentTool(runtime(parent()), "call", { agent: "scout", prompt: "Inspect" }, undefined, undefined, nestedCtx);
+    expect(unpermitted.content[0].text).toBe('Agent "scout" is not allowed. Allowed child agents: reviewer');
+    expect(agentTypes.resolveType).not.toHaveBeenCalled();
+    expect(agentTypes.getAgentConfig).not.toHaveBeenCalled();
+    expect(mockCoordinatorSpawnNested).not.toHaveBeenCalled();
+  });
+
+  it("requires a non-empty nested prompt", async () => {
+    const result = await executeNestedAgentTool(runtime(parent()), "call", { agent: "scout", prompt: "  " }, undefined, undefined, nestedCtx);
+
+    expect(result.content[0].text).toBe("Agent prompt is required");
+    expect(mockCoordinatorSpawnNested).not.toHaveBeenCalled();
+  });
+
+  it("returns a compact coordinator error", async () => {
+    mockCoordinatorSpawnNested.mockRejectedValueOnce(new Error("nested startup failed"));
+    const result = await executeNestedAgentTool(runtime(parent()), "call", { agent: "scout", prompt: "Inspect" }, undefined, undefined, nestedCtx);
+
+    expect(result.content[0].text).toBe("nested startup failed");
+    expect(mockCoordinatorSpawnNested).toHaveBeenCalledOnce();
+  });
+});
+
+describe("executeNestedAgentTool — worktree overlay", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockModelFor.mockImplementation((_: string, parentModelId: string, agentConfig?: any) => agentConfig?.model ?? parentModelId);
+    mockThinkingSettingFor.mockImplementation((_: string, parentThinking: any, agentConfig?: any, explicitThinking?: any) => ({
+      value: explicitThinking ?? agentConfig?.thinkingLevel ?? parentThinking,
+      source: explicitThinking ? "spawn" : "parent",
+    }));
+  });
+
+  it("uses detached preflight config for nested model and thinking", async () => {
+    const localConfig = {
+      name: "local-reviewer",
+      description: "Local reviewer",
+      systemPrompt: "Use local instructions.",
+      model: "local/local-model",
+      thinkingLevel: "high",
+      maxTurns: 7,
+    };
+    mockNestedPreflight.mockReturnValue({ ok: true, type: "local-reviewer", agentConfig: localConfig });
+    (utils.findModelInRegistry as any).mockReturnValue({ provider: "local", id: "local-model" });
+    const completed = {
+      id: "child", result: "done",
+      display: { type: "local-reviewer", description: "Local reviewer" },
+      lifecycle: { status: "completed", startedAt: 0, completedAt: 1 }, execution: {},
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+    };
+    mockCoordinatorSpawnNested.mockResolvedValue({ agentId: "child", record: completed });
+
+    const result = await executeNestedAgentTool(
+      createSubagentRuntimeContext(
+        createNestedAgentExecutor(
+          "parent", {} as any, { preflightNested: mockNestedPreflight } as any,
+          { spawnNested: mockCoordinatorSpawnNested } as any,
+          nestedRuntimeSettings,
+        ),
+        nestedRuntimeSettings,
+      ),
+      "call", { agent: "local-reviewer", prompt: "Review this" }, undefined, undefined,
+      { modelRegistry: {}, model: undefined, thinkingLevel: undefined } as any,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(mockCoordinatorSpawnNested).toHaveBeenCalledWith(
+      "parent", expect.anything(), expect.anything(), expect.objectContaining({
+        type: "local-reviewer",
+        agentConfig: localConfig,
+        model: { provider: "local", id: "local-model" },
+        thinkingLevel: "high",
+      }),
+    );
+  });
+
+  it("reports a stopped child as cancelled while its parent remains active", async () => {
+    const parent = {
+      id: "parent",
+      display: { type: "implementer", description: "parent" },
+      lifecycle: { status: "running" },
+      hierarchy: {
+        depth: 1,
+        childIds: ["child"],
+        delegateTo: ["scout"],
+        maxChildAgents: 1,
+        waitingOnChildId: "child",
+        agentCatalog: new Map([["scout", { name: "scout", description: "Scout", systemPrompt: "" }]]),
+      },
+    };
+    const child = {
+      id: "child", result: "partial response",
+      display: { type: "scout", description: "Scout" },
+      lifecycle: { status: "stopped", startedAt: 0, completedAt: 1 }, execution: {},
+      hierarchy: { depth: 2, parentId: "parent", childIds: [], delegateTo: [], maxChildAgents: 0 },
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+    };
+    mockNestedPreflight.mockReturnValue({ ok: true, parent, type: "scout", agentConfig: parent.hierarchy.agentCatalog.get("scout") });
+    mockCoordinatorSpawnNested.mockResolvedValue({ agentId: "child", record: child });
+
+    const result = await executeNestedAgentTool(
+      createSubagentRuntimeContext(
+        createNestedAgentExecutor(
+          "parent", {} as any, { preflightNested: mockNestedPreflight } as any,
+          { spawnNested: mockCoordinatorSpawnNested } as any,
+          nestedRuntimeSettings,
+        ),
+        nestedRuntimeSettings,
+      ),
+      "call", { agent: "scout", prompt: "Inspect" }, undefined, undefined,
+      { modelRegistry: {}, model: undefined, thinkingLevel: undefined } as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+    expect(parent.lifecycle.status).toBe("running");
   });
 });
 

@@ -24,15 +24,17 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { setPiInstance, isInsideSubagentSpawn } from "./shell.js";
+import { getSubagentRuntimeContext, isInsideSubagentSpawn, setPiInstance } from "./shell.js";
 import { registerTools } from "./registration.js";
 import { setupEventListeners } from "./events.js";
 
 export default function (pi: ExtensionAPI) {
-  // Subagents re-load this extension under their own pi/runtime. Stay inert so
-  // we never overwrite the parent-owned shell (pi, sessionCtx, manager, ...).
-  // The completion nudge relies on those still pointing at the parent session.
-  if (isInsideSubagentSpawn()) return;
+  // Child sessions receive their local Agent proxy through createAgentSession's
+  // customTools API. Stay inert if this root extension is encountered while
+  // binding child extensions so it cannot register root control tools.
+  // The deprecated marker only preserves old inert-registration behavior.
+  // ALS remains the sole authority for child shell isolation and root guards.
+  if (getSubagentRuntimeContext() || isInsideSubagentSpawn()) return;
   setPiInstance(pi);
   registerTools(pi);
   setupEventListeners(pi);

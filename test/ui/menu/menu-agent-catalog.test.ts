@@ -146,6 +146,25 @@ describe("showAgentCatalog", () => {
     expect(message).toContain("Skills: all");
     expect(message).toContain("Preloaded skills: none");
     expect(message).toContain("Extensions: all");
+    expect(message).toContain("Delegation: leaf (no delegate_to); effective total child budget: 0; one foreground child at a time; depth 2 hard limit");
+  });
+
+  it("shows effective delegation permissions and child limits", async () => {
+    (getAllTypes as any).mockReturnValue(["Coordinator"]);
+    (getAgentConfig as any).mockReturnValue({
+      description: "Coordinates bounded work",
+      delegateTo: ["scout", "reviewer"],
+      maxChildAgents: 3,
+      systemPrompt: "Instructions",
+    });
+    const ctx = createMockCtx();
+    selectCatalogItems(ctx, ["agent:Coordinator", undefined]);
+
+    await showAgentCatalog(ctx);
+
+    expect(ctx.ui.notify.mock.calls[0][0]).toContain(
+      "Delegation: allowed delegate_to: scout, reviewer; effective total child budget: 3; one foreground child at a time; depth 2 hard limit",
+    );
   });
 
   it("shows cfg.systemPrompt as agent instructions rather than a runtime prompt", async () => {

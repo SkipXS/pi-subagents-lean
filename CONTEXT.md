@@ -1,6 +1,6 @@
 # pi-subagents-lean
 
-A lightweight pi extension that lets the parent model spawn autonomous subagents for focused tasks. This repository is the renamed `SkipXS/pi-subagents-lean` successor to `AlexParamonov/pi-subagents-lite`, itself derived from `tintinweb/pi-subagents`. Its scope intentionally excludes scheduling, join modes, and nested subagents.
+A lightweight pi extension that lets the parent model spawn autonomous subagents for focused tasks. This repository is the renamed `SkipXS/pi-subagents-lean` successor to `AlexParamonov/pi-subagents-lite`, itself derived from `tintinweb/pi-subagents`. Its scope intentionally excludes scheduling and join modes; bounded, foreground-only nested delegation is supported for explicitly configured roles.
 
 ## Language
 
@@ -78,7 +78,7 @@ A completion message delivered to the parent after a background subagent reaches
 
 **Agent record**
 
-The parent-owned runtime record containing lifecycle state, display metadata, execution handles, accumulated usage, and the final result or error.
+The parent-owned runtime record containing lifecycle state, display metadata, execution handles, accumulated usage, final result or error, and hierarchy metadata (parent, depth, direct children, and any child currently awaited).
 
 **Activity tracker**
 
@@ -109,5 +109,6 @@ The live transcript overlay for a subagent session. It supports scrolling, steer
 - The **orchestration prompt** advertises visible agent types only to the parent.
 - A subagent may run at a validated **working tree path** and use its trusted **working tree overlay**.
 - Foreground results return inline; background results arrive through a **nudge**.
-- The **agent record** owns lifecycle and usage data displayed by the **live widget** and **conversation viewer**.
+- The **agent record** owns lifecycle, hierarchy, and usage data displayed by the **live widget** and **conversation viewer**.
+- An explicitly configured **subagent** may foreground-delegate to its permitted child roles within the configured depth: root children are depth 1 and only their children may be depth 2. It inherits its CWD/worktree, may have only one active child, and receives no child `StopAgent` or `AgentStatus` tools. The manager centrally enforces the captured catalog, permission, depth, budget, and active-child checks.
 - The **soft turn limit** triggers wrap-up guidance; **grace turns** bound the remaining execution.

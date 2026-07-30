@@ -42,6 +42,15 @@ export async function showExecutionMenu(ctx: ExtensionCommandContext): Promise<v
       description: "Soft turn limit. Blank leaves it unlimited.",
     },
     {
+      id: "maxNestingDepth",
+      label: "Max nesting depth",
+      currentValue: String(store.agent.maxNestingDepth),
+      submenu: createNumericSubmenu(ctx, { min: 1, max: 2, required: true }, (parsed) =>
+        applyPersistedSetting(ctx, () => store.mutate.agent.setMaxNestingDepth(parsed), `Max nesting depth set to ${parsed}`),
+      ),
+      description: "1 permits root children only; 2 permits one child layer.",
+    },
+    {
       id: "graceTurns",
       label: "Grace turns",
       currentValue: String(store.agent.graceTurns),
