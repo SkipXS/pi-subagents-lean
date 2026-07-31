@@ -13,7 +13,7 @@
  * (tool result content) not internal call order.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { WorktreeValidationResult } from "../../src/spawn/worktree-validator.js";
 import { fakeCtx } from "../fixtures.ts";
 
@@ -37,8 +37,10 @@ const {
   mockCoordinatorSpawnNested,
   mockNestedPreflight,
   runtimeSettingsSnapshot,
+  liveStoreAgent,
 } = vi.hoisted(() => ({
   runtimeSettingsSnapshot: { current: undefined as any },
+  liveStoreAgent: { current: { graceTurns: 5, forceBackground: false, maxNestingDepth: 2 } },
   mockValidateWorktreePath: vi.fn(),
   mockRevalidateWorktreePath: vi.fn(async (_pi: unknown, path: string): Promise<WorktreeValidationResult> => ({
     ok: true, resolvedPath: path, worktreeRoot: path, label: "feature",
@@ -136,7 +138,7 @@ vi.mock("../../src/shell.js", () => {
   runWithSubagentRuntime: (_runtime: unknown, work: () => Promise<unknown>) => work(),
   getStore: () => ({
     get agent() {
-      return { graceTurns: 5, forceBackground: false, maxNestingDepth: 2 };
+      return liveStoreAgent.current;
     },
     modelFor: mockModelFor,
     modelSettingFor: mockModelSettingFor,
@@ -178,6 +180,11 @@ const nestedRuntimeSettings = {
   modelFor: mockModelFor,
   thinkingSettingFor: mockThinkingSettingFor,
 } as any;
+
+afterEach(() => {
+  runtimeSettingsSnapshot.current = undefined;
+  liveStoreAgent.current = { graceTurns: 5, forceBackground: false, maxNestingDepth: 2 };
+});
 
 /* ------------------------------------------------------------------ */
 /*  Factories                                                         */
@@ -306,6 +313,29 @@ describe("executeAgentTool — explicit agent type", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it("does not spawn when cancellation wins an asynchronous discovery preflight", async () => {
+    let releaseDiscovery!: () => void;
+    const discovery = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+    mockDiscoverNewAgents.mockReturnValueOnce(discovery);
+    (agentTypes.resolveType as any).mockReturnValueOnce(undefined);
+    const controller = new AbortController();
+
+    const run = executeAgentTool(
+      "cancelled-preflight",
+      makeParams(),
+      controller.signal,
+      undefined,
+      ctx,
+    );
+    await vi.waitFor(() => expect(mockDiscoverNewAgents).toHaveBeenCalledOnce());
+    controller.abort();
+    releaseDiscovery();
+
+    const result = await run;
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+    expect(mockCoordinatorSpawn).not.toHaveBeenCalled();
+  });
+
   it("accepts a pre-Eco runtime snapshot without calling missing mode resolvers", async () => {
     runtimeSettingsSnapshot.current = {
       agent: { graceTurns: 5 },
@@ -343,6 +373,151 @@ describe("executeAgentTool — explicit agent type", () => {
     expect(result).toMatchObject({ isError: true });
     expect(result.content[0].text).toContain("Eco model not found: missing/eco");
     expect(mockCoordinatorSpawn).not.toHaveBeenCalled();
+  });
+
+  it("uses an authenticated configured Eco model and forwards its resolved thinking", async () => {
+    const ecoModel = { provider: "cheap", id: "small", reasoning: true };
+    const getApiKeyAndHeaders = vi.fn(async () => ({ ok: true }));
+    ctx.modelRegistry.getApiKeyAndHeaders = getApiKeyAndHeaders;
+    ctx.modelRegistry.find.mockReturnValueOnce(ecoModel);
+    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "cheap", modelId: "small" });
+    runtimeSettingsSnapshot.current = {
+      agent: { graceTurns: 5 }, mode: "eco",
+      modelFor: mockModelFor, thinkingSettingFor: mockThinkingSettingFor,
+      modelSettingForMode: vi.fn(() => ({ value: "cheap/small", source: "config-agent", ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: true })),
+    };
+    mockGetRecord.mockReturnValueOnce({
+      id: "eco-agent",
+      display: { type: "general-purpose", description: "Eco task" },
+      lifecycle: { status: "running", startedAt: 0 },
+      execution: {},
+    });
+
+    const result = await executeAgentTool(
+      "configured-eco",
+      makeParams({ run_in_background: true }),
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(getApiKeyAndHeaders).toHaveBeenCalledWith(ecoModel);
+    expect(mockSpawn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "general-purpose",
+      "Do something useful",
+      expect.objectContaining({
+        model: ecoModel,
+        modelKey: "cheap/small",
+        thinkingLevel: "low",
+        isBackground: true,
+      }),
+    );
+    expect((utils.findModelInRegistry as any)).not.toHaveBeenCalled();
+  });
+
+  it("keeps the accepted runtime controls when the store changes during Eco preflight", async () => {
+    let resolveAuth!: (value: { ok: true }) => void;
+    const auth = new Promise<{ ok: true }>((resolve) => { resolveAuth = resolve; });
+    const ecoModel = { provider: "cheap", id: "small", reasoning: true };
+    ctx.modelRegistry.find.mockReturnValueOnce(ecoModel);
+    ctx.modelRegistry.getApiKeyAndHeaders = vi.fn(() => auth);
+    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "cheap", modelId: "small" });
+    runtimeSettingsSnapshot.current = {
+      agent: { graceTurns: 5, forceBackground: false }, mode: "eco",
+      modelFor: mockModelFor, thinkingSettingFor: mockThinkingSettingFor,
+      modelSettingForMode: vi.fn(() => ({ value: "cheap/small", source: "config-agent", ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: true })),
+    };
+    mockGetRecord.mockReturnValueOnce({
+      id: "stable-runtime",
+      result: "accepted result",
+      display: { type: "general-purpose", description: "Stable runtime" },
+      lifecycle: { status: "completed", startedAt: 0, completedAt: 1 },
+      execution: {},
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+    });
+
+    const run = executeAgentTool("stable-runtime", makeParams(), undefined, undefined, ctx);
+    await vi.waitFor(() => expect(ctx.modelRegistry.getApiKeyAndHeaders).toHaveBeenCalledOnce());
+    expect(mockCoordinatorSpawn).not.toHaveBeenCalled();
+
+    liveStoreAgent.current = { graceTurns: 99, forceBackground: true, maxNestingDepth: 2 };
+    resolveAuth({ ok: true });
+
+    const result = await run;
+    expect(result.content[0].text).toBe("accepted result");
+    expect(mockSpawn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "general-purpose",
+      "Do something useful",
+      expect.objectContaining({ graceTurns: 5, isBackground: false }),
+    );
+  });
+
+  it("reports cancellation instead of a late Eco authentication failure", async () => {
+    let rejectAuth!: (error: Error) => void;
+    const auth = new Promise<never>((_resolve, reject) => { rejectAuth = reject; });
+    const ecoModel = { provider: "cheap", id: "small", reasoning: true };
+    const parent = new AbortController();
+    ctx.modelRegistry.find.mockReturnValueOnce(ecoModel);
+    ctx.modelRegistry.getApiKeyAndHeaders = vi.fn(() => auth);
+    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "cheap", modelId: "small" });
+    runtimeSettingsSnapshot.current = {
+      agent: { graceTurns: 5 }, mode: "eco",
+      modelFor: mockModelFor, thinkingSettingFor: mockThinkingSettingFor,
+      modelSettingForMode: vi.fn(() => ({ value: "cheap/small", source: "config-agent", ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: true })),
+    };
+
+    const run = executeAgentTool("late-eco-cancel", makeParams(), parent.signal, undefined, ctx);
+    await vi.waitFor(() => expect(ctx.modelRegistry.getApiKeyAndHeaders).toHaveBeenCalledOnce());
+    parent.abort();
+    rejectAuth(new Error("authentication failed after cancellation"));
+
+    const result = await run;
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+    expect(mockCoordinatorSpawn).not.toHaveBeenCalled();
+  });
+
+  it("uses the fully resolved Default model without Eco authentication when Eco has no override", async () => {
+    const defaultModel = { provider: "default", id: "model", reasoning: true };
+    (utils.findModelInRegistry as any).mockReturnValueOnce(defaultModel);
+    runtimeSettingsSnapshot.current = {
+      agent: { graceTurns: 5 }, mode: "eco",
+      modelFor: mockModelFor, thinkingSettingFor: mockThinkingSettingFor,
+      modelSettingForMode: vi.fn(() => ({ value: "default/model", source: "config-global", ecoConfigured: false })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "high", source: "config-global", ecoConfigured: false })),
+    };
+    ctx.modelRegistry.getApiKeyAndHeaders = vi.fn();
+    mockGetRecord.mockReturnValueOnce({
+      id: "eco-fallback",
+      display: { type: "general-purpose", description: "Default fallback" },
+      lifecycle: { status: "running", startedAt: 0 },
+      execution: {},
+    });
+
+    const result = await executeAgentTool(
+      "eco-fallback",
+      makeParams({ run_in_background: true }),
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(mockSpawn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "general-purpose",
+      "Do something useful",
+      expect.objectContaining({ model: defaultModel, modelKey: "default/model", thinkingLevel: "high" }),
+    );
+    expect(ctx.modelRegistry.getApiKeyAndHeaders).not.toHaveBeenCalled();
   });
 
   it("keeps listener-injected settings distinct from explicit tool values at execution", async () => {
@@ -390,6 +565,55 @@ describe("executeAgentTool — explicit agent type", () => {
     expect(mockThinkingSettingFor).toHaveBeenLastCalledWith(
       "general-purpose", undefined, expect.any(Object), "high",
     );
+  });
+  it("keeps foreground terminal failures on the ToolResult contract", async () => {
+    const terminalCases = [
+      { status: "error", error: "runner setup failed", expected: "Agent failed: runner setup failed" },
+      { status: "aborted", error: undefined, expected: "Agent execution cancelled" },
+      { status: "stopped", error: undefined, expected: "Agent execution cancelled" },
+    ] as const;
+
+    for (const { status, error, expected } of terminalCases) {
+      mockGetRecord.mockReturnValueOnce({
+        id: `terminal-${status}`,
+        result: "partial response",
+        error,
+        display: { type: "general-purpose", description: "Test agent" },
+        lifecycle: { status, startedAt: 0, completedAt: 1 },
+        execution: { promise: Promise.resolve("partial response") },
+        stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+      });
+
+      const result = await executeAgentTool(`terminal-${status}`, makeParams(), undefined, undefined, ctx);
+
+      expect(result).toMatchObject({ isError: true });
+      expect(result.content[0].text).toBe(expected);
+    }
+  });
+
+  it("returns a spawn setup failure as an error result", async () => {
+    mockCoordinatorSpawn.mockRejectedValueOnce(new Error("spawn setup failed"));
+
+    const result = await executeAgentTool("spawn-failure", makeParams(), undefined, undefined, ctx);
+
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content[0].text).toBe("spawn setup failed");
+  });
+
+  it("reports cancellation when the root coordinator rejects after cancellation", async () => {
+    let rejectSpawn!: (error: Error) => void;
+    const pendingSpawn = new Promise<never>((_resolve, reject) => { rejectSpawn = reject; });
+    mockCoordinatorSpawn.mockReturnValueOnce(pendingSpawn);
+    const controller = new AbortController();
+
+    const run = executeAgentTool("cancelled-spawn", makeParams(), controller.signal, undefined, ctx);
+    await vi.waitFor(() => expect(mockCoordinatorSpawn).toHaveBeenCalledOnce());
+    controller.abort();
+    rejectSpawn(new Error("root coordinator failed after cancellation"));
+
+    const result = await run;
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
 
@@ -497,6 +721,28 @@ describe("executeNestedAgentTool — guard matrix", () => {
     expect(result.content[0].text).toBe("nested startup failed");
     expect(mockCoordinatorSpawnNested).toHaveBeenCalledOnce();
   });
+
+  it("reports cancellation when a nested coordinator rejects after cancellation", async () => {
+    let rejectSpawn!: (error: Error) => void;
+    const pendingSpawn = new Promise<never>((_resolve, reject) => { rejectSpawn = reject; });
+    mockCoordinatorSpawnNested.mockReturnValueOnce(pendingSpawn);
+    const controller = new AbortController();
+
+    const run = executeNestedAgentTool(
+      runtime(parent()),
+      "call",
+      { agent: "scout", prompt: "Inspect" },
+      controller.signal,
+      undefined,
+      nestedCtx,
+    );
+    await vi.waitFor(() => expect(mockCoordinatorSpawnNested).toHaveBeenCalledOnce());
+    controller.abort();
+    rejectSpawn(new Error("nested coordinator failed after cancellation"));
+
+    const result = await run;
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+  });
 });
 
 describe("executeNestedAgentTool — worktree overlay", () => {
@@ -590,6 +836,90 @@ describe("executeNestedAgentTool — worktree overlay", () => {
         model: ecoModel, modelKey: "accepted/eco", thinkingLevel: "low",
       }),
     );
+  });
+
+  it("reports cancellation instead of a late nested Eco authentication failure", async () => {
+    let rejectAuth!: (error: Error) => void;
+    const auth = new Promise<never>((_resolve, reject) => { rejectAuth = reject; });
+    const settings = {
+      agent: { graceTurns: 5 },
+      modelFor: vi.fn(() => "later/default"),
+      thinkingSettingFor: vi.fn(() => ({ value: "low", source: "parent" })),
+      modelSettingForMode: vi.fn(() => ({ value: "accepted/eco", source: "config-agent", ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: true })),
+    } as any;
+    const ecoModel = { provider: "accepted", id: "eco", reasoning: true };
+    const modelRegistry = {
+      find: vi.fn(() => ecoModel),
+      getApiKeyAndHeaders: vi.fn(() => auth),
+    };
+    mockNestedPreflight.mockReturnValue({
+      ok: true,
+      type: "scout",
+      agentConfig: { name: "scout", description: "Scout", systemPrompt: "" },
+    });
+    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "accepted", modelId: "eco" });
+    const controller = new AbortController();
+    const runtime = createSubagentRuntimeContext(
+      createNestedAgentExecutor(
+        "parent", {} as any, { preflightNested: mockNestedPreflight } as any,
+        { spawnNested: mockCoordinatorSpawnNested } as any, settings,
+      ),
+      settings,
+    );
+
+    const run = executeNestedAgentTool(runtime, "call", { agent: "scout", prompt: "Inspect" }, controller.signal, undefined, {
+      modelRegistry, model: undefined, thinkingLevel: undefined,
+    } as any);
+    await vi.waitFor(() => expect(modelRegistry.getApiKeyAndHeaders).toHaveBeenCalledOnce());
+    controller.abort();
+    rejectAuth(new Error("nested authentication failed after cancellation"));
+
+    const result = await run;
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+    expect(mockCoordinatorSpawnNested).not.toHaveBeenCalled();
+  });
+
+  it("does not spawn when nested Eco authentication completes after cancellation", async () => {
+    let resolveAuth!: (value: { ok: true }) => void;
+    const auth = new Promise<{ ok: true }>((resolve) => { resolveAuth = resolve; });
+    const settings = {
+      agent: { graceTurns: 5 },
+      modelFor: vi.fn(() => "later/default"),
+      thinkingSettingFor: vi.fn(() => ({ value: "low", source: "parent" })),
+      modelSettingForMode: vi.fn(() => ({ value: "accepted/eco", source: "config-agent", ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: true })),
+    } as any;
+    const ecoModel = { provider: "accepted", id: "eco", reasoning: true };
+    const modelRegistry = {
+      find: vi.fn(() => ecoModel),
+      getApiKeyAndHeaders: vi.fn(() => auth),
+    };
+    mockNestedPreflight.mockReturnValue({
+      ok: true,
+      type: "scout",
+      agentConfig: { name: "scout", description: "Scout", systemPrompt: "" },
+    });
+    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "accepted", modelId: "eco" });
+    const controller = new AbortController();
+    const runtime = createSubagentRuntimeContext(
+      createNestedAgentExecutor(
+        "parent", {} as any, { preflightNested: mockNestedPreflight } as any,
+        { spawnNested: mockCoordinatorSpawnNested } as any, settings,
+      ),
+      settings,
+    );
+
+    const run = executeNestedAgentTool(runtime, "call", { agent: "scout", prompt: "Inspect" }, controller.signal, undefined, {
+      modelRegistry, model: undefined, thinkingLevel: undefined,
+    } as any);
+    await vi.waitFor(() => expect(modelRegistry.getApiKeyAndHeaders).toHaveBeenCalledOnce());
+    controller.abort();
+    resolveAuth({ ok: true });
+
+    const result = await run;
+    expect(result.content[0].text).toBe("Agent execution cancelled");
+    expect(mockCoordinatorSpawnNested).not.toHaveBeenCalled();
   });
 
   it("reports a stopped child as cancelled while its parent remains active", async () => {

@@ -52,7 +52,8 @@ interface PiExec {
 
 /**
  * Run `git rev-parse --path-format=absolute --git-common-dir` and return the trimmed result.
- * Returns a failure result if the command fails or git is unavailable.
+ * Older Git versions do not understand `--path-format`; retry the legacy
+ * command in that case because its relative output is normalized below.
  */
 async function getGitCommonDir(
   pi: PiExec,
@@ -60,12 +61,9 @@ async function getGitCommonDir(
   notInRepoError: string,
   onWarning?: (msg: string) => void,
 ): Promise<{ ok: true; commonDir: string } | { ok: false; error: string }> {
+  let result: { code: number; stdout: string; stderr: string };
   try {
-    const result = await pi.exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, timeout: GIT_EXEC_TIMEOUT_MS });
-    if (result.code !== 0) return { ok: false, error: notInRepoError };
-    const commonDir = result.stdout.trim();
-    if (!commonDir) return { ok: false, error: notInRepoError };
-    return { ok: true, commonDir };
+    result = await pi.exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, timeout: GIT_EXEC_TIMEOUT_MS });
   } catch (err: unknown) {
     const msg = String(err instanceof Error ? err.message : err);
     if (msg.includes("ENOENT") || msg.includes("not found")) {
@@ -77,6 +75,21 @@ async function getGitCommonDir(
     onWarning?.(`git rev-parse --path-format=absolute --git-common-dir failed in ${cwd}: ${msg}`);
     return { ok: false, error: `worktree_path validation failed: git rev-parse failed: ${msg}` };
   }
+
+  const commonDir = result.stdout.trim();
+  if (result.code === 0 && commonDir) return { ok: true, commonDir };
+
+  // Git reports an unsupported option as a normal non-zero exit. A legacy
+  // retry is harmless for a non-repository (it fails with the same result)
+  // and keeps older Git installations compatible with worktree selection.
+  try {
+    const fallback = await pi.exec("git", ["rev-parse", "--git-common-dir"], { cwd, timeout: GIT_EXEC_TIMEOUT_MS });
+    const fallbackCommonDir = fallback.stdout.trim();
+    if (fallback.code === 0 && fallbackCommonDir) return { ok: true, commonDir: fallbackCommonDir };
+  } catch {
+    // Preserve the ordinary not-in-repository result for a failed retry.
+  }
+  return { ok: false, error: notInRepoError };
 }
 
 /** Whether a path uses Windows drive-letter or UNC syntax. */

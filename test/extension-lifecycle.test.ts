@@ -366,6 +366,31 @@ describe("extension session lifecycle", () => {
     expect(retry.unregister).toHaveBeenCalledOnce();
   });
 
+  it("ignores a stale startup rejection after shutdown and restart", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const first = createContext();
+    let rejectScan!: (error: Error) => void;
+    state.scanAndMerge.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectScan = reject;
+    }));
+
+    const staleStartup = listeners.get("session_start")!({}, first.ctx);
+    await vi.waitFor(() => expect(state.scanAndMerge).toHaveBeenCalledOnce());
+    await listeners.get("session_shutdown")!({}, first.ctx);
+
+    const retry = createContext();
+    await listeners.get("session_start")!({}, retry.ctx);
+    const staleFailure = new Error("stale agent scan failed");
+    rejectScan(staleFailure);
+
+    await expect(staleStartup).resolves.toBeUndefined();
+    expect(state.sessionCtx).toBe(retry.ctx);
+    expect(retry.onTerminalInput).toHaveBeenCalledOnce();
+
+    await listeners.get("session_shutdown")!({}, retry.ctx);
+  });
+
   it("cleans services when scanning fails and supports a retry", async () => {
     const listeners = new Map<string, (...args: any[]) => any>();
     setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
@@ -408,6 +433,43 @@ describe("extension session lifecycle", () => {
     expect(state.widget).toBeNull();
     expect(state.coordinator).toBeNull();
     expect(state.sessionCtx).toBeNull();
+  });
+
+  it("continues the full cleanup matrix when every disposer fails", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const first = createContext();
+    await listeners.get("session_start")!({}, first.ctx);
+
+    const terminalFailure = new Error("terminal unregister failed");
+    const coordinatorFailure = new Error("coordinator dispose failed");
+    const storeFailure = new Error("store dispose failed");
+    const widgetFailure = new Error("widget dispose failed");
+    const managerFailure = new Error("manager dispose failed");
+    first.unregister.mockImplementationOnce(() => { throw terminalFailure; });
+    state.coordinatorDisposeError = coordinatorFailure;
+    state.store.dispose.mockImplementationOnce(() => { throw storeFailure; });
+    state.widgets[0].dispose.mockImplementationOnce(() => { throw widgetFailure; });
+    state.managers[0].dispose.mockImplementationOnce(() => { throw managerFailure; });
+
+    await expect(listeners.get("session_shutdown")!({}, first.ctx)).rejects.toBe(terminalFailure);
+
+    expect(state.coordinators[0].dispose).toHaveBeenCalledOnce();
+    expect(state.store.dispose).toHaveBeenCalledOnce();
+    expect(state.widgets[0].dispose).toHaveBeenCalledOnce();
+    expect(state.managers[0].dispose).toHaveBeenCalledOnce();
+    expect(state.manager).toBeNull();
+    expect(state.widget).toBeNull();
+    expect(state.coordinator).toBeNull();
+    expect(state.sessionCtx).toBeNull();
+
+    // The rejected shutdown remains awaitable by the next start, which can
+    // create a clean runtime rather than inheriting any failed collaborator.
+    state.coordinatorDisposeError = undefined;
+    const retry = createContext();
+    await expect(listeners.get("session_start")!({}, retry.ctx)).resolves.toBeUndefined();
+    expect(retry.onTerminalInput).toHaveBeenCalledOnce();
+    await listeners.get("session_shutdown")!({}, retry.ctx);
   });
 
   it("unregisters terminal input when post-registration startup work fails", async () => {

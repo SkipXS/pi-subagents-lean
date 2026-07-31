@@ -24,8 +24,13 @@ const _loaderGetExtensionsResult: any = { extensions: [], errors: [], runtime: {
 // DefaultResourceLoader must be a regular function (not arrow) to support `new`
 function MockDefaultResourceLoader(this: any, opts: any) {
   this._opts = opts;
-  this.reload = vi.fn().mockResolvedValue(undefined);
-  this.getExtensions = vi.fn().mockReturnValue(_loaderGetExtensionsResult);
+  this.reload = vi.fn(async () => {
+    if (mockModules.loaderReloadFailure) throw mockModules.loaderReloadFailure;
+  });
+  this.getExtensions = vi.fn(() => {
+    if (mockModules.loaderExtensionsFailure) throw mockModules.loaderExtensionsFailure;
+    return _loaderGetExtensionsResult;
+  });
   _loaderOpts.push(opts);
 }
 
@@ -43,6 +48,8 @@ const mockModules = vi.hoisted(() => ({
   mockLoadProjectContextFiles: vi.fn().mockReturnValue([]),
   mockIncludeContextFiles: true as boolean,
   mockSystemPromptMode: "replace" as string,
+  loaderReloadFailure: undefined as Error | undefined,
+  loaderExtensionsFailure: undefined as Error | undefined,
   getLoaderOpts: () => _loaderOpts[_loaderOpts.length - 1] ?? null,
   clearLoaderOpts: () => { _loaderOpts.length = 0; },
   setLoaderExtensions: (exts: any) => { _loaderGetExtensionsResult.extensions = exts; },
@@ -153,6 +160,8 @@ function resetMocks() {
   mockModules.clearLoaderExtensions();
   mockModules.mockIncludeContextFiles = true;
   mockModules.mockSystemPromptMode = "replace";
+  mockModules.loaderReloadFailure = undefined;
+  mockModules.loaderExtensionsFailure = undefined;
   mockModules.mockLoadProjectContextFiles.mockReturnValue([]);
 
   mockModules.mockGetConfig.mockReturnValue({ ...defaultConfig });
@@ -1351,6 +1360,38 @@ describe("tools field — extension tool names and ext/all syntax", () => {
     expect(activeTools).toEqual([]);
   });
 
+  it("loads extensions while tools=false keeps extension and root tools out of the session", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue([
+      "read", "web_search", "Agent", "StopAgent", "AgentStatus",
+    ]);
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    mockModules.mockGetAgentConfig.mockReturnValue({
+      ...defaultAgentConfig,
+      extensions: true,
+      tools: false,
+    });
+    mockModules.mockGetConfig.mockReturnValue({
+      ...defaultConfig,
+      extensions: true,
+      tools: false,
+    });
+    mockModules.setLoaderExtensions([{
+      path: "/home/test/.pi/agent/extensions/tavily/index.ts",
+      tools: new Map([["web_search", {}]]),
+    }]);
+
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+
+    const loader = mockModules.getLoaderOpts();
+    const sessionOptions = mockModules.mockCreateAgentSession.mock.calls[0][0];
+    expect(loader.noExtensions).toBe(false);
+    expect(loader.extensionsOverride).toBeUndefined();
+    expect(session.bindExtensions).toHaveBeenCalledOnce();
+    expect(sessionOptions.tools).toEqual([]);
+    expect(session.setActiveToolsByName).toHaveBeenCalledWith([]);
+  });
+
   it("ext/all combined with named extension tool", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue([
@@ -2218,6 +2259,44 @@ describe("runAgent — abort and callback event paths", () => {
     })).rejects.toMatchObject({ name: "AbortError" });
 
     expect(mockModules.mockCreateAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the final assistant message when no text deltas were emitted", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    (session.messages as any).push({ role: "assistant", content: [{ type: "text", text: "completed from history" }] });
+    session.prompt = vi.fn().mockResolvedValue(undefined) as any;
+    mockModules.mockExtractText.mockImplementation((content: any[]) => content?.find((part) => part.type === "text")?.text ?? "");
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+
+    const result = await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+
+    expect(result.responseText).toBe("completed from history");
+  });
+
+  it.each([
+    ["resource reload", "loader reload failed", () => { mockModules.loaderReloadFailure = new Error("loader reload failed"); }],
+    ["extension discovery", "extension discovery failed", () => { mockModules.loaderExtensionsFailure = new Error("extension discovery failed"); }],
+  ] as const)("does not create a session when %s fails", async (_phase, message, fail) => {
+    fail();
+
+    await expect(runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi }))
+      .rejects.toThrow(message);
+
+    expect(mockModules.mockCreateAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("does not publish or prompt a session when session creation fails", async () => {
+    const creationFailure = new Error("session creation failed");
+    const onSessionCreated = vi.fn();
+    mockModules.mockCreateAgentSession.mockRejectedValueOnce(creationFailure);
+
+    await expect(runAgent(fakeCtx(), "test-agent", "do something", {
+      pi: fakePi,
+      onSessionCreated,
+    })).rejects.toBe(creationFailure);
+
+    expect(onSessionCreated).not.toHaveBeenCalled();
   });
 
   it("disposes a session created after the run was aborted during setup", async () => {

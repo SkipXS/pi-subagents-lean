@@ -269,6 +269,13 @@ export async function executeAgentTool(
   const runtimeSettingsSnapshot = typeof store.createSubagentRuntimeSettings === "function"
     ? store.createSubagentRuntimeSettings()
     : undefined;
+  // Keep scalar runtime controls stable across asynchronous model preflight.
+  // Older detached stores have no snapshot, so capture their live settings at
+  // the same boundary as the compatibility fallback.
+  const runtimeAgentSettings = runtimeSettingsSnapshot?.agent ?? store.agent;
+  const graceTurns = runtimeAgentSettings.graceTurns;
+  const forceBackground = runtimeAgentSettings.forceBackground;
+  const shouldRunInBackground = runInBackground || forceBackground;
   const modelSetting = runtimeSettingsSnapshot
     ? snapshotModelSetting(runtimeSettingsSnapshot, resolvedType, parentModelId, agentConfig, explicitModel)
     : modeModelSetting(store, resolvedType, parentModelId, agentConfig, explicitModel);
@@ -277,6 +284,7 @@ export async function executeAgentTool(
     try {
       model = await requireAvailableModel(modelSetting.value, ctx.modelRegistry, "Eco model");
     } catch (error) {
+      if (signal?.aborted) return cancelledResult();
       return errorResult(error instanceof Error ? error.message : String(error));
     }
   } else if (explicitModel !== undefined) {
@@ -309,27 +317,36 @@ export async function executeAgentTool(
     return errorResult("Agent execution is unavailable until the root session is ready");
   }
 
-  // Use SpawnCoordinator for unified spawn path
-  const result = await coordinator.spawn(getPiInstance(), ctx, {
-    type: resolvedType,
-    agentConfig,
-    prompt,
-    description,
-    model,
-    modelKey,
-    maxTurns,
-    thinkingLevel,
-    graceTurns: getStore().agent.graceTurns,
-    worktreePath: validatedWorktreePath,
-    worktreeLabel,
-    worktreeParentCwd: validatedWorktreePath ? parentCwd : undefined,
-    worktreeSelectionPath: validatedWorktreePath ? rawWorktreePath : undefined,
-    agentCatalog,
-    invocation: { modelName, thinkingLevel, maxTurns },
-    runtimeSettingsSnapshot,
-    runInBackground: runInBackground || getStore().agent.forceBackground,
-    signal,
-  });
+  // Use SpawnCoordinator for unified spawn path. A synchronous acceptance/setup
+  // failure is an expected tool error: keep the internal executor on its
+  // ToolResult contract, while registration.ts translates it to Pi's public
+  // throwing contract.
+  let result: Awaited<ReturnType<SpawnCoordinator["spawn"]>>;
+  try {
+    result = await coordinator.spawn(getPiInstance(), ctx, {
+      type: resolvedType,
+      agentConfig,
+      prompt,
+      description,
+      model,
+      modelKey,
+      maxTurns,
+      thinkingLevel,
+      graceTurns,
+      worktreePath: validatedWorktreePath,
+      worktreeLabel,
+      worktreeParentCwd: validatedWorktreePath ? parentCwd : undefined,
+      worktreeSelectionPath: validatedWorktreePath ? rawWorktreePath : undefined,
+      agentCatalog,
+      invocation: { modelName, thinkingLevel, maxTurns },
+      runtimeSettingsSnapshot,
+      runInBackground: shouldRunInBackground,
+      signal,
+    });
+  } catch (error) {
+    if (signal?.aborted) return cancelledResult();
+    return errorResult(error instanceof Error ? error.message : String(error));
+  }
 
   const { agentId, record } = result;
 
@@ -339,7 +356,7 @@ export async function executeAgentTool(
     return cancelledResult(buildAgentDetails(record, { includeStatus: true }));
   }
 
-  if (runInBackground || getStore().agent.forceBackground) {
+  if (shouldRunInBackground) {
     const isActive = record.lifecycle.status === "queued" || record.lifecycle.status === "running";
     const details = buildAgentDetails(record, isActive ? undefined : { includeStatus: true });
     if (!isActive) {
@@ -358,7 +375,7 @@ export async function executeAgentTool(
   // The manager bridges the parent signal to its own child controller. Once
   // the foreground tool call is cancelled, never turn its partial response
   // into a misleading successful Agent result.
-  if (signal?.aborted || record.lifecycle.status === "aborted") {
+  if (signal?.aborted || record.lifecycle.status === "aborted" || record.lifecycle.status === "stopped") {
     return cancelledResult(details);
   }
 
@@ -438,6 +455,7 @@ async function executeBoundNestedAgent(
     try {
       model = await requireAvailableModel(modelSetting.value, ctx.modelRegistry, "Eco model");
     } catch (error) {
+      if (signal?.aborted) return cancelledResult();
       return errorResult(error instanceof Error ? error.message : String(error));
     }
   } else {
@@ -447,6 +465,10 @@ async function executeBoundNestedAgent(
     ? settings.thinkingSettingForMode(resolvedType, ctx.thinkingLevel, agentConfig)
     : { ...settings.thinkingSettingFor(resolvedType, ctx.thinkingLevel, agentConfig), ecoConfigured: false };
   const thinkingLevel = normalizeThinkingLevel(model, nestedThinking.value);
+
+  // Model authentication/availability is asynchronous. Do not accept a
+  // nested spawn after its public tool call has already been cancelled.
+  if (signal?.aborted) return cancelledResult();
 
   try {
     const { record } = await coordinator.spawnNested(parentId, pi, ctx, {
@@ -470,6 +492,7 @@ async function executeBoundNestedAgent(
     if (record.lifecycle.status === "error") return errorResult(`Agent failed: ${record.error || "unknown error"}`, details);
     return successResult(formatResultContent(record), details);
   } catch (err) {
+    if (signal?.aborted) return cancelledResult();
     return errorResult(err instanceof Error ? err.message : String(err));
   }
 }

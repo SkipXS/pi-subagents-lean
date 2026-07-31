@@ -406,6 +406,33 @@ describe("mergeAgents", () => {
     expect(result.get("implementer")).toMatchObject({ delegateTo: ["scout"], maxChildAgents: 4 });
   });
 
+  it("merges Eco model and thinking fields independently across agent layers", () => {
+    const defaults = new Map<string, any>([["scout", {
+      name: "scout",
+      description: "Default scout",
+      ecoModel: "default/eco",
+      ecoThinkingLevel: "high",
+      systemPrompt: "default prompt",
+    }]]);
+    const user = parseAgentFile(`---
+name: scout
+eco_model: user/eco
+eco_thinking: low
+---
+`, "user");
+    const project = parseAgentFile(`---
+name: scout
+eco_model: project/eco
+---
+`, "project");
+
+    const result = mergeAgents(defaults, [user], [], [project]);
+    expect(result.get("scout")).toMatchObject({
+      ecoModel: "project/eco",
+      ecoThinkingLevel: "low",
+    });
+  });
+
   it("returns empty map when no agents", () => {
     const result = mergeAgents(new Map(), [], [], []);
     expect(result instanceof Map).toBe(true);

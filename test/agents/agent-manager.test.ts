@@ -417,6 +417,29 @@ describe("AgentManager", () => {
       }
     });
 
+    it("releases its slot and continues the queue after an asynchronous runner failure", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const continuation = makeResolvablePromise();
+      mockModules.mockRunAgent
+        .mockRejectedValueOnce(new Error("runner setup failed"))
+        .mockReturnValueOnce(continuation.promise);
+
+      const failedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "failed", {
+        description: "failed", isBackground: true,
+      });
+      const continuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "continued", {
+        description: "continued", isBackground: true,
+      });
+
+      await manager.getRecord(failedId)!.execution.promise;
+      expect(manager.getRecord(failedId)?.lifecycle).toMatchObject({ status: "error" });
+      expect(manager.getRecord(failedId)?.error).toBe("runner setup failed");
+      await vi.waitFor(() => expect(manager.getRecord(continuedId)?.lifecycle.status).toBe("running"));
+
+      continuation.resolve(mockRunResult());
+      await manager.getRecord(continuedId)!.execution.promise;
+    });
+
     it("reports a queued synchronous startup failure, releases its slot, and continues the queue", async () => {
       manager = new AgentManager(onComplete, { default: 1 });
       const first = makeResolvablePromise();
@@ -736,6 +759,7 @@ describe("AgentManager", () => {
 
       expect(() => manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" })).toThrow("start failed");
       expect(manager.getTotalAgentCount()).toBe(0);
+      expect(manager.listAgents()).toHaveLength(0);
 
       const nextId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "next", { description: "next" });
       expect(manager.getRecord(nextId)?.lifecycle.status).toBe("running");
@@ -1427,6 +1451,43 @@ describe("AgentManager steering and shutdown", () => {
 
     parentRun.resolve(mockRunResult());
     await manager.getRecord(parentId)!.execution.promise;
+  });
+
+  it("stops an active child and retains the root slot when the parent runner fails", async () => {
+    let rejectParent!: (error: Error) => void;
+    const parentRun = new Promise<unknown>((_resolve, reject) => { rejectParent = reject; });
+    const childRun = makeResolvablePromise();
+    const queuedRun = makeResolvablePromise();
+    mockModules.mockRunAgent
+      .mockReturnValueOnce(parentRun)
+      .mockReturnValueOnce(childRun.promise)
+      .mockReturnValueOnce(queuedRun.promise);
+    manager = new AgentManager(undefined, { default: 1 });
+    const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
+      description: "parent",
+      agentConfig: { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 },
+    });
+    const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
+      description: "child",
+      agentConfig: { name: "scout", description: "", systemPrompt: "" },
+    });
+    const queuedId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "queued", { description: "queued" });
+
+    rejectParent(new Error("parent runner failed"));
+    await manager.getRecord(parentId)!.execution.promise;
+
+    expect(manager.getRecord(parentId)?.lifecycle).toMatchObject({ status: "error" });
+    expect(manager.getRecord(parentId)?.error).toBe("parent runner failed");
+    expect(manager.getRecord(childId)?.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent" });
+    expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("queued");
+
+    childRun.resolve(mockRunResult({ aborted: true }));
+    await manager.getRecord(childId)!.execution.promise;
+    await vi.waitFor(() => expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("running"));
+
+    queuedRun.resolve(mockRunResult());
+    await manager.getRecord(queuedId)!.execution.promise;
+    expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(3);
   });
 
   it("holds a handed-off slot until a stopped parent's child settles, then drains", async () => {

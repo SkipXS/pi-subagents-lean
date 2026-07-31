@@ -363,15 +363,18 @@ export function setupEventListeners(pi: ExtensionAPI): void {
       // usable. Never leave a stale Eco indicator behind.
       // A newer shutdown/startup owns both its footer and cleanup; a stale
       // failed scan must not clear or tear down that newer runtime.
-      if (sessionEpoch === startupEpoch) {
-        if (ctx.hasUI && typeof ctx.ui.setStatus === "function") ctx.ui.setStatus(ECO_STATUS_KEY, undefined);
-        // Preserve the startup error even if disposal itself encounters a fault.
-        try {
-          await beginCleanup();
-        } catch {
-          // The initialization failure is the actionable error for callers.
-        }
+      if (sessionEpoch !== startupEpoch) return;
+
+      if (ctx.hasUI && typeof ctx.ui.setStatus === "function") ctx.ui.setStatus(ECO_STATUS_KEY, undefined);
+      // Preserve the startup error even if disposal itself encounters a fault.
+      try {
+        await beginCleanup();
+      } catch {
+        // The initialization failure is the actionable error for callers.
       }
+      // Shutdown can invalidate this startup while its own cleanup is waiting
+      // for a disposer. Do not surface that now-stale rejection either.
+      if (sessionEpoch !== startupEpoch) return;
       throw err;
     }
   });

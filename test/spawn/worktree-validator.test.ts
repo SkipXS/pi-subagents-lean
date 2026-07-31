@@ -208,6 +208,42 @@ describe("validateWorktreePath", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("falls back to legacy git-common-dir on older Git versions", async () => {
+    const parentCwd = join(tmpDir, "parent");
+    const worktreePath = join(tmpDir, "feature");
+    mkdirSync(parentCwd, { recursive: true });
+    mkdirSync(worktreePath, { recursive: true });
+    const commonDir = "../shared.git";
+    const pi = {
+      exec: vi.fn(async (_cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (args[1] === "--path-format=absolute") {
+          return { code: 129, stdout: "", stderr: "unknown option: path-format" };
+        }
+        if (args[1] === "--git-common-dir") {
+          return { code: 0, stdout: `${commonDir}\n`, stderr: "" };
+        }
+        if (args[1] === "--show-toplevel") {
+          return { code: 0, stdout: `${opts?.cwd}\n`, stderr: "" };
+        }
+        throw new Error(`Unexpected git args: ${args.join(" ")}`);
+      }),
+    };
+
+    const result = await validateWorktreePath(pi, worktreePath, parentCwd);
+
+    expect(result.ok).toBe(true);
+    expect(pi.exec).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--git-common-dir"],
+      { cwd: parentCwd, timeout: 5000 },
+    );
+    expect(pi.exec).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--git-common-dir"],
+      { cwd: worktreePath, timeout: 5000 },
+    );
+  });
+
   it("accepts equivalent Windows git-common-dir paths with different case and separators", async () => {
     const parentCwd = join(tmpDir, "parent");
     const worktreePath = join(tmpDir, "feature");
