@@ -279,7 +279,24 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
   if (defaultThinking === undefined) delete agent.defaultThinking;
   else agent.defaultThinking = defaultThinking;
   agent.maxNestingDepth = normalizeMaxNestingDepth(agent.maxNestingDepth);
-  return { agent, thinkingOverrides: { ...(raw.thinkingOverrides ?? {}) }, concurrency };
+  const mode = raw.mode === "eco" ? "eco" : raw.mode === "default" ? "default" : undefined;
+  const ecoModelOverrides = Object.fromEntries(
+    Object.entries(raw.ecoModelOverrides ?? {})
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0),
+  );
+  const ecoThinkingOverrides = Object.fromEntries(
+    Object.entries(raw.ecoThinkingOverrides ?? {})
+      .map(([key, value]) => [key, parseThinkingLevel(value)] as const)
+      .filter((entry): entry is [string, NonNullable<typeof entry[1]>] => entry[1] !== undefined),
+  );
+  return {
+    agent,
+    thinkingOverrides: { ...(raw.thinkingOverrides ?? {}) },
+    ...(mode ? { mode } : {}),
+    ecoModelOverrides,
+    ecoThinkingOverrides,
+    concurrency,
+  };
 }
 
 /** Keep nesting bounded: 1 permits root children only; 2 permits one child layer. */
@@ -296,6 +313,9 @@ function replaceConfig(target: SubagentsConfig, source: SubagentsConfig): void {
   target.agent = structuredClone(source.agent);
   target.concurrency = structuredClone(source.concurrency);
   target.thinkingOverrides = structuredClone(source.thinkingOverrides ?? {});
+  target.mode = source.mode;
+  target.ecoModelOverrides = structuredClone(source.ecoModelOverrides ?? {});
+  target.ecoThinkingOverrides = structuredClone(source.ecoThinkingOverrides ?? {});
 }
 
 function atomicWrite(targetPath: string, contents: Buffer): void {
@@ -378,7 +398,9 @@ function isConfigShape(value: unknown): value is SubagentsConfig {
   if (!isRecord(value)) return false;
   return (value.agent === undefined || isRecord(value.agent))
     && (value.concurrency === undefined || isRecord(value.concurrency))
-    && (value.thinkingOverrides === undefined || isRecord(value.thinkingOverrides));
+    && (value.thinkingOverrides === undefined || isRecord(value.thinkingOverrides))
+    && (value.ecoModelOverrides === undefined || isRecord(value.ecoModelOverrides))
+    && (value.ecoThinkingOverrides === undefined || isRecord(value.ecoThinkingOverrides));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

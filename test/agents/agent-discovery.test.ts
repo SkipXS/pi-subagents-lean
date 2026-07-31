@@ -102,6 +102,8 @@ tools: read, bash, grep
 extensions: none
 skills: all
 thinking: high
+eco_model: openai/gpt-4o-mini
+eco_thinking: low
 max_turns: "50"
 max_tokens: "2048"
 delegate_to: [scout, reviewer]
@@ -120,6 +122,8 @@ This is the system prompt body.
     expect(result.extensions).toBe(false); // "none" → false
     expect(result.skills).toBe(true); // "all" → true
     expect(result.thinking).toBe("high");
+    expect(result.eco_model).toBe("openai/gpt-4o-mini");
+    expect(result.eco_thinking).toBe("low");
     expect(result.max_turns).toBe(50);
     expect(result.max_tokens).toBe(2048);
     expect(result.delegate_to).toEqual(["scout", "reviewer"]);

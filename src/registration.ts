@@ -104,6 +104,10 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerCommand("agents", {
     description: "Manage subagents: running agents, spawning, agent catalog, execution, widget, and prompt settings",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("The /agents management menu is available only in TUI mode.", "info");
+        return;
+      }
       const modelOptions = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
       await showAgentsMainMenu(ctx, modelOptions);
     },

@@ -126,7 +126,7 @@ describe("AgentManager", () => {
       expect(getManager()).toBeNull();
       expect(getCoordinator()).toBeNull();
       expect(getWidget()).toBeNull();
-      expect(Object.keys(settings).sort()).toEqual(["agent", "modelFor", "thinkingSettingFor"]);
+      expect(Object.keys(settings).sort()).toEqual(["agent", "mode", "modelFor", "modelSettingForMode", "thinkingSettingFor", "thinkingSettingForMode"]);
     });
   });
 
@@ -356,6 +356,65 @@ describe("AgentManager", () => {
       first.resolve(mockRunResult());
       await vi.waitFor(() => expect(manager.getRecord(id2)?.lifecycle.status).toBe("running"));
       second.resolve(mockRunResult());
+    });
+
+    it("runs a queued Eco root with its accepted model, thinking, and mode snapshot", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const coordinator = new SpawnCoordinator(manager);
+      const blocker = makeResolvablePromise();
+      const queued = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise).mockReturnValueOnce(queued.promise);
+      const store = getStore();
+
+      store.mutate.session.setMode("eco");
+      store.mutate.session.setEcoModelOverride("scout", "accepted/eco");
+      store.mutate.session.setEcoThinkingOverride("scout", "low");
+
+      try {
+        manager.spawn(fakePi(), fakeCtx(), "scout", "block queue", {
+          description: "block queue", isBackground: true,
+        });
+        const acceptedSettings = store.createSubagentRuntimeSettings();
+        const acceptedModel = { provider: "accepted", id: "eco", reasoning: true } as any;
+        const result = await coordinator.spawn(fakePi(), fakeCtx(), {
+          type: "scout",
+          prompt: "queued Eco work",
+          description: "queued Eco work",
+          graceTurns: 6,
+          runInBackground: true,
+          model: acceptedModel,
+          modelKey: "accepted/eco",
+          thinkingLevel: "low",
+          runtimeSettingsSnapshot: acceptedSettings,
+          invocation: { modelName: "eco", thinkingLevel: "low" },
+        });
+        expect(result.record.lifecycle.status).toBe("queued");
+        expect(mockModules.mockRunAgent).toHaveBeenCalledOnce();
+
+        store.mutate.session.setMode("default");
+        store.mutate.session.setEcoModelOverride("scout", "later/eco");
+        store.mutate.session.setEcoThinkingOverride("scout", "high");
+
+        blocker.resolve(mockRunResult());
+        await vi.waitFor(() => expect(result.record.lifecycle.status).toBe("running"));
+
+        const queuedOptions = mockModules.mockRunAgent.mock.calls[1]![3];
+        expect(queuedOptions.model).toBe(acceptedModel);
+        expect(queuedOptions.thinkingLevel).toBe("low");
+        expect(queuedOptions.runtimeSettings).toBe(acceptedSettings);
+        expect(queuedOptions.runtimeSettings.mode).toBe("eco");
+        expect(queuedOptions.runtimeSettings.modelSettingForMode("scout", "test/model").value).toBe("accepted/eco");
+        expect(queuedOptions.runtimeSettings.thinkingSettingForMode("scout", undefined).value).toBe("low");
+        expect(result.record.display.invocation).toMatchObject({ mode: "eco", thinkingLevel: "low" });
+
+        queued.resolve(mockRunResult());
+        await result.record.execution.promise;
+      } finally {
+        coordinator.dispose();
+        store.mutate.session.setMode(undefined);
+        store.mutate.session.clearEcoModelOverride("scout");
+        store.mutate.session.clearEcoThinkingOverride("scout");
+      }
     });
 
     it("reports a queued synchronous startup failure, releases its slot, and continues the queue", async () => {

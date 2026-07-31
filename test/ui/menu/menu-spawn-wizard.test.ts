@@ -98,6 +98,18 @@ function setupMocks() {
   mockModules.mockSessionOverrides = { default: null };
   mockModules.mockSessionThinkingOverrides = {};
   mockModules.mockConfig.thinkingOverrides = {};
+  mockModules.mockRuntimeSettingsSnapshot = undefined;
+  mockModules.mockSessionCtx.model = { provider: "test", id: "parent-model", reasoning: true };
+  delete (mockModules.mockSessionCtx as any).thinkingLevel;
+  delete (mockModules.mockSessionCtx.modelRegistry as any).getApiKeyAndHeaders;
+  mockModules.mockSessionCtx.modelRegistry.find.mockReset().mockImplementation((provider: string, modelId: string) => {
+    const known: Record<string, { provider: string; id: string; reasoning: boolean }> = {
+      "openai/gpt-4o": { provider: "openai", id: "gpt-4o", reasoning: true },
+      "anthropic/claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", reasoning: true },
+      "test/parent-model": { provider: "test", id: "parent-model", reasoning: true },
+    };
+    return known[`${provider}/${modelId}`];
+  });
   mockModules.mockManager.spawn.mockReset().mockReturnValue("agent-id-123");
   mockModules.mockManager.getRecord.mockReset();
   mockModules.mockPiExec.mockReset();
@@ -1001,6 +1013,148 @@ describe("showSpawnAgentMenu — spawn action", () => {
     const mockDone = vi.fn();
     item.submenu("", mockDone);
     expect(mockDone).toHaveBeenCalled();
+  });
+
+  it("spawns with a pre-Eco runtime snapshot via legacy resolvers", async () => {
+    mockModules.mockRuntimeSettingsSnapshot = {
+      agent: { graceTurns: 6 },
+      modelFor: vi.fn(() => "openai/gpt-4o"),
+      thinkingSettingFor: vi.fn(() => ({ value: "low", source: "config-global" })),
+    };
+    const ctx = createMockWizardCtx(["general-purpose", "fix the bug", undefined]);
+    await completeWizard(ctx);
+
+    allOptionItems().find((i: any) => i.id === "spawn").submenu("", vi.fn());
+    await vi.waitFor(() => expect(mockModules.mockManager.spawn).toHaveBeenCalledTimes(1));
+
+    expect(mockModules.mockRuntimeSettingsSnapshot.modelFor).toHaveBeenCalled();
+    expect(mockModules.mockRuntimeSettingsSnapshot.thinkingSettingFor).toHaveBeenCalled();
+    expect(mockModules.mockManager.spawn.mock.calls[0][4].modelKey).toBe("openai/gpt-4o");
+  });
+
+  it.each(["default", "eco"] as const)("keeps explicit parent inheritance distinct in %s mode", async (mode) => {
+    const parentModel = { provider: "test", id: "parent-model", reasoning: true };
+    const originalThinking = (mockModules.mockSessionCtx as any).thinkingLevel;
+    mockModules.mockSessionCtx.model = parentModel;
+    (mockModules.mockSessionCtx as any).thinkingLevel = "high";
+    mockModules.mockSessionCtx.modelRegistry.find.mockImplementation((provider: string, id: string) =>
+      provider === "test" && id === "parent-model" ? parentModel : { provider, id, reasoning: true });
+    mockModules.mockRuntimeSettingsSnapshot = {
+      agent: { graceTurns: 6 }, mode,
+      modelFor: vi.fn(), thinkingSettingFor: vi.fn(),
+      modelSettingForMode: vi.fn(() => ({ value: "configured/model", source: "config-agent", ecoConfigured: mode === "eco" })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: mode === "eco" })),
+    };
+    const ctx = createMockWizardCtx(["general-purpose", "fix the bug", undefined]);
+
+    try {
+      await completeWizard(ctx);
+      const modelItem = allOptionItems().find((i: any) => i.id === "model");
+      modelItem.submenu(modelItem.currentValue, vi.fn());
+      selectDialogInstances.at(-1)!.callbacks.onSelect("(inherits parent)");
+      openAdvancedOptions()!.onChange("thinkingLevel", "inherit");
+
+      allOptionItems().find((i: any) => i.id === "spawn").submenu("", vi.fn());
+      await vi.waitFor(() => expect(mockModules.mockManager.spawn).toHaveBeenCalledTimes(1));
+
+      expect(mockModules.mockManager.spawn.mock.calls[0][4]).toMatchObject({
+        model: parentModel,
+        modelKey: "test/parent-model",
+        thinkingLevel: "high",
+      });
+      expect(mockModules.mockRuntimeSettingsSnapshot.modelSettingForMode).not.toHaveBeenCalled();
+      expect(mockModules.mockRuntimeSettingsSnapshot.thinkingSettingForMode).not.toHaveBeenCalled();
+    } finally {
+      (mockModules.mockSessionCtx as any).thinkingLevel = originalThinking;
+    }
+  });
+
+  it("normalizes explicitly inherited thinking against the final parent model", async () => {
+    const originalModel = mockModules.mockSessionCtx.model;
+    const originalThinking = (mockModules.mockSessionCtx as any).thinkingLevel;
+    const parentModel = { provider: "test", id: "parent-model", reasoning: false };
+    mockModules.mockSessionCtx.model = parentModel;
+    (mockModules.mockSessionCtx as any).thinkingLevel = "high";
+    mockModules.mockSessionCtx.modelRegistry.find.mockReturnValue(parentModel);
+    const ctx = createMockWizardCtx(["general-purpose", "fix the bug", undefined]);
+
+    try {
+      await completeWizard(ctx);
+      openAdvancedOptions()!.onChange("thinkingLevel", "inherit");
+      allOptionItems().find((i: any) => i.id === "spawn").submenu("", vi.fn());
+      await vi.waitFor(() => expect(mockModules.mockManager.spawn).toHaveBeenCalledTimes(1));
+      expect(mockModules.mockManager.spawn.mock.calls[0][4].thinkingLevel).toBe("off");
+    } finally {
+      mockModules.mockSessionCtx.model = originalModel;
+      (mockModules.mockSessionCtx as any).thinkingLevel = originalThinking;
+    }
+  });
+
+  it("lets an explicit wizard model override the configured Eco model", async () => {
+    mockModules.mockRuntimeSettingsSnapshot = {
+      agent: { graceTurns: 6 }, mode: "eco",
+      modelFor: vi.fn(), thinkingSettingFor: vi.fn(() => ({ value: "medium", source: "agent-md" })),
+      modelSettingForMode: vi.fn((_type: string, _parent: string, _config: unknown, explicit?: string) => explicit
+        ? { value: explicit, source: "spawn", ecoConfigured: false }
+        : { value: "missing/eco", source: "config-agent", ecoConfigured: true }),
+      thinkingSettingForMode: vi.fn((_type: string, _parent: unknown, _config: unknown, explicit?: string) => ({
+        value: explicit ?? "low", source: explicit ? "spawn" : "config-agent", ecoConfigured: !explicit,
+      })),
+    };
+    const ctx = createMockWizardCtx(["general-purpose", "fix the bug", undefined]);
+    await completeWizard(ctx);
+    const modelItem = allOptionItems().find((i: any) => i.id === "model");
+    modelItem.submenu(modelItem.currentValue, vi.fn());
+    selectDialogInstances.at(-1)!.callbacks.onSelect("anthropic/claude-sonnet-4-20250514");
+
+    allOptionItems().find((i: any) => i.id === "spawn").submenu("", vi.fn());
+    await vi.waitFor(() => expect(mockModules.mockManager.spawn).toHaveBeenCalledTimes(1));
+
+    expect(mockModules.mockRuntimeSettingsSnapshot.modelSettingForMode).toHaveBeenLastCalledWith(
+      "general-purpose", "test/parent-model", expect.any(Object), "anthropic/claude-sonnet-4-20250514",
+    );
+    expect(mockModules.mockManager.spawn.mock.calls[0][4].modelKey).toBe("anthropic/claude-sonnet-4-20250514");
+    expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("Eco model"), "error");
+  });
+
+  it.each([
+    { name: "rejected auth", auth: () => Promise.reject(new Error("credential backend unavailable")), message: "Eco model availability check failed: credential backend unavailable" },
+    { name: "negative auth", auth: () => Promise.resolve({ ok: false, error: "login required" }), message: "Eco model is not authenticated: openai/gpt-4o (login required)" },
+  ])("reports $name exactly once and does not spawn", async ({ auth, message }) => {
+    mockModules.mockRuntimeSettingsSnapshot = {
+      agent: { graceTurns: 6 }, mode: "eco",
+      modelFor: vi.fn(), thinkingSettingFor: vi.fn(),
+      modelSettingForMode: vi.fn(() => ({ value: "openai/gpt-4o", source: "config-agent", ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: true })),
+    };
+    (mockModules.mockSessionCtx.modelRegistry as any).getApiKeyAndHeaders = vi.fn(auth);
+    const ctx = createMockWizardCtx(["general-purpose", "fix the bug", undefined]);
+    await completeWizard(ctx);
+
+    allOptionItems().find((i: any) => i.id === "spawn").submenu("", vi.fn());
+    await vi.waitFor(() => expect(ctx.ui.notify).toHaveBeenCalledWith(message, "error"));
+
+    expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+    expect(mockModules.mockManager.spawn).not.toHaveBeenCalled();
+    delete (mockModules.mockSessionCtx.modelRegistry as any).getApiKeyAndHeaders;
+  });
+
+  it("reports an unavailable configured Eco model and does not spawn", async () => {
+    mockModules.mockRuntimeSettingsSnapshot = {
+      agent: { graceTurns: 6 }, mode: "eco",
+      modelFor: vi.fn(), thinkingSettingFor: vi.fn(),
+      modelSettingForMode: vi.fn(() => ({ value: "missing/eco", source: "config-agent", ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: true })),
+    };
+    mockModules.mockSessionCtx.modelRegistry.find.mockImplementation(() => undefined as any);
+    const ctx = createMockWizardCtx(["general-purpose", "fix the bug", undefined]);
+    await completeWizard(ctx);
+
+    allOptionItems().find((i: any) => i.id === "spawn").submenu("", vi.fn());
+    await vi.waitFor(() => expect(ctx.ui.notify).toHaveBeenCalledWith("Eco model not found: missing/eco", "error"));
+
+    expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+    expect(mockModules.mockManager.spawn).not.toHaveBeenCalled();
   });
 
   it("passes the selected thinking override to the spawned agent", async () => {

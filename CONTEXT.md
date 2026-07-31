@@ -40,6 +40,10 @@ A model selection for a single manual spawn, the current session, persisted per-
 
 A thinking-level selection resolved through the same precedence chain as the model and normalized to the selected model's supported levels.
 
+**Eco mode**
+
+A session-only or persisted operating mode controlled from the TUI-only `/agents` menu (RPC, JSON, and print mode do not open its custom UI). Eco model and thinking fields resolve independently after explicit wizard values and fall back to the fully resolved Default-mode fields. Root acceptance snapshots the mode/settings for queued work and all descendants; a configured unavailable or unauthenticated Eco model fails closed.
+
 **Soft turn limit**
 
 The turn count at which a subagent receives a steer instructing it to wrap up and return a final answer.
@@ -104,7 +108,7 @@ The live transcript overlay for a subagent session. It supports scrolling, steer
 
 ## Relationships
 
-- The **parent** spawns a **subagent** from one **agent type**.
+- The **parent** spawns a **subagent** from one **agent type** using the accepted Default/Eco mode snapshot.
 - **Agent Markdown** supplies custom or overriding agent-type configuration.
 - The **orchestration prompt** advertises visible agent types only to the parent.
 - A subagent may run at a validated **working tree path** and use its trusted **working tree overlay**.

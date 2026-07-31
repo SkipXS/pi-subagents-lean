@@ -5,6 +5,7 @@ import { SelectList, type SelectItem } from "@earendil-works/pi-tui";
 import { getAgentConfig, getAllTypes } from "../../agents/agent-types.js";
 import { getEffectiveMaxChildAgents, type AgentConfig } from "../../agents/types.js";
 import type { SettingSource } from "../../models/model-precedence.js";
+import { requireAvailableModel } from "../../models/model-availability.js";
 import { normalizeThinkingLevel } from "../../models/thinking.js";
 import { buildOrchestrationPrompt } from "../../prompt/orchestration.js";
 import { getStore } from "../../shell.js";
@@ -65,28 +66,43 @@ function formatTools(
 }
 
 /** Render the same effective settings previously shown by the catalog notification. */
-function formatAgentConfiguration(
+async function formatAgentConfiguration(
   ctx: ExtensionCommandContext,
   name: string,
   cfg: AgentConfig,
-): string {
+): Promise<string> {
   const store = getStore();
   const parentModelId = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
   const registry = ctx.modelRegistry as typeof ctx.modelRegistry & { find?: unknown };
-  const model = store.modelSettingFor(name, parentModelId, cfg);
-  const thinking = store.thinkingSettingFor(name, ctx.thinkingLevel, cfg);
+  const model = typeof store.modelSettingForMode === "function"
+    ? store.modelSettingForMode(name, parentModelId, cfg)
+    : { ...store.modelSettingFor(name, parentModelId, cfg), ecoConfigured: false };
+  const thinking = typeof store.thinkingSettingForMode === "function"
+    ? store.thinkingSettingForMode(name, ctx.thinkingLevel, cfg)
+    : { ...store.thinkingSettingFor(name, ctx.thinkingLevel, cfg), ecoConfigured: false };
   const hasRegistry = typeof registry.find === "function";
-  const effectiveModel = hasRegistry
+  let effectiveModel = hasRegistry
     ? findModelInRegistry(model.value, registry as Parameters<typeof findModelInRegistry>[1], ctx.model)
     : ctx.model;
+  let ecoBlocker: string | undefined;
+  if (store.mode === "eco" && model.ecoConfigured && hasRegistry) {
+    try {
+      effectiveModel = await requireAvailableModel(model.value, ctx.modelRegistry, "Eco model");
+    } catch (error) {
+      effectiveModel = undefined;
+      ecoBlocker = error instanceof Error ? error.message : String(error);
+    }
+  }
   const effectiveModelId = effectiveModel ? `${effectiveModel.provider}/${effectiveModel.id}` : undefined;
-  const modelUnavailable = hasRegistry && !!model.value && !!effectiveModelId && effectiveModelId !== model.value;
-  const modelDisplay = modelUnavailable
-    ? `${effectiveModelId} (parent fallback; requested ${model.value} from ${SOURCE_LABELS[model.source]} unavailable)`
-    : `${model.value || effectiveModelId || "inherit"} (${SOURCE_LABELS[model.source]})`;
-  const effectiveThinking = normalizeThinkingLevel(effectiveModel, thinking.value);
+  const modelUnavailable = !model.ecoConfigured && hasRegistry && !!model.value && !!effectiveModelId && effectiveModelId !== model.value;
+  const modelDisplay = ecoBlocker
+    ? `${model.value} (${SOURCE_LABELS[model.source]}; BLOCKED — ${ecoBlocker})`
+    : modelUnavailable
+      ? `${effectiveModelId} (parent fallback; requested ${model.value} from ${SOURCE_LABELS[model.source]} unavailable)`
+      : `${model.value || effectiveModelId || "inherit"} (${SOURCE_LABELS[model.source]})`;
+  const effectiveThinking = ecoBlocker ? undefined : normalizeThinkingLevel(effectiveModel, thinking.value);
   const thinkingNote = thinking.value !== undefined && effectiveThinking !== thinking.value
-    ? `; requested ${thinking.value} unsupported by model`
+    ? `; requested ${thinking.value}${ecoBlocker ? " cannot run while the Eco model is blocked" : " unsupported by model"}`
     : "";
   const hasPreloads = Array.isArray(cfg.preloadSkills);
   const skills = hasPreloads && !Array.isArray(cfg.skills)
@@ -100,12 +116,14 @@ function formatAgentConfiguration(
   const displayName = sanitizeDisplayText(name) || "(unnamed agent)";
   const lines: string[] = [
     `Agent configuration: ${displayName}${hidden}`,
+    `Mode: ${store.mode === "eco" ? "🍃 Eco" : "Default"} (${store.modeSource})`,
     "",
     sanitizeDisplayText(cfg.description),
   ];
 
   lines.push(`Model: ${modelDisplay}`);
-  lines.push(`Thinking: ${effectiveThinking ?? "inherit"} (${SOURCE_LABELS[thinking.source]}${thinkingNote})`);
+  lines.push(`Thinking: ${effectiveThinking ?? (ecoBlocker ? "unavailable" : "inherit")} (${SOURCE_LABELS[thinking.source]}${thinkingNote})`);
+  if (ecoBlocker) lines.push(`Spawn availability: blocked — ${ecoBlocker}`);
   lines.push(`Tools: ${formatTools(cfg, extensions)}`);
   lines.push(`Skills: ${formatPolicy(skills)}${skillsNote}`);
   lines.push(`Preloaded skills: ${formatPolicy(cfg.preloadSkills ?? false)}`);
@@ -145,10 +163,10 @@ function showOrchestrationGuidance(ctx: ExtensionCommandContext): void {
   );
 }
 
-function showAgentDetails(
+async function showAgentDetails(
   ctx: ExtensionCommandContext,
   name: string,
-): void {
+): Promise<void> {
   const cfg = getAgentConfig(name);
   const displayName = sanitizeDisplayText(name) || "(unnamed agent)";
   if (!cfg) {
@@ -157,7 +175,7 @@ function showAgentDetails(
   }
 
   ctx.ui.notify(
-    `${formatAgentConfiguration(ctx, name, cfg)}\n\nAgent instructions: ${displayName}\n\n${cfg.systemPrompt || "(No agent instructions configured.)"}`,
+    `${await formatAgentConfiguration(ctx, name, cfg)}\n\nAgent instructions: ${displayName}\n\n${cfg.systemPrompt || "(No agent instructions configured.)"}`,
     "info",
   );
 }
@@ -190,7 +208,7 @@ export async function showAgentCatalog(ctx: ExtensionCommandContext): Promise<vo
     if (choice === "__orchestration__") {
       showOrchestrationGuidance(ctx);
     } else if (choice.startsWith("agent:")) {
-      showAgentDetails(ctx, choice.slice("agent:".length));
+      await showAgentDetails(ctx, choice.slice("agent:".length));
     }
   }
 }

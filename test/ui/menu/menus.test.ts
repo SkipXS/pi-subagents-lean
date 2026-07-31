@@ -32,6 +32,8 @@ import { showAgentsMainMenu, showSettingsMenu } from "../../../src/ui/menu/menus
 function resetAgentState(): void {
   mockModules.mockConfig.agent = { default: null, forceBackground: false };
   mockModules.mockSessionOverrides.default = null;
+  mockModules.mockConfig.mode = undefined;
+  mockModules.mockSessionMode = undefined;
   mockModules.mockSessionShowCost = undefined;
   mockModules.mockConfigHealth = "healthy";
   mockModules.mockCanRepair = false;
@@ -50,7 +52,7 @@ describe("showAgentsMainMenu — SelectList dispatcher", () => {
     expect(ctx.ui.select).not.toHaveBeenCalled();
   });
 
-  it("shows the agent catalog as the third main-menu item", async () => {
+  it("shows mode and the existing main-menu actions", async () => {
     const ctx = createMockCtx();
     let component: any;
     ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
@@ -65,8 +67,50 @@ describe("showAgentsMainMenu — SelectList dispatcher", () => {
 
     await showAgentsMainMenu(ctx, ["anthropic/claude-sonnet-4-20250514"]);
     expect(component.settingsList.items.map((item: any) => item.value)).toEqual([
-      "running", "spawn", "catalog", "settings",
+      "mode", "running", "spawn", "catalog", "settings",
     ]);
+  });
+
+  it("mutates session and permanent mode choices and synchronizes the footer", async () => {
+    const sessionCtx = createMockCtx();
+    sessionCtx.ui.theme = { fg: (_color: string, text: string) => text };
+    sessionCtx.ui.setStatus = vi.fn();
+    sessionCtx.ui.custom.mockResolvedValueOnce("mode").mockResolvedValueOnce("session:eco").mockResolvedValueOnce(undefined);
+    await showAgentsMainMenu(sessionCtx, []);
+    expect(mockModules.mockSessionMode).toBe("eco");
+    expect(sessionCtx.ui.setStatus).toHaveBeenCalledWith("subagents-eco", "🍃 Eco");
+
+    const permanentCtx = createMockCtx();
+    permanentCtx.ui.theme = { fg: (_color: string, text: string) => text };
+    permanentCtx.ui.setStatus = vi.fn();
+    permanentCtx.ui.custom.mockResolvedValueOnce("mode").mockResolvedValueOnce("permanent:default").mockResolvedValueOnce(undefined);
+    await showAgentsMainMenu(permanentCtx, []);
+    expect(mockModules.mockConfig.mode).toBe("default");
+    expect(mockModules.mockSessionMode).toBeUndefined();
+    expect(permanentCtx.ui.setStatus).toHaveBeenCalledWith("subagents-eco", undefined);
+  });
+
+  it("reports a mode persistence failure, keeps the mode chooser open, and leaves the footer unchanged", async () => {
+    const ctx = createMockCtx();
+    ctx.ui.theme = { fg: (_color: string, text: string) => text };
+    ctx.ui.setStatus = vi.fn();
+    const { getStore } = await import("../../../src/shell.js");
+    const store = getStore() as any;
+    const setMode = store.mutate.agent.setMode;
+    store.mutate.agent.setMode = () => { throw new Error("config locked"); };
+    ctx.ui.custom
+      .mockResolvedValueOnce("mode")
+      .mockResolvedValueOnce("permanent:eco")
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+    try {
+      await showAgentsMainMenu(ctx, []);
+      expect(ctx.ui.notify).toHaveBeenCalledWith("Failed to save setting: config locked", "error");
+      expect(ctx.ui.setStatus).not.toHaveBeenCalled();
+      expect(ctx.ui.custom).toHaveBeenCalledTimes(4);
+    } finally {
+      store.mutate.agent.setMode = setMode;
+    }
   });
 
   it("Escape closes the menu", async () => {

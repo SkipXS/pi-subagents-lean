@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   registerAgents: vi.fn(),
   scanAndMerge: vi.fn(async () => new Map()),
   store: {
+    mode: "default" as "default" | "eco",
     agent: { disableDefaultAgents: false, orchestrationPrompt: true, outputThinkingBufferSize: 0 },
     concurrency: { default: 4 },
     reload: vi.fn(),
@@ -121,7 +122,7 @@ function createContext(
     cwd: "/tmp/project",
     hasUI: true,
     isProjectTrusted: () => true,
-    ui: { onTerminalInput, notify, setWidget, setStatus },
+    ui: { onTerminalInput, notify, setWidget, setStatus, theme: { fg: (_color: string, text: string) => text } },
   } as unknown as ExtensionContext;
   return { ctx, unregister, onTerminalInput, notify, widgets, statuses, activeRecords };
 }
@@ -138,6 +139,7 @@ describe("extension session lifecycle", () => {
     state.coordinators.length = 0;
     state.coordinatorDisposeError = undefined;
     state.coordinatorDisposePending = undefined;
+    state.store.mode = "default";
   });
 
   it("creates runtime services on start and disposes them on shutdown", async () => {
@@ -166,6 +168,35 @@ describe("extension session lifecycle", () => {
     expect(state.store.dispose).toHaveBeenCalledOnce();
     expect(widget.dispose).toHaveBeenCalledOnce();
     expect(manager.dispose).toHaveBeenCalledOnce();
+    expect(state.manager).toBeNull();
+    expect(state.widget).toBeNull();
+    expect(state.coordinator).toBeNull();
+  });
+
+  it("sets the Eco footer on start and clears it on shutdown", async () => {
+    state.store.mode = "eco";
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const session = createContext();
+
+    await listeners.get("session_start")!({}, session.ctx);
+    expect(session.statuses.get("subagents-eco")).toBe("🍃 Eco");
+
+    await listeners.get("session_shutdown")!({}, session.ctx);
+    expect(session.statuses.has("subagents-eco")).toBe(false);
+  });
+
+  it("clears an Eco footer when startup fails after publishing it", async () => {
+    state.store.mode = "eco";
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const session = createContext();
+    const failure = new Error("terminal unavailable");
+    session.onTerminalInput.mockImplementationOnce(() => { throw failure; });
+
+    await expect(listeners.get("session_start")!({}, session.ctx)).rejects.toBe(failure);
+
+    expect(session.statuses.has("subagents-eco")).toBe(false);
     expect(state.manager).toBeNull();
     expect(state.widget).toBeNull();
     expect(state.coordinator).toBeNull();

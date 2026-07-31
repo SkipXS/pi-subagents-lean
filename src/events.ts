@@ -9,6 +9,7 @@ import { AgentWidget, type UICtx } from "./ui/agent-widget.js";
 import { ConversationViewer, VIEWER_OVERLAY_OPTIONS } from "./ui/conversation-viewer.js";
 import { SpawnCoordinator } from "./spawn/spawn-coordinator.js";
 import { toolCallListener } from "./agents/tool-execution.js";
+import { ECO_STATUS_KEY, syncEcoStatus } from "./ui/eco-status.js";
 import { getOrchestrationPromptUpdate } from "./prompt/orchestration.js";
 import {
   getPiInstance,
@@ -349,6 +350,8 @@ export function setupEventListeners(pi: ExtensionAPI): void {
       // terminal listener or block the next session from registering one.
       if (sessionEpoch !== startupEpoch) return;
 
+      if (ctx.hasUI) syncEcoStatus(ctx.ui, getStore().mode);
+
       // Register ctrl+o listener
       if (ctx.hasUI && !unregisterTerminalInput) {
         unregisterTerminalInput = ctx.ui.onTerminalInput(createNavInputHandler(ctx));
@@ -356,9 +359,12 @@ export function setupEventListeners(pi: ExtensionAPI): void {
       // Sync compact mode with initial tool expansion state
       getStore().notifyToolsExpanded(false);
     } catch (err) {
-      // A newer shutdown/startup owns cleanup; it must not be torn down by a
-      // stale failed scan.
+      // Startup may fail after publishing the footer but before the session is
+      // usable. Never leave a stale Eco indicator behind.
+      // A newer shutdown/startup owns both its footer and cleanup; a stale
+      // failed scan must not clear or tear down that newer runtime.
       if (sessionEpoch === startupEpoch) {
+        if (ctx.hasUI && typeof ctx.ui.setStatus === "function") ctx.ui.setStatus(ECO_STATUS_KEY, undefined);
         // Preserve the startup error even if disposal itself encounters a fault.
         try {
           await beginCleanup();
@@ -374,6 +380,8 @@ export function setupEventListeners(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
     // Invalidate a pending session_start before beginning asynchronous cleanup.
     ++sessionEpoch;
+
+    if (ctx.hasUI && typeof ctx.ui.setStatus === "function") ctx.ui.setStatus(ECO_STATUS_KEY, undefined);
 
     // Warn if agents were killed
     const currentManager = getManager();

@@ -12,10 +12,12 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { SettingsList, SelectList, type SettingItem } from "@earendil-works/pi-tui";
 import type { ThinkingLevel } from "../../types.js";
 import type { AgentConfig } from "../../agents/types.js";
+import type { SubagentRuntimeSettings } from "../../config/config-store.js";
 import type { Theme } from "../types.js";
 import { getAgentConfig, getAvailableTypes, resolveType, resolveAgentCatalog, resolveTypeInCatalog, snapshotAgentConfig } from "../../agents/agent-types.js";
 import { findModelInRegistry } from "../../utils.js";
 import { normalizeThinkingLevel, supportedThinkingLevels } from "../../models/thinking.js";
+import { requireAvailableModel } from "../../models/model-availability.js";
 import { buildModelOptions, buildSettingsListTheme, buildSelectListTheme, createSearchableSelect } from "./helpers.js";
 import { DEFAULT_GRACE_TURNS } from "../../config/config-io.js";
 import { revalidateWorktreePath, validateWorktreePath } from "../../spawn/worktree-validator.js";
@@ -246,17 +248,34 @@ export async function showSpawnAgentMenu(
 
   // ---- Step 3: Options sub-menu with spawn ----
   const store = getStore();
+  // Compatibility fallback keeps embedders/test doubles implementing the pre-Eco store surface working.
+  const modeModelSetting = (type: string, parent: string, config?: AgentConfig, explicit?: string) =>
+    typeof store.modelSettingForMode === "function"
+      ? store.modelSettingForMode(type, parent, config, explicit)
+      : { value: store.modelFor(type, parent, config, explicit), source: "parent" as const, ecoConfigured: false };
+  const modeThinkingSetting = (type: string, parent: ThinkingLevel | undefined, config?: AgentConfig, explicit?: ThinkingLevel) =>
+    typeof store.thinkingSettingForMode === "function"
+      ? store.thinkingSettingForMode(type, parent, config, explicit)
+      : { ...store.thinkingSettingFor(type, parent, config, explicit), ecoConfigured: false };
+  const snapshotModelSetting = (settings: SubagentRuntimeSettings, type: string, parent: string, config?: AgentConfig, explicit?: string) =>
+    typeof settings.modelSettingForMode === "function"
+      ? settings.modelSettingForMode(type, parent, config, explicit)
+      : { value: settings.modelFor(type, parent, config, explicit), source: "parent" as const, ecoConfigured: false };
+  const snapshotThinkingSetting = (settings: SubagentRuntimeSettings, type: string, parent: ThinkingLevel | undefined, config?: AgentConfig, explicit?: ThinkingLevel) =>
+    typeof settings.thinkingSettingForMode === "function"
+      ? settings.thinkingSettingForMode(type, parent, config, explicit)
+      : { ...settings.thinkingSettingFor(type, parent, config, explicit), ecoConfigured: false };
   const parentModelId = session?.model
     ? `${session.model.provider}/${session.model.id}`
     : "";
   let currentResolvedType = selectedType;
   let currentAgentConfig = configFor(selectedType);
-  let currentModelStr = store.modelFor(currentResolvedType, parentModelId, currentAgentConfig) || "";
+  let currentModelStr = modeModelSetting(currentResolvedType, parentModelId, currentAgentConfig).value || "";
   let modelChanged = false;
   let thinkingChanged = false;
   let maxTurnsChanged = false;
   let maxTokensChanged = false;
-  let currentThinking: ThinkingLevel | undefined = store.thinkingSettingFor(
+  let currentThinking: ThinkingLevel | undefined = modeThinkingSetting(
     currentResolvedType,
     session?.thinkingLevel,
     currentAgentConfig,
@@ -278,8 +297,8 @@ export async function showSpawnAgentMenu(
     selectedType = type;
     currentResolvedType = type;
     currentAgentConfig = config;
-    if (!modelChanged) currentModelStr = store.modelFor(type, parentModelId, config) || "";
-    if (!thinkingChanged) currentThinking = store.thinkingSettingFor(type, session?.thinkingLevel, config).value;
+    if (!modelChanged) currentModelStr = modeModelSetting(type, parentModelId, config).value || "";
+    if (!thinkingChanged) currentThinking = modeThinkingSetting(type, session?.thinkingLevel, config).value;
     if (!maxTurnsChanged) currentMaxTurns = config.maxTurns ?? store.agent.defaultMaxTurns;
     if (!maxTokensChanged) currentMaxTokens = config.maxTokens;
   };
@@ -542,12 +561,22 @@ export async function showSpawnAgentMenu(
               ctx.ui.notify("No valid agent type selected", "error");
               return;
             }
-            const modelStr = modelChanged
-              ? currentModelStr
-              : store.modelFor(resolvedType, parentModelId, refreshedConfig);
-            const thinking = thinkingChanged
-              ? currentThinking
-              : store.thinkingSettingFor(resolvedType, session?.thinkingLevel, refreshedConfig).value;
+            const runtimeSettingsSnapshot = typeof store.createSubagentRuntimeSettings === "function"
+              ? store.createSubagentRuntimeSettings()
+              : undefined;
+            // "Inherit" is an explicit wizard choice, not the absence of a
+            // wizard override: bypass Default/Eco precedence in that case.
+            const modelSetting = modelChanged && !currentModelStr
+              ? { value: parentModelId, source: "spawn" as const, ecoConfigured: false }
+              : runtimeSettingsSnapshot
+                ? snapshotModelSetting(runtimeSettingsSnapshot, resolvedType, parentModelId, refreshedConfig, modelChanged ? currentModelStr : undefined)
+                : modeModelSetting(resolvedType, parentModelId, refreshedConfig, modelChanged ? currentModelStr : undefined);
+            const modelStr = modelSetting.value;
+            const thinkingSetting = thinkingChanged && currentThinking === undefined
+              ? { value: session?.thinkingLevel, source: "spawn" as const, ecoConfigured: false }
+              : runtimeSettingsSnapshot
+                ? snapshotThinkingSetting(runtimeSettingsSnapshot, resolvedType, session?.thinkingLevel, refreshedConfig, thinkingChanged ? currentThinking : undefined)
+                : modeThinkingSetting(resolvedType, session?.thinkingLevel, refreshedConfig, thinkingChanged ? currentThinking : undefined);
             const maxTurns = maxTurnsChanged
               ? currentMaxTurns
               : refreshedConfig.maxTurns ?? store.agent.defaultMaxTurns;
@@ -557,13 +586,24 @@ export async function showSpawnAgentMenu(
             let modelKey: string | undefined;
             if (modelStr) {
               const registry = session?.modelRegistry ?? ctx.modelRegistry;
-              model = findModelInRegistry(modelStr, registry, undefined);
-              if (!model) {
-                ctx.ui.notify(`Model not found: ${modelStr}`, "error");
-                return;
+              if (modelSetting.ecoConfigured) {
+                try {
+                  model = await requireAvailableModel(modelStr, registry, "Eco model");
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : String(error);
+                  ctx.ui.notify(message.includes("Eco model") ? message : `Eco model availability check failed: ${message}`, "error");
+                  return;
+                }
+              } else {
+                model = findModelInRegistry(modelStr, registry, undefined);
+                if (!model) {
+                  ctx.ui.notify(`Model not found: ${modelStr}`, "error");
+                  return;
+                }
               }
               modelKey = `${model.provider}/${model.id}`;
             }
+            const thinking = normalizeThinkingLevel(model, thinkingSetting.value);
 
             const widget = getWidget();
             if (widget) {
@@ -595,6 +635,7 @@ export async function showSpawnAgentMenu(
                   maxTurns,
                   runInBackground: background,
                 },
+                runtimeSettingsSnapshot,
                 runInBackground: background,
               });
 
@@ -631,8 +672,8 @@ export async function showSpawnAgentMenu(
             onSelect: (model) => {
               modelChanged = true;
               currentModelStr = model === "(inherits parent)" ? "" : model;
-              // Persist the model-supported value, not only its rendered
-              // representation, so the eventual spawn receives it too.
+              // Persist the model-supported preview so the eventual spawn
+              // receives the same normalized thinking value.
               currentThinking = normalizeThinkingLevel(currentModel(), currentThinking);
               thinkingChanged = true;
               rebuild?.(buildItems());

@@ -14,13 +14,20 @@ export const mockModules = {
   mockConfig: {
     agent: { default: null, forceBackground: false } as Record<string, any>,
     thinkingOverrides: {} as Record<string, any>,
+    ecoModelOverrides: {} as Record<string, any>,
+    ecoThinkingOverrides: {} as Record<string, any>,
+    mode: undefined as "default" | "eco" | undefined,
     concurrency: { default: 4 } as Record<string, any>,
   },
   mockSessionOverrides: { default: null } as Record<string, any>,
   mockSessionThinkingOverrides: {} as Record<string, any>,
+  mockSessionEcoModels: {} as Record<string, any>,
+  mockSessionEcoThinking: {} as Record<string, any>,
+  mockSessionMode: undefined as "default" | "eco" | undefined,
   mockSessionShowCost: undefined as boolean | undefined,
   mockConfigHealth: "healthy" as "healthy" | "using-backup" | "unrecoverable",
   mockCanRepair: false,
+  mockRuntimeSettingsSnapshot: undefined as any,
   mockManager: {
     setConcurrency: vi.fn(),
     listAgents: vi.fn<() => any[]>(() => []),
@@ -135,6 +142,8 @@ vi.mock("../src/shell.js", () => {
       mockModules.mockConfigHealth = "healthy";
       mockModules.mockCanRepair = false;
     },
+    get mode() { return mockModules.mockSessionMode ?? mockModules.mockConfig.mode ?? "default"; },
+    get modeSource() { return mockModules.mockSessionMode ? "session" : mockModules.mockConfig.mode ? "saved" : "implicit"; },
     get agent() {
       const a = mockModules.mockConfig.agent;
       const widgetMaxLines = a.widgetMaxLines ?? 12;
@@ -187,6 +196,14 @@ vi.mock("../src/shell.js", () => {
     persistedThinkingOverride(type: string) {
       return mockModules.mockConfig.thinkingOverrides[type];
     },
+    sessionEcoModelOverride(type: string) { return mockModules.mockSessionEcoModels[type]; },
+    sessionEcoThinkingOverride(type: string) { return mockModules.mockSessionEcoThinking[type]; },
+    persistedEcoModelOverride(type: string) { return mockModules.mockConfig.ecoModelOverrides[type]; },
+    persistedEcoThinkingOverride(type: string) { return mockModules.mockConfig.ecoThinkingOverrides[type]; },
+    hasPersistedEcoOverrides() {
+      return Object.keys(mockModules.mockConfig.ecoModelOverrides).length > 0
+        || Object.keys(mockModules.mockConfig.ecoThinkingOverrides).length > 0;
+    },
     hasPersistedThinkingOverrides() {
       return Object.keys(mockModules.mockConfig.thinkingOverrides).length > 0;
     },
@@ -214,6 +231,23 @@ vi.mock("../src/shell.js", () => {
     modelFor(type: string, parentModelId: string, agentConfig?: any, explicitModel?: string) {
       return (this as any).modelSettingFor(type, parentModelId, agentConfig, explicitModel).value;
     },
+    modelSettingForMode(type: string, parentModelId: string, agentConfig?: any, explicitModel?: string) {
+      const base = (this as any).modelSettingFor(type, parentModelId, agentConfig, explicitModel);
+      if ((this as any).mode !== "eco" || explicitModel) return { ...base, ecoConfigured: false };
+      const candidates = [
+        [mockModules.mockSessionEcoModels[type], "session-agent"],
+        [mockModules.mockConfig.ecoModelOverrides[type], "config-agent"],
+        [agentConfig?.ecoModel, "agent-md"],
+      ];
+      const found = candidates.find(([value]) => value != null && value !== "");
+      return found ? { value: found[0], source: found[1], ecoConfigured: true } : { ...base, ecoConfigured: false };
+    },
+    ecoModelSettingFor(type: string, parentModelId: string, agentConfig?: any, explicitModel?: string) {
+      const previous = mockModules.mockSessionMode;
+      mockModules.mockSessionMode = "eco";
+      try { return (this as any).modelSettingForMode(type, parentModelId, agentConfig, explicitModel); }
+      finally { mockModules.mockSessionMode = previous; }
+    },
     thinkingSettingFor(type: string, parentThinking: string | undefined, agentConfig?: any, explicitThinking?: string) {
       const candidates = [
         [explicitThinking, "spawn"],
@@ -227,8 +261,33 @@ vi.mock("../src/shell.js", () => {
       const found = candidates.find(([value]) => value != null && value !== "");
       return found ? { value: found[0], source: found[1] } : { value: undefined, source: "parent" };
     },
+    thinkingSettingForMode(type: string, parentThinking: string | undefined, agentConfig?: any, explicitThinking?: string) {
+      const base = (this as any).thinkingSettingFor(type, parentThinking, agentConfig, explicitThinking);
+      if ((this as any).mode !== "eco" || explicitThinking) return { ...base, ecoConfigured: false };
+      const candidates = [
+        [mockModules.mockSessionEcoThinking[type], "session-agent"],
+        [mockModules.mockConfig.ecoThinkingOverrides[type], "config-agent"],
+        [agentConfig?.ecoThinkingLevel, "agent-md"],
+      ];
+      const found = candidates.find(([value]) => value != null && value !== "");
+      return found ? { value: found[0], source: found[1], ecoConfigured: true } : { ...base, ecoConfigured: false };
+    },
+    ecoThinkingSettingFor(type: string, parentThinking: string | undefined, agentConfig?: any, explicitThinking?: string) {
+      const previous = mockModules.mockSessionMode;
+      mockModules.mockSessionMode = "eco";
+      try { return (this as any).thinkingSettingForMode(type, parentThinking, agentConfig, explicitThinking); }
+      finally { mockModules.mockSessionMode = previous; }
+    },
+    createSubagentRuntimeSettings() {
+      return mockModules.mockRuntimeSettingsSnapshot;
+    },
     mutate: {
       agent: {
+        setMode(mode: "default" | "eco" | undefined) { mockModules.mockConfig.mode = mode; mockModules.mockSessionMode = undefined; },
+        setEcoModelOverride(type: string, value: string) { mockModules.mockConfig.ecoModelOverrides[type] = value; },
+        clearEcoModelOverride(type: string) { delete mockModules.mockConfig.ecoModelOverrides[type]; },
+        setEcoThinkingOverride(type: string, value: string) { mockModules.mockConfig.ecoThinkingOverrides[type] = value; },
+        clearEcoThinkingOverride(type: string) { delete mockModules.mockConfig.ecoThinkingOverrides[type]; },
         setDefaultModel(value: string | null) { mockModules.mockConfig.agent.default = value; },
         setModelOverride(type: string, value: string | null) { mockModules.mockConfig.agent[type] = value; },
         clearModelOverride(type: string) { delete mockModules.mockConfig.agent[type]; },
@@ -287,6 +346,11 @@ vi.mock("../src/shell.js", () => {
         reset() { mockModules.mockConfig.concurrency = { default: 4 }; },
       },
       session: {
+        setMode(mode: "default" | "eco" | undefined) { mockModules.mockSessionMode = mode; },
+        setEcoModelOverride(type: string, model: string) { mockModules.mockSessionEcoModels[type] = model; },
+        clearEcoModelOverride(type: string) { delete mockModules.mockSessionEcoModels[type]; },
+        setEcoThinkingOverride(type: string, level: string) { mockModules.mockSessionEcoThinking[type] = level; },
+        clearEcoThinkingOverride(type: string) { delete mockModules.mockSessionEcoThinking[type]; },
         setOverride(type: string, model: string) { mockModules.mockSessionOverrides[type] = model; },
         clearOverride(type: string) { delete mockModules.mockSessionOverrides[type]; },
         setThinkingOverride(type: string, level: string) { mockModules.mockSessionThinkingOverrides[type] = level; },
@@ -294,6 +358,8 @@ vi.mock("../src/shell.js", () => {
         clearAll() {
           mockModules.mockSessionOverrides = { default: null };
           mockModules.mockSessionThinkingOverrides = {};
+          mockModules.mockSessionEcoModels = {};
+          mockModules.mockSessionEcoThinking = {};
         },
         setShowCost(enabled: boolean) { mockModules.mockSessionShowCost = enabled; },
         clearShowCost() { mockModules.mockSessionShowCost = undefined; },
@@ -325,6 +391,7 @@ vi.mock("../src/shell.js", () => {
             worktreeSelectionPath: intent.worktreeSelectionPath,
             agentConfig: intent.agentConfig,
             invocation: intent.invocation,
+            runtimeSettings: intent.runtimeSettingsSnapshot,
           },
         );
         const record = mockModules.mockManager.getRecord(id);

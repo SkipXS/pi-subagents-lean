@@ -44,6 +44,9 @@ function memIO(initial: Partial<SubagentsConfig> = defaultConfig()): { io: Confi
   const merged: SubagentsConfig = {
     agent: { ...(defaultConfig().agent), ...(initial.agent ?? {}) },
     thinkingOverrides: { ...(initial.thinkingOverrides ?? {}) },
+    mode: initial.mode,
+    ecoModelOverrides: { ...(initial.ecoModelOverrides ?? {}) },
+    ecoThinkingOverrides: { ...(initial.ecoThinkingOverrides ?? {}) },
     concurrency: { default: 4, ...(initial.concurrency ?? {}) },
   };
   let cur = structuredClone(merged);
@@ -107,7 +110,7 @@ describe("ConfigStore child runtime snapshot", () => {
     store.mutate.session.setThinkingOverride("scout", "high" as any);
     const snapshot = store.createSubagentRuntimeSettings();
 
-    expect(Object.keys(snapshot).sort()).toEqual(["agent", "modelFor", "thinkingSettingFor"]);
+    expect(Object.keys(snapshot).sort()).toEqual(["agent", "mode", "modelFor", "modelSettingForMode", "thinkingSettingFor", "thinkingSettingForMode"]);
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot.agent)).toBe(true);
     expect(snapshot.modelFor("scout", "parent/model")).toBe("session/model");
@@ -125,6 +128,45 @@ describe("ConfigStore child runtime snapshot", () => {
     expect(snapshot).not.toHaveProperty("setDeps");
     expect(snapshot).not.toHaveProperty("reload");
     expect(snapshot).not.toHaveProperty("dispose");
+  });
+});
+
+describe("ConfigStore Eco mode", () => {
+  it("preserves a session mode when a permanent mode save fails", () => {
+    const config = defaultConfig();
+    const store = new ConfigStore({
+      load: () => structuredClone(config),
+      save: () => { throw new Error("disk full"); },
+    });
+    store.mutate.session.setMode("eco");
+
+    expect(() => store.mutate.agent.setMode("default")).toThrow("disk full");
+    expect(store.mode).toBe("eco");
+    expect(store.modeSource).toBe("session");
+  });
+
+  it("defaults to Default, persists mode, and snapshots Eco settings for nested agents", () => {
+    const { io, current } = memIO({
+      ...defaultConfig(),
+      ecoModelOverrides: { scout: "saved/eco" },
+      ecoThinkingOverrides: { scout: "low" },
+    });
+    const store = new ConfigStore(io);
+    expect(store.mode).toBe("default");
+    expect(store.modeSource).toBe("default");
+
+    store.mutate.agent.setMode("eco");
+    store.mutate.session.setEcoModelOverride("scout", "session/eco");
+    const snapshot = store.createSubagentRuntimeSettings();
+    expect(current().mode).toBe("eco");
+    expect(snapshot.mode).toBe("eco");
+    expect(snapshot.modelSettingForMode!("scout", "parent/model").value).toBe("session/eco");
+    expect(snapshot.thinkingSettingForMode!("scout", "high").value).toBe("low");
+
+    store.mutate.session.setMode("default");
+    store.mutate.session.setEcoModelOverride("scout", "later/eco");
+    expect(snapshot.mode).toBe("eco");
+    expect(snapshot.modelSettingForMode!("scout", "parent/model").value).toBe("session/eco");
   });
 });
 
