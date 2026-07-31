@@ -546,6 +546,34 @@ describe("ConfigStore persisted mutations", () => {
     expect(concurrencies).toEqual([{ default: 8 }]);
   });
 
+  it("merges concurrent Eco-map updates without losing either field", () => {
+    const disk: SubagentsConfig = {
+      ...defaultConfig(),
+      ecoModelOverrides: { scout: "old/eco" },
+      ecoThinkingOverrides: { scout: "low" },
+    };
+    const io: ConfigIO = {
+      load: () => ({ config: structuredClone(disk), health: "healthy", canRepair: false }),
+      save: () => { throw new Error("legacy save should not run"); },
+      update: (change) => {
+        const latest = structuredClone(disk);
+        latest.ecoModelOverrides = { ...(latest.ecoModelOverrides ?? {}), reviewer: "concurrent/eco" };
+        latest.ecoThinkingOverrides = { ...(latest.ecoThinkingOverrides ?? {}), reviewer: "high" };
+        change(latest);
+        Object.assign(disk, structuredClone(latest));
+        return { config: latest, health: "healthy", canRepair: false };
+      },
+    };
+    const store = new ConfigStore(io);
+
+    store.mutate.agent.setEcoModelOverride("scout", "new/eco");
+
+    expect(disk.ecoModelOverrides).toEqual({ scout: "new/eco", reviewer: "concurrent/eco" });
+    expect(disk.ecoThinkingOverrides).toEqual({ scout: "low", reviewer: "high" });
+    expect(store.ecoModelOverride("reviewer")).toBe("concurrent/eco");
+    expect(store.ecoThinkingOverride("reviewer")).toBe("high");
+  });
+
   it("rolls back RAM and suppresses widget and manager effects when saving fails", () => {
     const disk = defaultConfig();
     const io: ConfigIO = {
@@ -568,6 +596,25 @@ describe("ConfigStore persisted mutations", () => {
     expect(store.concurrency).toEqual({ default: 4 });
     expect(disk.concurrency).toEqual({ default: 4 });
     expect(concurrencies).toHaveLength(0);
+  });
+
+  it("rolls back Eco overrides and retains durable values when saving fails", () => {
+    const initial: SubagentsConfig = {
+      ...defaultConfig(),
+      ecoModelOverrides: { scout: "saved/eco" },
+      ecoThinkingOverrides: { scout: "medium" },
+    };
+    const io: ConfigIO = {
+      load: () => structuredClone(initial),
+      save: () => { throw new Error("disk full"); },
+    };
+    const store = new ConfigStore(io);
+
+    expect(() => store.mutate.agent.setEcoModelOverride("scout", "new/eco")).toThrow("disk full");
+    expect(store.ecoModelOverride("scout")).toBe("saved/eco");
+    expect(store.ecoThinkingOverride("scout")).toBe("medium");
+    expect(store.persistedEcoModelOverride("scout")).toBe("saved/eco");
+    expect(store.persistedEcoThinkingOverride("scout")).toBe("medium");
   });
 
   it("updates recovery health after a failed update finds a newly corrupt primary without losing rollback", () => {

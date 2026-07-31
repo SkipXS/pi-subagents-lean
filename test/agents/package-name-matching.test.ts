@@ -208,6 +208,18 @@ describe("extensions without package.json are unaffected", () => {
     });
     expect(result.extensions).toHaveLength(1);
   });
+
+  it.skipIf(process.platform !== "win32")("matches local extensions with Windows separators", () => {
+    const override = buildExtOverride(["my-extension"], undefined, undefined);
+    const result = override!({
+      extensions: [
+        { path: String.raw`C:\Users\dev\.pi\agent\extensions\my-extension\index.ts`, tools: new Map([["my_tool", {}]]) },
+      ],
+      errors: [],
+      runtime: {},
+    });
+    expect(result.extensions).toHaveLength(1);
+  });
 });
 
 /* ------------------------------------------------------------------ */
