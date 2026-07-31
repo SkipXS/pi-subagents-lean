@@ -168,6 +168,93 @@ describe("ConfigStore Eco mode", () => {
     expect(snapshot.mode).toBe("eco");
     expect(snapshot.modelSettingForMode!("scout", "parent/model").value).toBe("session/eco");
   });
+
+  it("reads session Eco overrides ahead of persisted overrides and clears them without saving", () => {
+    const { io, saves } = memIO({
+      ...defaultConfig(),
+      ecoModelOverrides: { scout: "saved/eco" },
+      ecoThinkingOverrides: { scout: "low" },
+    });
+    const store = new ConfigStore(io);
+
+    expect(store.hasPersistedEcoOverrides()).toBe(true);
+    expect(store.persistedEcoModelOverride("scout")).toBe("saved/eco");
+    expect(store.persistedEcoThinkingOverride("scout")).toBe("low");
+    expect(store.ecoModelOverride("scout")).toBe("saved/eco");
+    expect(store.ecoThinkingOverride("scout")).toBe("low");
+
+    store.mutate.session.setEcoModelOverride("scout", "session/eco");
+    store.mutate.session.setEcoThinkingOverride("scout", "high");
+    expect(store.sessionEcoModelOverride("scout")).toBe("session/eco");
+    expect(store.sessionEcoThinkingOverride("scout")).toBe("high");
+    expect(store.ecoModelOverride("scout")).toBe("session/eco");
+    expect(store.ecoThinkingOverride("scout")).toBe("high");
+
+    store.mutate.session.clearEcoModelOverride("scout");
+    store.mutate.session.clearEcoThinkingOverride("scout");
+    expect(store.sessionEcoModelOverride("scout")).toBeUndefined();
+    expect(store.sessionEcoThinkingOverride("scout")).toBeUndefined();
+    expect(store.ecoModelOverride("scout")).toBe("saved/eco");
+    expect(store.ecoThinkingOverride("scout")).toBe("low");
+    expect(saves).toHaveLength(0);
+  });
+
+  it("persists and clears Eco overrides and a saved mode", () => {
+    const { io, current, saves } = memIO();
+    const store = new ConfigStore(io);
+
+    store.mutate.agent.setEcoModelOverride("scout", "saved/eco");
+    store.mutate.agent.setEcoThinkingOverride("scout", "medium");
+    expect(store.hasPersistedEcoOverrides()).toBe(true);
+    expect(current().ecoModelOverrides).toEqual({ scout: "saved/eco" });
+    expect(current().ecoThinkingOverrides).toEqual({ scout: "medium" });
+
+    store.mutate.agent.clearEcoModelOverride("scout");
+    store.mutate.agent.clearEcoThinkingOverride("scout");
+    expect(store.hasPersistedEcoOverrides()).toBe(false);
+    expect(store.persistedEcoModelOverride("scout")).toBeUndefined();
+    expect(store.persistedEcoThinkingOverride("scout")).toBeUndefined();
+
+    store.mutate.agent.setMode("eco");
+    expect(store.modeSource).toBe("saved");
+    store.mutate.agent.setMode(undefined);
+    expect(store.mode).toBe("default");
+    expect(store.modeSource).toBe("default");
+    expect(current().mode).toBeUndefined();
+    expect(saves).toHaveLength(6);
+  });
+
+  it("uses Eco resolution only in Eco mode and retains sources in runtime snapshots", () => {
+    const { io } = memIO({
+      agent: { ...defaultConfig().agent, default: "default/model", defaultThinking: "high" },
+      mode: "default",
+      ecoModelOverrides: { scout: "saved/eco" },
+      ecoThinkingOverrides: { scout: "low" },
+      concurrency: { default: 4 },
+    });
+    const store = new ConfigStore(io);
+
+    expect(store.modelSettingForMode("scout", "parent/model"))
+      .toEqual({ value: "default/model", source: "config-global", ecoConfigured: false });
+    expect(store.thinkingSettingForMode("scout", "minimal"))
+      .toEqual({ value: "high", source: "config-global", ecoConfigured: false });
+    expect(store.ecoModelSettingFor("scout", "parent/model"))
+      .toEqual({ value: "saved/eco", source: "config-agent", ecoConfigured: true });
+    expect(store.ecoThinkingSettingFor("scout", "minimal"))
+      .toEqual({ value: "low", source: "config-agent", ecoConfigured: true });
+
+    const defaultSnapshot = store.createSubagentRuntimeSettings();
+    expect(defaultSnapshot.modelSettingForMode!("scout", "parent/model"))
+      .toEqual({ value: "default/model", source: "config-global", ecoConfigured: false });
+    expect(defaultSnapshot.thinkingSettingForMode!("scout", "minimal"))
+      .toEqual({ value: "high", source: "config-global", ecoConfigured: false });
+
+    store.mutate.session.setMode("eco");
+    expect(store.modelSettingForMode("scout", "parent/model", undefined, "spawn/model"))
+      .toEqual({ value: "spawn/model", source: "spawn", ecoConfigured: false });
+    expect(store.thinkingSettingForMode("scout", "minimal", undefined, "max"))
+      .toEqual({ value: "max", source: "spawn", ecoConfigured: false });
+  });
 });
 
 describe("ConfigStore reads", () => {
