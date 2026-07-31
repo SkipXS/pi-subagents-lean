@@ -81,8 +81,13 @@ import { showModelSettingsMenu } from "../../../src/ui/menu/menu-model-settings.
 function resetAgentState(): void {
   mockModules.mockConfig.agent = { default: null, forceBackground: false };
   mockModules.mockConfig.thinkingOverrides = {};
+  mockModules.mockConfig.ecoModelOverrides = {};
+  mockModules.mockConfig.ecoThinkingOverrides = {};
   mockModules.mockSessionOverrides = { default: null };
   mockModules.mockSessionThinkingOverrides = {};
+  mockModules.mockSessionEcoModels = {};
+  mockModules.mockSessionEcoThinking = {};
+  mockModules.mockSessionMode = undefined;
   mockModules.mockSessionShowCost = undefined;
 }
 
@@ -231,6 +236,40 @@ describe("showModelSettingsMenu — per-type overrides", () => {
       "model:general-purpose", "thinking:general-purpose",
       "model:Explore", "thinking:Explore",
     ]));
+  });
+
+  it.each(["session", "permanent"] as const)("Eco model Inherit clears only the %s override and falls back to Default", async (scope) => {
+    mockModules.mockSessionEcoModels.Explore = "openai/gpt-4o";
+    mockModules.mockConfig.ecoModelOverrides.Explore = "openai/gpt-4o";
+    const ctx = createMockCtx();
+    await showModelSettingsMenu(ctx, ["openai/gpt-4o"]);
+    const item = settingsListCalls[0].items.find((entry: any) => entry.id === "eco-model:Explore");
+    item.submenu("", vi.fn());
+    expect(selectListInstances.at(-1)!.items.map((entry: any) => entry.value)).not.toContain("clear");
+    expect(selectDialogInstances.at(-1)!.items[0]).toMatchObject({ value: "(inherits parent)", label: "Inherit Default" });
+    selectListInstances.at(-1)!.onSelect!({ value: scope });
+    selectDialogInstances.at(-1)!.callbacks.onSelect("(inherits parent)");
+
+    expect(mockModules.mockSessionEcoModels.Explore).toBe(scope === "session" ? undefined : "openai/gpt-4o");
+    expect(mockModules.mockConfig.ecoModelOverrides.Explore).toBe(scope === "permanent" ? undefined : "openai/gpt-4o");
+  });
+
+  it.each(["session", "permanent"] as const)("Eco thinking Inherit clears only the %s override and falls back to Default", async (scope) => {
+    mockModules.mockSessionEcoThinking.Explore = "low";
+    mockModules.mockConfig.ecoThinkingOverrides.Explore = "high";
+    const ctx = createMockCtx();
+    await showModelSettingsMenu(ctx, ["openai/gpt-4o"]);
+    const item = settingsListCalls[0].items.find((entry: any) => entry.id === "eco-thinking:Explore");
+    item.submenu("", vi.fn());
+    const modeList = selectListInstances.at(-2)!;
+    const levelList = selectListInstances.at(-1)!;
+    expect(modeList.items.map((entry: any) => entry.value)).not.toContain("clear");
+    expect(levelList.items[0]).toEqual({ value: "inherit", label: "Inherit Default" });
+    modeList.onSelect!({ value: scope });
+    levelList.onSelect!({ value: "inherit" });
+
+    expect(mockModules.mockSessionEcoThinking.Explore).toBe(scope === "session" ? undefined : "low");
+    expect(mockModules.mockConfig.ecoThinkingOverrides.Explore).toBe(scope === "permanent" ? undefined : "high");
   });
 
   it("shows the effective per-agent model and thinking source", async () => {

@@ -55,10 +55,13 @@ when its notification arrives.
 
 ## `/agents` menu
 
-`/agents` is the manual control surface. It never requires an LLM tool call.
+`/agents` is the manual control surface. It never requires an LLM tool call. The
+interactive menu is TUI-only; RPC, JSON, and print mode return a short notice
+instead of opening custom terminal UI.
 
 ```text
 /agents
+├─ Mode: Default / 🍃 Eco (session-only or permanent; source shown)
 ├─ Running agents
 │  ├─ view live conversation, final result, or error
 │  ├─ steer a running agent or stop one
@@ -71,7 +74,7 @@ when its notification arrives.
 │  └─ inspect discovered definitions and effective model, thinking,
 │     tools, skills, and extensions policy
 └─ Settings
-   ├─ Agent settings — availability and session/saved model and thinking overrides
+   ├─ Agent settings — availability plus Default/Eco session/saved model and thinking overrides
    ├─ Execution — concurrency, forced background, limits, and nesting depth
    ├─ Widget — layout, retention/log buffering, and usage columns
    └─ System prompt, context, skills & extensions — prompt mode, parent
@@ -142,6 +145,8 @@ extensions: false
 skills: false
 model: zai/glm-5.2
 thinking: high
+eco_model: openai/gpt-4o-mini
+eco_thinking: low
 max_turns: 80
 delegate_to: [scout, reviewer]
 max_child_agents: 2
@@ -261,6 +266,8 @@ exclude_tools: [tavily/*]
 |---|---|---|---|
 | `model` | `provider/model-id` | resolved precedence | Role-level model candidate. Session/persistent overrides and manual spawn selection can take precedence; the parent model is the final fallback. |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | resolved precedence | Role-level reasoning candidate; invalid values are ignored. Provider capability normalization may adjust the selected level. |
+| `eco_model` | `provider/model-id` | resolved Default model | Optional Eco-only model candidate. A configured but missing/unauthenticated model fails the spawn instead of falling back. |
+| `eco_thinking` | thinking level | resolved Default thinking | Optional Eco-only reasoning candidate, normalized against the final Eco model independently of `eco_model`. |
 | `max_turns` | number | unlimited for `Agent` tool/nested calls; `defaultMaxTurns` fallback for manual `/agents` spawns | Soft limit. At the limit the agent is steered to wrap up; it is hard-aborted after `graceTurns` more turns (`0` aborts on the next turn). |
 | `max_tokens` | number | unlimited | Maximum output tokens per model response, passed through as the provider's completion-token limit. |
 
@@ -295,8 +302,9 @@ The exact wording is generated implementation detail, so it is intentionally
 not pasted here. Its behavior is stable: it advertises only visible names that
 are safe to represent exactly (at most 64 UTF-8 bytes, without controls,
 backticks, or its reserved markers); descriptions are normalized and capped.
-The catalog is deterministic and bounded to 24 agents, 2,263 catalog bytes, and
-4,096 bytes for the whole generated block. Omitted entries are reported with an
+The catalog is deterministic and bounded to 24 agents and 4,096 UTF-8 bytes for
+the whole generated block; its available byte budget is derived after framing
+and routing guidance. Omitted entries are reported with an
 `… +N omitted` marker. Disable it when you want no automatic catalog or routing
 guidance.
 
@@ -348,6 +356,14 @@ Model and thinking use the same highest-to-lowest precedence:
 
 A missing frontmatter model or thinking value therefore does not necessarily
 inherit the parent: any higher global or per-role setting can win.
+
+Eco mode is selected only in the TUI `/agents` menu. Its footer indicator is
+`🍃 Eco`; Default mode adds no footer text. Each Eco field resolves independently as explicit
+wizard value > Eco session role override > saved Eco role override > Agent
+Markdown `eco_*` > the fully resolved Default-mode field. A wizard field left
+unchanged uses the active mode. Mode and resolved settings are captured when a
+root spawn is accepted, so queued/running work is unaffected by later toggles;
+nested agents inherit that root snapshot.
 
 ### System prompt and context
 
@@ -438,7 +454,8 @@ the widget is visible.
 
 `~/.pi/agent/subagents-lean.json` is managed by `/agents`; direct edits are also
 supported. Per-role model overrides are dynamic keys inside `agent`, and
-per-role thinking overrides live in `thinkingOverrides`.
+per-role thinking overrides live in `thinkingOverrides`. Eco mode/settings use
+`mode`, `ecoModelOverrides`, and `ecoThinkingOverrides`.
 
 ### Execution, catalog, model, and prompt settings
 
@@ -448,6 +465,9 @@ per-role thinking overrides live in `thinkingOverrides`.
 | `agent.<role>` | absent | Persisted model override for that role. A string wins at its precedence level; `null` does not select a model. |
 | `agent.defaultThinking` | absent | Persisted global thinking fallback. |
 | `thinkingOverrides.<role>` | absent | Persisted thinking override for that role. |
+| `mode` | absent (`default`) | Default mode for new sessions; `eco` activates Eco resolution immediately. |
+| `ecoModelOverrides.<role>` | absent | Persisted Eco model override for that role. |
+| `ecoThinkingOverrides.<role>` | absent | Persisted Eco thinking override for that role. |
 | `agent.defaultMaxTurns` | unlimited | Soft turn-limit fallback for manual `/agents` spawns when the selected definition has no `max_turns`. It does not apply to `Agent` tool spawns or nested `Agent` calls, which are unlimited unless their definition sets `max_turns`. |
 | `agent.graceTurns` | `6` | Extra turns after a soft limit before hard abort. |
 | `agent.forceBackground` | `false` | Make every root spawn background, even when its call requests foreground. Nested children stay foreground. |

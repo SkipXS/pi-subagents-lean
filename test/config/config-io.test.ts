@@ -117,6 +117,41 @@ describe("config I/O paths", () => {
     expect(loadConfig().config.agent.defaultThinking).toBeUndefined();
   });
 
+  it("drops an invalid optional mode without rejecting the otherwise valid config", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      mode: "turbo",
+      agent: { default: "openai/gpt-4o" },
+      concurrency: { default: 7 },
+    }));
+    vi.resetModules();
+
+    const { loadConfig } = await import("../../src/config/config-io.ts");
+    const result = loadConfig();
+    expect(result.health).toBe("healthy");
+    expect(result.config.mode).toBeUndefined();
+    expect(result.config.agent.default).toBe("openai/gpt-4o");
+    expect(result.config.concurrency.default).toBe(7);
+  });
+
+  it("normalizes persisted Eco mode and drops malformed Eco overrides", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      mode: "eco",
+      ecoModelOverrides: { scout: "cheap/small", reviewer: 42, empty: "" },
+      ecoThinkingOverrides: { scout: "low", reviewer: "invalid" },
+      concurrency: { default: 4 },
+    }));
+    vi.resetModules();
+
+    const { loadConfig } = await import("../../src/config/config-io.ts");
+    expect(loadConfig().config).toMatchObject({
+      mode: "eco",
+      ecoModelOverrides: { scout: "cheap/small" },
+      ecoThinkingOverrides: { scout: "low" },
+    });
+  });
+
   it("defaults and preserves widget visibility and orchestration settings", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({

@@ -62,8 +62,11 @@ vi.mock("../../src/shell.js", () => ({
   getStore: () => ({
     createSubagentRuntimeSettings: () => ({
       agent: { graceTurns: 6, forceBackground: false, showCost: false, maxNestingDepth: 2 },
+      mode: "eco",
       modelFor: (_type: string, parent: string, config?: { model?: string }) => config?.model ?? parent,
       thinkingSettingFor: () => ({ value: undefined }),
+      modelSettingForMode: (_type: string, parent: string, config?: { model?: string }) => ({ value: config?.model ?? parent, source: "parent", ecoConfigured: false }),
+      thinkingSettingForMode: () => ({ value: undefined, source: "parent", ecoConfigured: false }),
     }),
   }),
   getPiInstance: () => mockGetPiInstance(),
@@ -213,6 +216,29 @@ describe("SpawnCoordinator", () => {
     } finally {
       realManager.dispose();
     }
+  });
+
+  it("keeps the accepted root snapshot for queued execution and its nested executor", async () => {
+    const coordinator = new SpawnCoordinator(manager as any);
+    const acceptedSnapshot = Object.freeze({
+      agent: Object.freeze({ graceTurns: 3, forceBackground: false, showCost: false, maxNestingDepth: 2 }),
+      mode: "eco" as const,
+      modelFor: vi.fn(() => "accepted/eco"),
+      thinkingSettingFor: vi.fn(() => ({ value: "low" as const, source: "config-agent" as const })),
+      modelSettingForMode: vi.fn(() => ({ value: "accepted/eco", source: "config-agent" as const, ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low" as const, source: "config-agent" as const, ecoConfigured: true })),
+    });
+
+    await coordinator.spawn(mockPi, ctx, {
+      type: "builder", prompt: "queued work", description: "Queued snapshot",
+      graceTurns: 6, runInBackground: true,
+      runtimeSettingsSnapshot: acceptedSnapshot as unknown as import("../../src/config/config-store.js").SubagentRuntimeSettings,
+    });
+
+    const options = manager.spawn.mock.calls[0][4];
+    expect(options.runtimeSettings).toBe(acceptedSnapshot);
+    expect(options.invocation.mode).toBe("eco");
+    expect(typeof options.nestedExecutorFactory("queued-parent")).toBe("function");
   });
 
   it("snapshots an explicitly resolved agent config before handing it to the manager", async () => {
@@ -372,6 +398,7 @@ describe("SpawnCoordinator", () => {
     expect(options.modelKey).toBe("deepseek/deepseek-reasoner");
     expect(options.thinkingLevel).toBe("high");
     expect(options.invocation.thinkingLevel).toBe("high");
+    expect(options.invocation.mode).toBe("eco");
     expect(buildInvocationTags(options.invocation).tags).not.toContain("thinking: high");
   });
 

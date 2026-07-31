@@ -187,7 +187,7 @@ describe("Agent tool registration", () => {
     const messageRenderer = api.messageRenderers.find(({ type }) => type === "subagent-result");
     messageRenderer!.renderer({ content: "done" }, { expanded: false }, theme);
     const command = api.commands.find(({ name }) => name === "agents");
-    const ctx = { modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-4o" }] } };
+    const ctx = { mode: "tui", ui: { notify: vi.fn() }, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-4o" }] } };
     await command!.command.handler("ignored", ctx);
 
     expect(state.renderAgentToolCall).toHaveBeenCalledWith(callArgs, theme);
@@ -195,6 +195,24 @@ describe("Agent tool registration", () => {
     expect(state.renderSubagentResult).toHaveBeenCalledWith({ content: "done" }, { expanded: false }, theme, true);
     expect(state.getStore).toHaveBeenCalledTimes(2);
     expect(state.showAgentsMainMenu).toHaveBeenCalledWith(ctx, ["openai/gpt-4o"]);
+  });
+
+  it.each(["rpc", "print"])("treats /agents as TUI-only in %s mode without opening custom UI", async (mode) => {
+    const api = createApi();
+    extension(api.api as any);
+    const command = api.commands.find(({ name }) => name === "agents")!;
+    const ctx = {
+      mode,
+      ui: { custom: vi.fn(), notify: vi.fn() },
+      modelRegistry: { getAvailable: vi.fn(() => []) },
+    };
+
+    await command.command.handler("", ctx);
+
+    expect(ctx.ui.custom).not.toHaveBeenCalled();
+    expect(ctx.modelRegistry.getAvailable).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith("The /agents management menu is available only in TUI mode.", "info");
+    expect(state.showAgentsMainMenu).not.toHaveBeenCalled();
   });
 
   it("reads showCost when each renderer runs instead of at registration", () => {

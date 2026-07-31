@@ -18,7 +18,7 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { SelectList, type SelectItem } from "@earendil-works/pi-tui";
-import { buildSelectListTheme } from "./helpers.js";
+import { applyPersistedSetting, buildSelectListTheme } from "./helpers.js";
 import { SettingsListWrapper } from "./wrappers/settings-list.js";
 import { showModelSettingsMenu } from "./menu-model-settings.js";
 import { showExecutionMenu } from "./menu-execution.js";
@@ -28,6 +28,7 @@ import { showAgentCatalog } from "./menu-agent-catalog.js";
 import { showSystemPromptMenu } from "./menu-system-prompt.js";
 import { showConfigRecoveryMenu } from "./menu-config-recovery.js";
 import { getStore } from "../../shell.js";
+import { syncEcoStatus } from "../eco-status.js";
 
 // Spawn wizard — co-located in this folder.
 import { showSpawnAgentMenu } from "./menu-spawn-wizard.js";
@@ -84,19 +85,57 @@ export async function showSettingsMenu(
   });
 }
 
+async function showModeMenu(ctx: ExtensionCommandContext): Promise<void> {
+  const store = getStore();
+  await runSelectMenu(ctx, "Agent Mode", () => [
+    { value: "session:default", label: "Default · this session", description: "Use Default mode until this session ends" },
+    { value: "session:eco", label: "🍃 Eco · this session", description: "Use Eco settings until this session ends" },
+    { value: "permanent:default", label: "Default · permanent", description: "Apply now and make Default the mode for new sessions" },
+    { value: "permanent:eco", label: "🍃 Eco · permanent", description: "Apply now and make Eco the mode for new sessions" },
+    { value: "clear", label: "Clear saved/session mode", description: "Return to the implicit Default mode" },
+  ], async (choice) => {
+    const [scope, value] = choice.split(":") as [string, "default" | "eco" | undefined];
+    if (scope === "session" && value) {
+      store.mutate.session.setMode(value);
+      syncEcoStatus(ctx.ui, store.mode);
+      ctx.ui.notify(`Agent mode set to ${value === "eco" ? "Eco" : "Default"} for this session`, "info");
+      return true;
+    }
+    if (scope === "permanent" && value) {
+      const saved = applyPersistedSetting(ctx, () => store.mutate.agent.setMode(value), `Agent mode set to ${value === "eco" ? "Eco" : "Default"}`);
+      if (saved) syncEcoStatus(ctx.ui, store.mode);
+      return saved;
+    }
+    if (choice === "clear") {
+      const saved = applyPersistedSetting(ctx, () => store.mutate.agent.setMode(undefined), "Agent mode reset to Default");
+      if (saved) {
+        store.mutate.session.setMode(undefined);
+        syncEcoStatus(ctx.ui, store.mode);
+      }
+      return saved;
+    }
+  });
+}
+
 export async function showAgentsMainMenu(
   ctx: ExtensionCommandContext,
   modelOptions: string[],
 ): Promise<void> {
-  const items: SelectItem[] = [
-    { value: "running", label: "Running agents", description: "List running, queued, and completed agents" },
-    { value: "spawn", label: "Spawn agent", description: "Manually spawn a new agent" },
-    { value: "catalog", label: "Agent catalog", description: "Inspect discovered agent definitions and their configuration" },
-    { value: "settings", label: "Settings", description: "Agent, execution, widget, and prompt settings" },
-  ];
+  const items = (): SelectItem[] => {
+    const store = getStore();
+    const eco = store.mode === "eco";
+    return [
+      { value: "mode", label: `Mode: ${eco ? "🍃 Eco" : "Default"}`, description: `Active source: ${store.modeSource}` },
+      { value: "running", label: "Running agents", description: "List running, queued, and completed agents" },
+      { value: "spawn", label: "Spawn agent", description: "Manually spawn a new agent" },
+      { value: "catalog", label: "Agent catalog", description: "Inspect discovered agent definitions and their configuration" },
+      { value: "settings", label: "Settings", description: "Agent, execution, widget, and prompt settings" },
+    ];
+  };
 
   await runSelectMenu(ctx, "Agents", items, async (choice) => {
     switch (choice) {
+      case "mode": await showModeMenu(ctx); break;
       case "running": await showRunningAgentsMenu(ctx); break;
       case "spawn": await showSpawnAgentMenu(ctx, modelOptions); break;
       case "catalog": await showAgentCatalog(ctx); break;

@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AgentRecord, SpawnConfig, ToolActivity } from "../types.js";
 import type { AgentConfig } from "../agents/types.js";
 import type { AgentManager, SpawnOptions } from "../agents/agent-manager.js";
+import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import { resolveTypeInCatalog, snapshotRegisteredAgentCatalog } from "../agents/agent-types.js";
 import { buildAgentDetails, createNestedAgentExecutor, formatResultContent } from "../agents/tool-execution.js";
 
@@ -31,6 +32,8 @@ export interface SpawnIntent extends SpawnConfig {
   signal?: AbortSignal;
   /** Narrowed to required — all callers resolve this before spawn. */
   graceTurns: number;
+  /** Root mode/settings snapshot captured by callers that resolve fields before entering the coordinator. */
+  runtimeSettingsSnapshot?: SubagentRuntimeSettings;
 }
 
 export interface SpawnResult {
@@ -141,7 +144,7 @@ export class SpawnCoordinator {
     // A nested coordinator call already runs in its parent's isolated context.
     // Otherwise capture settings before manager execution can enter ALS.
     const inheritedRuntime = getSubagentRuntimeContext();
-    let runtimeSettings = inheritedRuntime?.settings;
+    let runtimeSettings = inheritedRuntime?.settings ?? intent.runtimeSettingsSnapshot;
     if (!runtimeSettings) {
       // Never fall through to the root store from a malformed child context.
       if (inheritedRuntime) throw new Error("Child runtime is missing detached settings");
@@ -159,7 +162,7 @@ export class SpawnCoordinator {
     const agentConfig = snapshotAgentConfig(
       intent.agentConfig ?? (canonicalType ? agentCatalog.get(canonicalType) : undefined),
     );
-    const { type, prompt, runInBackground, invocation, signal, ...config } = intent;
+    const { type, prompt, runInBackground, invocation, signal, runtimeSettingsSnapshot: _runtimeSettingsSnapshot, ...config } = intent;
     const spawnOptions: SpawnOptions = {
       ...config,
       signal,
@@ -168,7 +171,7 @@ export class SpawnCoordinator {
       thinkingLevel,
       agentConfig,
       agentCatalog,
-      invocation: { ...invocation, thinkingLevel },
+      invocation: { ...invocation, mode: runtimeSettings.mode, thinkingLevel },
       isBackground: runInBackground,
       // This factory closes over trusted coordinator state and detached
       // settings before the manager enters a child AsyncLocalStorage context.

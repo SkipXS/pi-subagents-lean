@@ -7,6 +7,8 @@ import { buildSelectListTheme, createDelegatingComponent } from "../helpers.js";
 
 export interface ThinkingSelectSubmenuOptions {
   showClear: boolean;
+  /** Optional display label for the inherited sentinel value. */
+  inheritLabel?: string;
   /** Undefined keeps the global selector's full Pi level set. */
   levels?: readonly ThinkingLevel[];
   theme: Theme;
@@ -31,7 +33,7 @@ export function createThinkingSelectSubmenu(
     const delegator = createDelegatingComponent(modeList);
 
     const levels: Array<{ value: string; label: string }> = [
-      { value: "inherit", label: "Inherit" },
+      { value: "inherit", label: options.inheritLabel ?? "Inherit" },
       ...(options.levels ?? ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as ThinkingLevel[])
         .map((level) => ({ value: level, label: level })),
     ];

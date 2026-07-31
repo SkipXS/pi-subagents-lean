@@ -15,6 +15,8 @@ import { buildModelOptions, buildSelectListTheme, createDelegatingComponent } fr
 export interface ModelSelectSubmenuOptions {
   modelOptions: string[];
   showClear: boolean;
+  /** Optional display label for the inherited sentinel value. */
+  inheritLabel?: string;
   theme: Theme;
   onSelect: (mode: "session" | "permanent" | "clear", model: string | null) => boolean | void;
 }
@@ -52,6 +54,7 @@ export function createModelSelectSubmenu(
     modeList.onCancel = () => done();
 
     const modelOpts = buildModelOptions(options.modelOptions);
+    if (options.inheritLabel && modelOpts[0]) modelOpts[0].label = options.inheritLabel;
     const modelSelector = new SearchableSelectDialog(
       modelOpts,
       _currentValue === "(inherits parent)" ? null : _currentValue,

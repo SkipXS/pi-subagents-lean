@@ -36,7 +36,9 @@ const {
   mockCoordinatorSpawn,
   mockCoordinatorSpawnNested,
   mockNestedPreflight,
+  runtimeSettingsSnapshot,
 } = vi.hoisted(() => ({
+  runtimeSettingsSnapshot: { current: undefined as any },
   mockValidateWorktreePath: vi.fn(),
   mockRevalidateWorktreePath: vi.fn(async (_pi: unknown, path: string): Promise<WorktreeValidationResult> => ({
     ok: true, resolvedPath: path, worktreeRoot: path, label: "feature",
@@ -139,6 +141,7 @@ vi.mock("../../src/shell.js", () => {
     modelFor: mockModelFor,
     modelSettingFor: mockModelSettingFor,
     thinkingSettingFor: mockThinkingSettingFor,
+    createSubagentRuntimeSettings: () => runtimeSettingsSnapshot.current,
   }),
   getPiInstance: () => ({ sendMessage: vi.fn(), exec: vi.fn() }),
   getSessionCtx: () => ({ cwd: "/home/test/project" }),
@@ -224,6 +227,7 @@ describe("toolCallListener — canonical agent settings", () => {
       "explorer",
       undefined,
       expect.any(Object),
+      undefined,
     );
   });
 
@@ -267,6 +271,7 @@ describe("executeAgentTool — explicit agent type", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    runtimeSettingsSnapshot.current = undefined;
     ctx = fakeCtx();
   });
 
@@ -299,6 +304,45 @@ describe("executeAgentTool — explicit agent type", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("Unknown agent type: unknown-agent");
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("accepts a pre-Eco runtime snapshot without calling missing mode resolvers", async () => {
+    runtimeSettingsSnapshot.current = {
+      agent: { graceTurns: 5 },
+      modelFor: vi.fn(() => "legacy/model"),
+      thinkingSettingFor: vi.fn(() => ({ value: "low", source: "config-global" })),
+    };
+    (utils.findModelInRegistry as any).mockReturnValueOnce({ provider: "legacy", id: "model", reasoning: true });
+    mockGetRecord.mockReturnValueOnce({
+      id: "legacy-snapshot", result: "done",
+      display: { type: "general-purpose", description: "Test agent" },
+      lifecycle: { status: "completed", startedAt: 0, completedAt: 1 }, execution: {},
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+    });
+
+    const result = await executeAgentTool("legacy-snapshot", makeParams(), undefined, undefined, ctx);
+
+    expect(result.isError).toBeUndefined();
+    expect(runtimeSettingsSnapshot.current.modelFor).toHaveBeenCalled();
+    expect(runtimeSettingsSnapshot.current.thinkingSettingFor).toHaveBeenCalled();
+    expect(mockCoordinatorSpawn).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when the configured Eco model is unavailable", async () => {
+    runtimeSettingsSnapshot.current = {
+      agent: { graceTurns: 5 }, mode: "eco",
+      modelFor: mockModelFor, thinkingSettingFor: mockThinkingSettingFor,
+      modelSettingForMode: vi.fn(() => ({ value: "missing/eco", source: "config-agent", ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: true })),
+    };
+    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "missing", modelId: "eco" });
+    ctx.modelRegistry.find.mockReturnValueOnce(undefined);
+
+    const result = await executeAgentTool("missing-eco", makeParams(), undefined, undefined, ctx);
+
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content[0].text).toContain("Eco model not found: missing/eco");
+    expect(mockCoordinatorSpawn).not.toHaveBeenCalled();
   });
 
   it("keeps listener-injected settings distinct from explicit tool values at execution", async () => {
@@ -503,7 +547,47 @@ describe("executeNestedAgentTool — worktree overlay", () => {
         type: "local-reviewer",
         agentConfig: localConfig,
         model: { provider: "local", id: "local-model" },
-        thinkingLevel: "high",
+        thinkingLevel: "off",
+      }),
+    );
+  });
+
+  it("uses the detached Eco snapshot for a nested spawn", async () => {
+    const settings = {
+      agent: { graceTurns: 5 }, mode: "eco",
+      modelFor: vi.fn(() => "later/default"),
+      thinkingSettingFor: vi.fn(() => ({ value: "high", source: "parent" })),
+      modelSettingForMode: vi.fn(() => ({ value: "accepted/eco", source: "config-agent", ecoConfigured: true })),
+      thinkingSettingForMode: vi.fn(() => ({ value: "low", source: "config-agent", ecoConfigured: true })),
+    } as any;
+    mockNestedPreflight.mockReturnValue({ ok: true, type: "scout", agentConfig: { name: "scout", maxTurns: 4 } });
+    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "accepted", modelId: "eco" });
+    const ecoModel = { provider: "accepted", id: "eco", reasoning: true };
+    const modelRegistry = { find: vi.fn(() => ecoModel) };
+    mockCoordinatorSpawnNested.mockResolvedValue({
+      agentId: "child",
+      record: {
+        id: "child", result: "done", display: { type: "scout", description: "Inspect" },
+        lifecycle: { status: "completed", startedAt: 0, completedAt: 1 }, execution: {},
+        stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+      },
+    });
+    const runtime = createSubagentRuntimeContext(
+      createNestedAgentExecutor(
+        "parent", {} as any, { preflightNested: mockNestedPreflight } as any,
+        { spawnNested: mockCoordinatorSpawnNested } as any, settings,
+      ),
+      settings,
+    );
+
+    await executeNestedAgentTool(runtime, "call", { agent: "scout", prompt: "Inspect" }, undefined, undefined, {
+      modelRegistry, model: undefined, thinkingLevel: "high",
+    } as any);
+
+    expect(settings.modelSettingForMode).toHaveBeenCalledOnce();
+    expect(mockCoordinatorSpawnNested).toHaveBeenCalledWith(
+      "parent", expect.anything(), expect.anything(), expect.objectContaining({
+        model: ecoModel, modelKey: "accepted/eco", thinkingLevel: "low",
       }),
     );
   });

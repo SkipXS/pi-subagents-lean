@@ -22,8 +22,14 @@ describe("showAgentCatalog", () => {
     vi.clearAllMocks();
     mockModules.mockConfig.agent = { default: null, forceBackground: false };
     mockModules.mockConfig.thinkingOverrides = {};
+    mockModules.mockConfig.ecoModelOverrides = {};
+    mockModules.mockConfig.ecoThinkingOverrides = {};
+    mockModules.mockConfig.mode = undefined;
     mockModules.mockSessionOverrides = { default: null };
     mockModules.mockSessionThinkingOverrides = {};
+    mockModules.mockSessionEcoModels = {};
+    mockModules.mockSessionEcoThinking = {};
+    mockModules.mockSessionMode = undefined;
     (getAllTypes as any).mockReturnValue([]);
     (getAgentConfig as any).mockImplementation(() => undefined);
   });
@@ -214,6 +220,50 @@ describe("showAgentCatalog", () => {
     expect(message).toContain("Skills: none (preloads disable implicit skill metadata)");
     expect(message).toContain("Preloaded skills: testing");
     expect(message).toContain("Extensions: none");
+  });
+
+  it("shows effective Eco model/thinking values and their sources", async () => {
+    mockModules.mockConfig.mode = "eco";
+    mockModules.mockSessionEcoModels.Worker = "openai/gpt-4o";
+    mockModules.mockConfig.ecoThinkingOverrides.Worker = "low";
+    (getAllTypes as any).mockReturnValue(["Worker"]);
+    (getAgentConfig as any).mockReturnValue({ description: "Worker", model: "test/default", thinkingLevel: "high", systemPrompt: "Instructions" });
+    const ctx = createMockCtx();
+    ctx.modelRegistry.find = vi.fn((provider: string, id: string) => provider === "openai" && id === "gpt-4o"
+      ? { provider, id, reasoning: true }
+      : undefined);
+    ctx.modelRegistry.getApiKeyAndHeaders = vi.fn(async () => ({ ok: true, apiKey: "test", headers: {} }));
+    selectCatalogItems(ctx, ["agent:Worker", undefined]);
+
+    await showAgentCatalog(ctx);
+
+    const message = ctx.ui.notify.mock.calls[0][0];
+    expect(message).toContain("Mode: 🍃 Eco (saved)");
+    expect(message).toContain("Model: openai/gpt-4o (session override)");
+    expect(message).toContain("Thinking: low (saved override)");
+    expect(message).not.toContain("Spawn availability: blocked");
+  });
+
+  it.each([
+    ["missing", undefined, undefined, "Eco model not found: missing/model"],
+    ["unauthenticated", { provider: "private", id: "model", reasoning: true }, { ok: false, error: "login required" }, "Eco model is not authenticated: private/model (login required)"],
+  ])("shows an Eco %s blocker without a parent fallback", async (_case, found, auth, expected) => {
+    mockModules.mockConfig.mode = "eco";
+    mockModules.mockConfig.ecoModelOverrides.Worker = _case === "missing" ? "missing/model" : "private/model";
+    (getAllTypes as any).mockReturnValue(["Worker"]);
+    (getAgentConfig as any).mockReturnValue({ description: "Worker", ecoThinkingLevel: "low", systemPrompt: "Instructions" });
+    const ctx = createMockCtx();
+    ctx.model = { provider: "test", id: "parent-model", reasoning: true };
+    ctx.modelRegistry.find = vi.fn(() => found);
+    if (auth) ctx.modelRegistry.getApiKeyAndHeaders = vi.fn(async () => auth);
+    selectCatalogItems(ctx, ["agent:Worker", undefined]);
+
+    await showAgentCatalog(ctx);
+
+    const message = ctx.ui.notify.mock.calls[0][0];
+    expect(message).toContain(`Spawn availability: blocked — ${expected}`);
+    expect(message).toContain("Thinking: unavailable (agent MD; requested low cannot run while the Eco model is blocked)");
+    expect(message).not.toContain("parent fallback");
   });
 
   it("preserves disabled and exclusion policies in configuration", async () => {

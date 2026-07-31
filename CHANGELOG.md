@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Eco mode.** `/agents` now controls session-only or persisted Default/Eco mode, shows a themed `🍃 Eco` footer status, and provides per-agent Eco model/thinking settings plus `eco_model`/`eco_thinking` frontmatter. Eco fields resolve independently, fail closed for configured unavailable models, and are snapshotted across queued and nested execution.
 - **Bounded nested delegation.** Delegating roles can expose a sanitized, worktree-local child catalog through a foreground-only `Agent` proxy. Parent/depth/waiting-child hierarchy is available in status details, and stopped children return cancellation rather than partial success.
 
 ### Changed
