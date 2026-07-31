@@ -295,8 +295,9 @@ The exact wording is generated implementation detail, so it is intentionally
 not pasted here. Its behavior is stable: it advertises only visible names that
 are safe to represent exactly (at most 64 UTF-8 bytes, without controls,
 backticks, or its reserved markers); descriptions are normalized and capped.
-The catalog is deterministic and bounded to 24 agents, 2,263 catalog bytes, and
-4,096 bytes for the whole generated block. Omitted entries are reported with an
+The catalog is deterministic and bounded to 24 agents and 4,096 UTF-8 bytes for
+the whole generated block; its available byte budget is derived after framing
+and routing guidance. Omitted entries are reported with an
 `… +N omitted` marker. Disable it when you want no automatic catalog or routing
 guidance.
 
