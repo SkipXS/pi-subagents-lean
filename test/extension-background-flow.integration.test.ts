@@ -23,32 +23,6 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   DynamicBorder: class {},
 }));
 
-vi.mock("@earendil-works/pi-tui", () => {
-  class Component {
-    constructor(..._args: unknown[]) {}
-    addChild(_child: unknown) {}
-    clear() {}
-    invalidate() {}
-    render(_width: number) { return []; }
-  }
-  return {
-    Box: Component,
-    Container: Component,
-    Spacer: Component,
-    Text: Component,
-    Input: Component,
-    Markdown: Component,
-    SelectList: Component,
-    SettingsList: Component,
-    matchesKey: () => false,
-    isKeyRelease: () => false,
-    isFocusable: () => true,
-    truncateToWidth: (text: string) => text,
-    visibleWidth: (text: string) => text.length,
-    wrapTextWithAnsi: (text: string) => [text],
-  };
-});
-
 import extension from "../src/index.js";
 import { runAgent } from "../src/agents/agent-runner.js";
 import {
@@ -124,15 +98,11 @@ function createOfflineSession(): OfflineSession & Record<string, unknown> {
 function createOfflinePi() {
   const tools: any[] = [];
   const listeners: Array<{ event: string; handler: (...args: any[]) => any }> = [];
-  const messageRenderers: string[] = [];
   return {
     tools,
     listeners,
-    messageRenderers,
     api: {
       registerTool: vi.fn((tool: any) => tools.push(tool)),
-      registerCommand: vi.fn(),
-      registerMessageRenderer: vi.fn((customType: string) => messageRenderers.push(customType)),
       on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.push({ event, handler })),
       exec: vi.fn(async () => ({ code: 1, stdout: "" })),
       sendMessage: vi.fn(),
@@ -172,7 +142,6 @@ describe("offline extension headless lifecycle", () => {
 
     extension(api.api as any);
     expect(api.tools.map((tool) => tool.name)).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
-    expect(api.messageRenderers).toContain("subagent-result");
 
     const agentTool = api.tools.find((tool) => tool.name === "Agent")!;
     const stopAgentTool = api.tools.find((tool) => tool.name === "StopAgent")!;
@@ -225,10 +194,6 @@ describe("offline extension headless lifecycle", () => {
     await vi.waitFor(() => expect(sessions).toHaveLength(1));
     await vi.waitFor(() => expect(sessions[0].prompt).toHaveBeenCalledWith("Find the relevant files"));
 
-    // Headless tool_execution_start must not enter the UI/widget path while
-    // an agent is active.
-    await expect(listener(api, "tool_execution_start")({}, ctx)).resolves.toBeUndefined();
-    expect(ctx.ui.notify).not.toHaveBeenCalled();
     const runningStatus = await agentStatusTool.execute("status-running", {}, undefined, undefined, ctx);
     expect(runningStatus.content[0].text).toContain(" running");
 

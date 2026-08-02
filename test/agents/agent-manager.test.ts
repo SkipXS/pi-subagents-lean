@@ -70,14 +70,12 @@ import {
   getSessionCtx,
   getStore,
   getSubagentRuntimeContext,
-  getWidget,
   isInsideSubagentSpawn,
   runWithSubagentRuntime,
   setCoordinator,
   setManager,
   setPiInstance,
   setSessionCtx,
-  setWidget,
 } from "../../src/shell.js";
 import { createNestedAgentExecutor } from "../../src/agents/tool-execution.js";
 import { createNestedAgentProxy } from "../../src/agents/nested-agent-proxy.js";
@@ -121,11 +119,9 @@ describe("AgentManager", () => {
       expect(() => setPiInstance({} as any)).toThrow("Root ExtensionAPI setter is unavailable");
       expect(() => setSessionCtx({} as any)).toThrow("Root session context setter is unavailable");
       expect(() => setManager(null)).toThrow("Root manager setter is unavailable");
-      expect(() => setWidget(null)).toThrow("Root widget setter is unavailable");
       expect(() => setCoordinator(null)).toThrow("Root coordinator setter is unavailable");
       expect(getManager()).toBeNull();
       expect(getCoordinator()).toBeNull();
-      expect(getWidget()).toBeNull();
       expect(Object.keys(settings).sort()).toEqual(["agent", "mode", "modelFor", "modelSettingForMode", "thinkingSettingFor", "thinkingSettingForMode"]);
     });
   });
@@ -194,11 +190,9 @@ describe("AgentManager", () => {
       expect(() => getStore()).toThrow("Root ConfigStore is unavailable");
       expect(getManager()).toBeNull();
       expect(getCoordinator()).toBeNull();
-      expect(getWidget()).toBeNull();
       expect(() => setPiInstance({} as any)).toThrow("Root ExtensionAPI setter is unavailable");
       expect(() => setSessionCtx({} as any)).toThrow("Root session context setter is unavailable");
       expect(() => setManager(null)).toThrow("Root manager setter is unavailable");
-      expect(() => setWidget(null)).toThrow("Root widget setter is unavailable");
       expect(() => setCoordinator(null)).toThrow("Root coordinator setter is unavailable");
       expect(() => manager.spawn(pi, ctx, "scout", "bypass", { description: "bypass" }))
         .toThrow("Root agent spawning is unavailable from a child runtime");
@@ -291,8 +285,7 @@ describe("AgentManager", () => {
       await runWithSubagentRuntime(runtime, async () => {
         expect(getManager()).toBeNull();
         expect(getCoordinator()).toBeNull();
-        expect(getWidget()).toBeNull();
-        // The root ConfigStore itself is unavailable; child settings are the
+          // The root ConfigStore itself is unavailable; child settings are the
         // only configuration surface in the runtime context.
         expect(() => getStore()).toThrow("Root ConfigStore is unavailable");
         expect(getManager()?.spawnNested(otherParentId, fakePi(), fakeCtx(), "scout", "bypass", { description: "bypass" })).toBeUndefined();
@@ -1437,34 +1430,6 @@ describe("AgentManager steering and shutdown", () => {
 
   afterEach(() => {
     manager?.dispose();
-  });
-
-  it("queues steering until a session exists, then forwards later steering failures", async () => {
-    let runnerOptions: any;
-    const deferred = makeResolvablePromise();
-    mockModules.mockRunAgent.mockImplementation((_ctx: any, _type: any, _prompt: any, options: any) => {
-      runnerOptions = options;
-      return deferred.promise;
-    });
-    manager = new AgentManager(undefined, { default: 1 });
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
-
-    expect(await manager.steer(id, "first instruction")).toBe(true);
-    const session = { steer: vi.fn().mockResolvedValue(undefined), dispose: vi.fn(), subscribe: vi.fn(), messages: [] };
-    runnerOptions.onSessionCreated(session);
-    await vi.waitFor(() => expect(session.steer).toHaveBeenCalledWith("first instruction"));
-
-    session.steer.mockRejectedValueOnce(new Error("closed"));
-    expect(await manager.steer(id, "second instruction")).toBe(false);
-    deferred.resolve(mockRunResult({ session }));
-    await manager.getRecord(id)!.execution.promise;
-  });
-
-  it("returns false when steering or aborting an unknown agent", async () => {
-    manager = new AgentManager(undefined, { default: 1 });
-
-    expect(await manager.steer("missing", "instruction")).toBe(false);
-    expect(manager.abort("missing", "user")).toBe(false);
   });
 
   it("removes the parent abort listener after normal completion", async () => {

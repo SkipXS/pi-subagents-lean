@@ -6,8 +6,8 @@
  *   - Listener guards (only mutates event.input.model for Agent tool)
  *   - Schema field exclusion (no model, inherit_context, schedule, isolation params)
  *
- * These tests mock ExtensionAPI and verify registration behavior.
- * Full integration testing is manual via pi TUI.
+ * These tests mock ExtensionAPI and verify registration behavior; headless
+ * lifecycle loading is covered by the contract and background-flow smokes.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
@@ -62,49 +62,6 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   getAgentDir: vi.fn(() => "/home/test/.pi/agent"),
 }));
 
-vi.mock("@earendil-works/pi-tui", () => ({
-  Box: class {},
-  Container: class {
-    children: any[] = [];
-    addChild(c: any) {
-      this.children.push(c);
-    }
-    clear() {
-      this.children = [];
-    }
-    invalidate() { /* noop */ }
-    render(_width: number): string[] { return []; }
-  },
-  Input: class {
-    onSubmit: (() => void) | null = null;
-    focused = false;
-    getValue() {
-      return "";
-    }
-    handleInput(_k: string) {}
-  },
-  Spacer: class {},
-  Text: class {},
-  Markdown: class {
-    text: string;
-    constructor(text: string, _w: number, _h: number, _theme: any) {
-      this.text = text;
-    }
-    render(_width: number) {
-      return [this.text];
-    }
-  },
-  truncateToWidth: (text: string) => text,
-  fuzzyFilter: (items: any[], _query: string, _fn: any) => items,
-  getKeybindings: () => ({
-    matches: () => false,
-  }),
-}));
-
-vi.mock("../src/ui/searchable-select.js", () => ({
-  SearchableSelectDialog: class {},
-}));
-
 vi.mock("../src/models/model-precedence.js", () => ({
   resolveModel: vi.fn((opts: any) => opts?.parentModelId ?? ""),
   resolveModelSetting: vi.fn((opts: any) => ({ value: opts?.parentModelId ?? "", source: "parent" })),
@@ -133,15 +90,6 @@ vi.mock("../src/agents/agent-runner.js", () => ({
 
 vi.mock("../src/agents/default-agents.js", () => ({
   DEFAULT_AGENTS: new Map(),
-}));
-
-vi.mock("../src/ui/agent-widget.js", () => ({
-  AgentWidget: class {},
-  buildStatsParts: vi.fn(),
-  formatMs: vi.fn(),
-  getDisplayName: vi.fn(),
-  SPINNER: [],
-  ERROR_STATUSES: new Set(),
 }));
 
 /* ------------------------------------------------------------------ */
@@ -327,30 +275,6 @@ describe("tool_call listener — guards", () => {
     expect(event.input.model).toBeDefined();
     expect(typeof event.input.model).toBe("string");
     expect(result).toBeUndefined();
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  Command Registration                                              */
-/* ------------------------------------------------------------------ */
-
-describe("command registration", () => {
-  let api: MockExtensionAPI;
-
-  beforeAll(async () => {
-    api = createMockExtensionAPI();
-    await loadExtension(api.api);
-  });
-
-  it("registers /agents command", () => {
-    const agentsCmd = api.commands.find((c) => c.name === "agents");
-    expect(agentsCmd).toBeDefined();
-    expect(agentsCmd!.description).toBeDefined();
-  });
-
-  it("registers only /agents command", () => {
-    const cmdNames = api.commands.map((c) => c.name).sort();
-    expect(cmdNames).toEqual(["agents"]);
   });
 });
 

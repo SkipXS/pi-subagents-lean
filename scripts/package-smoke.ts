@@ -37,7 +37,6 @@ try {
       "pi-subagents-lean": `file:${tarball}`,
       "@earendil-works/pi-ai": installedVersion("@earendil-works/pi-ai"),
       "@earendil-works/pi-coding-agent": installedVersion("@earendil-works/pi-coding-agent"),
-      "@earendil-works/pi-tui": installedVersion("@earendil-works/pi-tui"),
     },
   }, null, 2));
 
@@ -72,7 +71,7 @@ try {
       if (tools.join(",") !== "Agent,AgentContinue,StopAgent,AgentStatus") {
         throw new Error("Unexpected tools: " + tools.join(","));
       }
-      if (!extension.commands.has("agents")) throw new Error("Missing /agents command");
+      if (extension.commands.size !== 0) throw new Error("Unexpected custom commands");
       for (const event of ["tool_call", "session_start", "session_shutdown"]) {
         if (!extension.handlers.has(event)) throw new Error("Missing handler: " + event);
       }

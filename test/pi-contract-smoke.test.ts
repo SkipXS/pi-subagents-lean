@@ -34,7 +34,7 @@ describe.sequential("Pi extension contract", () => {
       expect(result.extensions).toHaveLength(1);
       const extension = result.extensions[0]!;
       expect([...extension.tools.keys()]).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
-      expect([...extension.commands.keys()]).toEqual(["agents"]);
+      expect([...extension.commands.keys()]).toEqual([]);
 
       runner = new ExtensionRunner(
         result.extensions,
@@ -99,11 +99,11 @@ describe.sequential("Pi extension contract", () => {
       await expect(runner.getToolDefinition("AgentContinue")!.execute(
         "contract-continue", { agent_id: "missing", prompt: "wrap up" }, undefined, undefined, publicContext,
       )).rejects.toThrow("root session is ready");
-      expect(runner.getMessageRenderer("subagent-result")).toBeTypeOf("function");
+      expect(runner.getMessageRenderer("subagent-result")).toBeUndefined();
       expect(runner.hasUI()).toBe(false);
       expect(runner.hasHandlers("tool_call")).toBe(true);
       expect(runner.hasHandlers("before_agent_start")).toBe(true);
-      expect(runner.hasHandlers("tool_execution_start")).toBe(true);
+      expect(runner.hasHandlers("tool_execution_start")).toBe(false);
       expect(runner.hasHandlers("session_start")).toBe(true);
       expect(runner.hasHandlers("session_shutdown")).toBe(true);
 

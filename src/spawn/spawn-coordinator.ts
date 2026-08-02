@@ -1,10 +1,10 @@
-import { getPiInstance, getSessionCtx, getStore, getSubagentRuntimeContext, getWidget } from "../shell.js";
+import { getPiInstance, getSessionCtx, getStore, getSubagentRuntimeContext } from "../shell.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 import { normalizeThinkingLevel } from "../models/thinking.js";
 import { getStatusNote } from "../status-note.js";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentExecutionSummary, AgentRecord, AgentStatus, SpawnConfig, ToolActivity } from "../types.js";
+import type { AgentExecutionSummary, AgentRecord, AgentStatus, SpawnConfig } from "../types.js";
 import type { AgentConfig } from "../agents/types.js";
 import type { AgentManager, SpawnOptions } from "../agents/agent-manager.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
@@ -14,16 +14,9 @@ import { buildAgentDetails, createNestedAgentExecutor } from "../agents/tool-exe
 /**
  * spawn-coordinator.ts — Spawn-and-track coordination for subagents.
  *
- * Single entry point for both LLM tool and menu spawn paths. Owns live display
- * state and background-result delivery; AgentManager owns execution and records.
+ * Single entry point for the LLM tool spawn path. It owns background-result
+ * delivery; AgentManager owns execution and records.
  */
-
-/** Coordinator-owned per-agent live display state. Only transient UI state. */
-export interface LiveView {
-  activeTools: Map<string, string>;
-  responseText: string;
-}
-
 /** Input for spawn(). Built by each caller from its own validation. */
 export interface SpawnIntent extends SpawnConfig {
   type: string;
@@ -84,7 +77,7 @@ interface BackgroundPayload {
  * payload, timer, retry counter, in-flight guard, and parent-abort binding —
  * is keyed by the execution id, so a stale timer or callback can never send a
  * later execution's mutable `record.result`. `record.delivery` remains only a
- * UI projection of the latest execution.
+ * public projection of the latest execution.
  */
 interface BackgroundDeliveryEntry {
   /** Manager-assigned execution id (agent id for legacy record-level tracking). */
@@ -133,12 +126,6 @@ function deliveryErrorMessage(error: unknown): string {
 }
 
 export class SpawnCoordinator {
-  /** Per-agent live display state. Widget reads from here + record for stats. */
-  private liveViews = new Map<string, LiveView>();
-
-  /** Monotonic key prevents same-tool starts in the same clock tick from colliding. */
-  private nextActivityId = 0;
-
   /** Authoritative per-execution background delivery state. */
   private backgroundDeliveries = new Map<string, BackgroundDeliveryEntry>();
 
@@ -189,8 +176,6 @@ export class SpawnCoordinator {
     intent: SpawnIntent,
     parentId?: string,
   ): Promise<SpawnResult> {
-    const liveView: LiveView = { activeTools: new Map(), responseText: "" };
-    const liveViewCallbacks = this.createLiveViewCallbacks(liveView);
     // A nested coordinator call already runs in its parent's isolated context.
     // Otherwise capture settings before manager execution can enter ALS.
     const inheritedRuntime = getSubagentRuntimeContext();
@@ -227,7 +212,6 @@ export class SpawnCoordinator {
       // settings before the manager enters a child AsyncLocalStorage context.
       nestedExecutorFactory: (parentId) => createNestedAgentExecutor(parentId, pi, this.manager, this, runtimeSettings),
       runtimeSettings,
-      ...liveViewCallbacks,
     };
 
     const agentId = parentId
@@ -260,15 +244,11 @@ export class SpawnCoordinator {
       return { agentId, record };
     }
 
-    this.liveViews.set(agentId, liveView);
-    if (!inheritedRuntime) getWidget()?.ensureTimer();
-
     if (runInBackground) {
       // The delivery claim above is the only background tracking needed.
     } else {
       await record.execution.promise;
       record.lifecycle.resultConsumed = true;
-      this.liveViews.delete(agentId);
     }
 
     return { agentId, record };
@@ -287,13 +267,10 @@ export class SpawnCoordinator {
     if (getSubagentRuntimeContext()) {
       throw new Error("Root agent continuation is unavailable from a child runtime");
     }
-    const liveView: LiveView = { activeTools: new Map(), responseText: "" };
-    const liveViewCallbacks = this.createLiveViewCallbacks(liveView);
     const { executionId, record, promise } = this.manager.continueAgent(intent.agentId, intent.prompt, {
       isBackground: intent.runInBackground,
       signal: intent.signal,
       graceTurns: intent.graceTurns,
-      ...liveViewCallbacks,
     });
 
     if (intent.runInBackground) {
@@ -306,25 +283,16 @@ export class SpawnCoordinator {
       // it), so observe the rejection here as well as at the manager.
       promise.catch(() => {});
     }
-    this.liveViews.set(record.id, liveView);
-    if (!getSubagentRuntimeContext()) getWidget()?.ensureTimer();
-
     if (!intent.runInBackground) {
       try {
         await promise;
       } finally {
         // Even a rejected continuation (stopped/cancelled while queued) is
-        // consumed by the caller's error result and leaves the live view.
+        // consumed by the caller's error result.
         record.lifecycle.resultConsumed = true;
-        this.liveViews.delete(record.id);
       }
     }
     return { executionId, record };
-  }
-
-  /** Read the live view for an agent. Widget calls this. */
-  liveView(id: string): LiveView | undefined {
-    return this.liveViews.get(id);
   }
 
   /** Check if an agent still has a background execution awaiting completion. */
@@ -348,7 +316,6 @@ export class SpawnCoordinator {
 
   /** Called by AgentManager's completion callback, once per executed turn. */
   onAgentComplete(record: AgentRecord, execution?: AgentExecutionSummary): void {
-    this.liveViews.delete(record.id);
     // Every background execution gets exactly one automatic delivery attempt,
     // keyed by its own execution id so repeated continuations can never reuse
     // a stale claim or read a later execution's mutable result.
@@ -411,7 +378,6 @@ export class SpawnCoordinator {
     }
     this.backgroundDeliveries.clear();
     this.latestDeliveryKeys.clear();
-    this.liveViews.clear();
   }
 
   /** Register one background execution's delivery claim at acceptance. */
@@ -432,22 +398,6 @@ export class SpawnCoordinator {
     this.latestDeliveryKeys.set(record.id, entry.key);
     record.delivery ??= { state: "pending", attempts: 0 };
     this.trackBackgroundParentAbort(entry, record);
-  }
-
-  /** Create callbacks that bridge manager events to a specific live view. */
-  private createLiveViewCallbacks(view: LiveView): Pick<SpawnOptions, "onToolActivity" | "onTextDelta"> {
-    return {
-      onToolActivity: (activity: ToolActivity) => {
-        if (activity.type === "start") {
-          view.activeTools.set(`${activity.toolName}_${this.nextActivityId++}`, activity.toolName);
-        } else {
-          for (const [key, name] of view.activeTools) {
-            if (name === activity.toolName) { view.activeTools.delete(key); break; }
-          }
-        }
-      },
-      onTextDelta: (_delta: string, fullText: string) => { view.responseText = fullText; },
-    };
   }
 
   /** Keep each execution's delivery tied to its parent turn until Pi accepts it. */
@@ -513,7 +463,7 @@ export class SpawnCoordinator {
     return this.latestDeliveryKeys.get(agentId) === entry.key;
   }
 
-  /** Mirror one execution's delivery state onto the record's UI projection. */
+  /** Mirror one execution's delivery state onto the record projection. */
   private projectDelivery(record: AgentRecord, entry: BackgroundDeliveryEntry): void {
     if (!this.isLatestDelivery(record.id, entry)) return;
     record.delivery = {

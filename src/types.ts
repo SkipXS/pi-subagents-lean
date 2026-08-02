@@ -41,7 +41,7 @@ export interface AgentRecord {
   lifecycle: AgentLifecycle;
   /** Display-oriented info: type, description, output file, invocation. */
   display: AgentDisplayInfo;
-  /** Execution internals: session, abort controller, pending steers. */
+  /** Execution internals: session, abort controller, and output-log lifecycle. */
   execution: AgentExecutionState;
   /**
    * Parent/child ownership and slot-handoff metadata. Optional for source
@@ -127,7 +127,7 @@ export interface CompactionInfo {
   firstKeptEntryId?: string;
 }
 
-/** Reason metadata retained with an AgentRecord for conversation viewers. */
+/** Reason metadata retained with an AgentRecord for execution diagnostics. */
 export interface CompactionReasonMetadata {
   reason: CompactionReason;
   tokensBefore: number;
@@ -196,7 +196,7 @@ export interface BackgroundDelivery {
 
 /**
  * Lifecycle state: when the agent started, completed, and its current status.
- * Used by agent-manager (lifecycle control), menus (status display), widget (linger logic).
+ * Used by agent-manager for lifecycle control and retention.
  */
 export interface AgentLifecycle {
   status: AgentStatus;
@@ -220,7 +220,7 @@ export interface AgentLifecycle {
 
 /**
  * Display-oriented fields: type name, description, output file, invocation params.
- * Used by widget (rendering), menus (listing), renderer (display).
+ * Agent identity and output metadata retained for tool results and diagnostics.
  */
 export interface AgentDisplayInfo {
   type: SubagentType;
@@ -238,22 +238,19 @@ export interface AgentDisplayInfo {
 }
 
 /**
- * Execution internals: session handle, abort controller, pending steers.
- * Used by agent-manager (session lifecycle), tool-execution (steering, nudge).
+ * Execution internals: session handle, abort controller, and output-log lifecycle.
  */
 export interface AgentExecutionState {
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;
-  /** Steering messages queued before the session was ready. */
-  pendingSteers?: string[];
   /** Lifecycle wrapper for the output file stream. */
   outputLog?: AgentOutputLog;
 }
 
 /**
  * Accumulated statistics: usage breakdown, tool uses, turn count.
- * Used by widget (stats display), tool-execution (details building), menus (result viewer).
+ * Accumulated statistics used by lifecycle tracking and tool results.
  */
 export interface AgentAccumulatedStats {
   /**
@@ -263,7 +260,7 @@ export interface AgentAccumulatedStats {
    */
   lifetimeUsage: LifetimeUsage;
   toolUses: number;
-  /** Final turn count (set on completion). Used by widget after activity cleanup. */
+  /** Final turn count (set on completion). */
   turnCount?: number;
   /** Max turns limit (from invocation or default). */
   maxTurns?: number;
@@ -283,7 +280,7 @@ export interface AgentAccumulatedStats {
   usingSubscription?: boolean;
   /** Context telemetry kept separate from cumulative billing usage. */
   contextStats?: ContextStats;
-  /** Compaction reasons retained for viewers opened after the event. */
+  /** Compaction reasons retained for execution diagnostics. */
   compactionReasons?: CompactionReasonMetadata[];
   /** Per-execution summaries: the initial run plus every AgentContinue execution. */
   executions?: AgentExecutionSummary[];

@@ -7,13 +7,12 @@
  * globals.
  *
  * index.ts populates the shell at session_start; handler modules import
- * getManager() / getWidget() / etc.
+ * getManager() / getCoordinator() / etc.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "./agents/agent-manager.js";
-import type { AgentWidget } from "./ui/agent-widget.js";
 import type { SpawnCoordinator } from "./spawn/spawn-coordinator.js";
 import { ConfigStore, type SubagentRuntimeSettings } from "./config/config-store.js";
 
@@ -25,7 +24,6 @@ interface Shell {
   pi: ExtensionAPI;
   sessionCtx: ExtensionContext | null;
   manager: AgentManager | null;
-  widget: AgentWidget | null;
   store: ConfigStore;
   coordinator: SpawnCoordinator | null;
 }
@@ -38,7 +36,6 @@ const shell: Shell = {
   pi: null!,
   sessionCtx: null!,
   manager: null,
-  widget: null,
   store: new ConfigStore(),
   coordinator: null,
 };
@@ -66,11 +63,6 @@ export function getSessionCtx(): ExtensionContext | null {
 /** The current AgentManager, or null if unavailable. Child runtimes cannot obtain root controls. */
 export function getManager(): AgentManager | null {
   return subagentRuntime.getStore() ? null : shell.manager;
-}
-
-/** The current AgentWidget, or null if unavailable. It retains root manager state. */
-export function getWidget(): AgentWidget | null {
-  return subagentRuntime.getStore() ? null : shell.widget;
 }
 
 /** The ConfigStore (lives for the lifetime of the extension). */
@@ -101,11 +93,6 @@ export function setSessionCtx(ctx: ExtensionContext | null): void {
 export function setManager(m: AgentManager | null): void {
   if (subagentRuntime.getStore()) denyRootAccess("Root manager setter");
   shell.manager = m;
-}
-
-export function setWidget(w: AgentWidget | null): void {
-  if (subagentRuntime.getStore()) denyRootAccess("Root widget setter");
-  shell.widget = w;
 }
 
 export function setCoordinator(c: SpawnCoordinator | null): void {

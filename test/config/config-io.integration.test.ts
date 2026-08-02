@@ -63,7 +63,7 @@ describe("config I/O with the real filesystem", () => {
     const configIo = await loadConfigModule();
     expect(configIo.loadConfig().config).toMatchObject({
       concurrency: { default: 4 },
-      agent: { forceBackground: false, graceTurns: 6, widgetMaxLines: 12 },
+      agent: { forceBackground: false, graceTurns: 6, orchestrationPrompt: true },
       thinkingOverrides: {},
     });
 
@@ -126,29 +126,29 @@ describe("config I/O with the real filesystem", () => {
 
   it("rotates the last valid primary into .bak before an update", async () => {
     const { createConfigFileIO } = await loadConfigModule();
-    const primary = JSON.stringify({ agent: { showCost: false }, concurrency: { default: 4 } });
+    const primary = JSON.stringify({ agent: { forceBackground: false }, concurrency: { default: 4 } });
     const configPath = join(testDir!, "subagents-lean.json");
     writeFileSync(configPath, primary, "utf8");
 
-    createConfigFileIO(testDir!).update((config) => { config.agent.showCost = true; });
+    createConfigFileIO(testDir!).update((config) => { config.agent.forceBackground = true; });
 
     expect(readFileSync(`${configPath}.bak`, "utf8")).toBe(primary);
-    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.showCost).toBe(true);
+    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
   });
 
   it("uses a valid backup without overwriting a corrupt primary, then repairs with an archive", async () => {
     const { createConfigFileIO } = await loadConfigModule();
     const configPath = join(testDir!, "subagents-lean.json");
     writeFileSync(configPath, "{broken", "utf8");
-    writeFileSync(`${configPath}.bak`, JSON.stringify({ agent: { showCost: true }, concurrency: { default: 4 } }), "utf8");
+    writeFileSync(`${configPath}.bak`, JSON.stringify({ agent: { forceBackground: true }, concurrency: { default: 4 } }), "utf8");
     const io = createConfigFileIO(testDir!);
 
-    expect(io.load()).toMatchObject({ health: "using-backup", canRepair: true, config: { agent: { showCost: true } } });
+    expect(io.load()).toMatchObject({ health: "using-backup", canRepair: true, config: { agent: { forceBackground: true } } });
     expect(() => io.update(() => undefined)).toThrow("primary config is corrupt");
     expect(readFileSync(configPath, "utf8")).toBe("{broken");
 
-    expect(io.repair()).toMatchObject({ health: "healthy", config: { agent: { showCost: true } } });
-    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.showCost).toBe(true);
+    expect(io.repair()).toMatchObject({ health: "healthy", config: { agent: { forceBackground: true } } });
+    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
     const archives = readdirSync(testDir!).filter((name) => name.startsWith("subagents-lean.json.corrupt-"));
     expect(archives).toHaveLength(1);
     expect(readFileSync(join(testDir!, archives[0]!), "utf8")).toBe("{broken");
@@ -166,9 +166,9 @@ describe("config I/O with the real filesystem", () => {
     const { createConfigFileIO } = await loadConfigModule();
     const configPath = join(testDir!, "subagents-lean.json");
     mkdirSync(configPath);
-    writeFileSync(`${configPath}.bak`, JSON.stringify({ agent: { showCost: true }, concurrency: { default: 4 } }));
+    writeFileSync(`${configPath}.bak`, JSON.stringify({ agent: { forceBackground: true }, concurrency: { default: 4 } }));
     const io = createConfigFileIO(testDir!);
-    expect(io.load()).toMatchObject({ health: "using-backup", canRepair: false, config: { agent: { showCost: true } } });
+    expect(io.load()).toMatchObject({ health: "using-backup", canRepair: false, config: { agent: { forceBackground: true } } });
     expect(() => io.repair()).toThrow("Cannot repair config");
     expect(existsSync(configPath)).toBe(true);
   });
@@ -176,7 +176,7 @@ describe("config I/O with the real filesystem", () => {
   it("ignores incomplete owner-pending directories left by interrupted acquires for update and repair", async () => {
     const { createConfigFileIO } = await loadConfigModule();
     const configPath = join(testDir!, "subagents-lean.json");
-    writeFileSync(configPath, JSON.stringify({ agent: { showCost: false }, concurrency: { default: 4 } }));
+    writeFileSync(configPath, JSON.stringify({ agent: { forceBackground: false }, concurrency: { default: 4 } }));
     const missingOwner = `${configPath}.lock.pending-missing`;
     const brokenOwner = `${configPath}.lock.pending-broken`;
     mkdirSync(missingOwner);
@@ -184,11 +184,11 @@ describe("config I/O with the real filesystem", () => {
     writeFileSync(join(brokenOwner, "owner.json"), "{broken");
     const io = createConfigFileIO(testDir!);
 
-    io.update((config) => { config.agent.showCost = true; });
-    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.showCost).toBe(true);
+    io.update((config) => { config.agent.forceBackground = true; });
+    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
 
     writeFileSync(configPath, "{broken");
-    expect(io.repair()).toMatchObject({ health: "healthy", config: { agent: { showCost: false } } });
+    expect(io.repair()).toMatchObject({ health: "healthy", config: { agent: { forceBackground: false } } });
     expect(existsSync(missingOwner)).toBe(true);
     expect(existsSync(brokenOwner)).toBe(true);
   });
@@ -208,7 +208,7 @@ describe("config I/O with the real filesystem", () => {
   });
 
   it("fails menu persistence immediately when another live host owns the config lock", async () => {
-    const { updateConfigAtomic, ConfigLockTimeoutError, UI_CONFIG_LOCK_TIMEOUT_MS } = await loadConfigModule();
+    const { updateConfigAtomic, ConfigLockTimeoutError, CONFIG_LOCK_TIMEOUT_MS } = await loadConfigModule();
     const configPath = join(testDir!, "subagents-lean.json");
     const lockPath = `${configPath}.lock`;
     mkdirSync(lockPath);
@@ -216,7 +216,7 @@ describe("config I/O with the real filesystem", () => {
       token: "other-process", pid: 999_999, hostname: "other-host", createdAt: Date.now(),
     }));
 
-    expect(UI_CONFIG_LOCK_TIMEOUT_MS).toBe(0);
+    expect(CONFIG_LOCK_TIMEOUT_MS).toBe(0);
     expect(() => updateConfigAtomic(() => undefined)).toThrow(ConfigLockTimeoutError);
     expect(existsSync(lockPath)).toBe(true);
   });
@@ -242,8 +242,8 @@ describe("config I/O with the real filesystem", () => {
     mkdirSync(lockPath);
     writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ token: "dead", pid: 999_999, hostname: "local-host", createdAt: 0 }));
     const stale = createConfigFileIO(testDir!, { lockTimeoutMs: 0, now: () => 31_000, hostname: () => "local-host", kill: () => { throw Object.assign(new Error(), { code: "ESRCH" }); } });
-    stale.update((config) => { config.agent.showCost = true; });
-    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.showCost).toBe(true);
+    stale.update((config) => { config.agent.forceBackground = true; });
+    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
   });
 
   it("allows only one concurrent stale reclaimer into the critical section", async () => {
@@ -270,12 +270,12 @@ describe("config I/O with the real filesystem", () => {
   it("serializes independent updates from real parallel writer processes", async () => {
     await loadConfigModule();
     const configPath = join(testDir!, "subagents-lean.json");
-    writeFileSync(configPath, JSON.stringify({ agent: { showCost: false, forceBackground: false }, concurrency: { default: 4 } }));
+    writeFileSync(configPath, JSON.stringify({ agent: { forceBackground: false, orchestrationPrompt: true }, concurrency: { default: 4 } }));
     const moduleUrl = pathToFileURL(resolve("src/config/config-io.ts")).href;
     const script = `import { createConfigFileIO } from ${JSON.stringify(moduleUrl)}; const io = createConfigFileIO(process.argv[1]); io.update(c => { c.agent[process.argv[2]] = process.argv[3] === 'true'; });`;
     const run = (field: string) => runBunScript(script, [testDir!, field, "true"], "writer");
 
-    await Promise.all([run("showCost"), run("forceBackground")]);
-    expect(JSON.parse(readFileSync(configPath, "utf8")).agent).toMatchObject({ showCost: true, forceBackground: true });
+    await Promise.all([run("forceBackground"), run("orchestrationPrompt")]);
+    expect(JSON.parse(readFileSync(configPath, "utf8")).agent).toMatchObject({ forceBackground: true, orchestrationPrompt: true });
   }, 15_000);
 });

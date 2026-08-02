@@ -87,5 +87,66 @@ export function findModelInRegistry(
   if (!parsed) return fallback;
   return registry.find(parsed.provider, parsed.modelId) ?? fallback;
 }
+
+/** Max length for a truncated command in tool argument summaries. */
+const MAX_COMMAND_DISPLAY_LENGTH = 350;
+
+/** Max length for a truncated string value in default tool argument summaries. */
+const MAX_DEFAULT_STRING_DISPLAY_LENGTH = 350;
+
+/**
+ * Summarize tool arguments for log-friendly, non-visual output.
+ *
+ * Heavy tools (read, write, edit, bash, grep, rg) get compact summaries.
+ * Other tools fall back to the default JSON formatting.
+ */
+export function summarizeToolArgs(name: string, rawArgs: Record<string, unknown> | undefined): string {
+  if (!rawArgs || typeof rawArgs !== "object" || Object.keys(rawArgs).length === 0) return "";
+
+  switch (name) {
+    case "read": {
+      const path = typeof rawArgs.path === "string" ? rawArgs.path : "";
+      return `(${JSON.stringify(path)})`;
+    }
+    case "write": {
+      const path = typeof rawArgs.file_path === "string" ? rawArgs.file_path : "";
+      const content = rawArgs.content;
+      const size = typeof content === "string" ? content.length : 0;
+      return `(${JSON.stringify(path)}, ${size} chars)`;
+    }
+    case "edit": {
+      const path = typeof rawArgs.path === "string" ? rawArgs.path : "";
+      const edits = rawArgs.edits;
+      const editCount = Array.isArray(edits) ? edits.length : 0;
+      return `(${JSON.stringify(path)}, ${editCount} edits)`;
+    }
+    case "bash": {
+      const cmd = typeof rawArgs.command === "string" ? rawArgs.command : "";
+      const heredocIdx = cmd.search(/<<\s*['\"]?\w+['\"]?/);
+      const cleanCmd = heredocIdx >= 0 ? cmd.slice(0, heredocIdx).trim() : cmd.trim();
+      const display = cleanCmd.length > MAX_COMMAND_DISPLAY_LENGTH
+        ? cleanCmd.slice(0, MAX_COMMAND_DISPLAY_LENGTH) + "…" : cleanCmd;
+      return `(${JSON.stringify(display)})`;
+    }
+    case "grep":
+    case "rg": {
+      const pattern = typeof rawArgs.pattern === "string" ? rawArgs.pattern : "";
+      const path = typeof rawArgs.path === "string" ? rawArgs.path : "";
+      return `(${JSON.stringify(pattern)}, ${JSON.stringify(path)})`;
+    }
+    default: {
+      const keys = Object.keys(rawArgs);
+      if (keys.length === 1) {
+        const val = rawArgs[keys[0]!];
+        const display = typeof val === "string" && val.length > MAX_DEFAULT_STRING_DISPLAY_LENGTH
+          ? JSON.stringify(val.slice(0, MAX_DEFAULT_STRING_DISPLAY_LENGTH) + "...")
+          : JSON.stringify(val);
+        return `(${display})`;
+      }
+      return ` ${JSON.stringify(rawArgs)}`;
+    }
+  }
+}
+
 /** Timeout for git commands (ms). Shared by agent-runner and worktree-validator. */
 export const GIT_EXEC_TIMEOUT_MS = 5000;

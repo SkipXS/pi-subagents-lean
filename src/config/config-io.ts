@@ -21,31 +21,36 @@ export const DEFAULT_MAX_NESTING_DEPTH = 2;
 export const MAX_NESTING_DEPTH = 2;
 export const VALID_SYSTEM_PROMPT_MODES = new Set<string>(["replace", "inherit", "custom"]);
 export const DEFAULT_CONCURRENCY: SubagentsConfig["concurrency"] = { default: 4 };
-/** Persisted menu changes must fail promptly rather than freeze Pi's synchronous TUI on lock contention. */
-export const UI_CONFIG_LOCK_TIMEOUT_MS = 0;
+/** Persisted configuration changes fail promptly rather than block on lock contention. */
+export const CONFIG_LOCK_TIMEOUT_MS = 0;
+
+const LEGACY_UI_AGENT_KEYS = [
+  "showCost",
+  "showTools",
+  "showTurns",
+  "showInput",
+  "showOutput",
+  "showContext",
+  "showTime",
+  "defaultMaxTurns",
+  "widgetMaxLines",
+  "widgetMaxLinesCompact",
+  "widgetDescLengthFull",
+  "widgetDescLengthCompact",
+  "widgetCompact",
+  "widgetShortcut",
+  "widgetShowModelThinking",
+  "widgetShowStartTime",
+] as const;
 
 const DEFAULT_AGENT: SubagentsConfig["agent"] = {
   default: null,
   forceBackground: false,
   graceTurns: DEFAULT_GRACE_TURNS,
-  widgetMaxLines: 12,
-  widgetDescLengthFull: 50,
-  widgetDescLengthCompact: 30,
-  widgetCompact: false,
-  widgetShortcut: false,
-  widgetShowModelThinking: true,
-  widgetShowStartTime: true,
   systemPromptMode: "replace",
   includeContextFiles: true,
   disableDefaultAgents: false,
   orchestrationPrompt: true,
-  showTools: true,
-  showTurns: true,
-  showInput: true,
-  showOutput: true,
-  showContext: true,
-  showCost: false,
-  showTime: true,
   outputThinkingBufferSize: 0,
   finishedRetentionMinutes: 60,
   maxNestingDepth: DEFAULT_MAX_NESTING_DEPTH,
@@ -187,9 +192,10 @@ export function createConfigFileIO(configDir: string = CONFIG_DIR, options: Conf
         }
         const next = structuredClone(primary.config ?? defaultConfig());
         change(next);
+        const normalized = normalizeConfig(next);
         if (primary.state === "valid" && primary.bytes) atomicWrite(backupPath, primary.bytes);
-        atomicWrite(configPath, Buffer.from(JSON.stringify(next, null, 2), "utf8"));
-        return { config: next, health: "healthy", canRepair: false };
+        atomicWrite(configPath, Buffer.from(JSON.stringify(normalized, null, 2), "utf8"));
+        return { config: normalized, health: "healthy", canRepair: false };
       });
     },
     repair(): ConfigLoadResult {
@@ -209,9 +215,9 @@ export function createConfigFileIO(configDir: string = CONFIG_DIR, options: Conf
   };
 }
 
-// ConfigStore mutations are invoked from synchronous menu callbacks. Retrying
-// here would block Pi's event loop, so surface contention immediately instead.
-const fileIO = createConfigFileIO(CONFIG_DIR, { lockTimeoutMs: UI_CONFIG_LOCK_TIMEOUT_MS });
+// ConfigStore mutations are synchronous. Retrying here would block Pi's event
+// loop, so surface contention immediately instead.
+const fileIO = createConfigFileIO(CONFIG_DIR, { lockTimeoutMs: CONFIG_LOCK_TIMEOUT_MS });
 
 /** Load config plus explicit recovery state. */
 export function loadConfig(): ConfigLoadResult {
@@ -273,8 +279,10 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
   const concurrency: SubagentsConfig["concurrency"] = {
     default: raw.concurrency?.default ?? DEFAULT_CONCURRENCY.default,
   };
-  const agent = { ...DEFAULT_AGENT, ...raw.agent };
-  if (!Object.hasOwn(raw.agent ?? {}, "scout") && typeof raw.agent?.Explore === "string") agent.scout = raw.agent.Explore;
+  const rawAgent = { ...(raw.agent ?? {}) } as Record<string, unknown>;
+  for (const key of LEGACY_UI_AGENT_KEYS) delete rawAgent[key];
+  const agent = { ...DEFAULT_AGENT, ...rawAgent } as SubagentsConfig["agent"];
+  if (!Object.hasOwn(rawAgent, "scout") && typeof rawAgent.Explore === "string") agent.scout = rawAgent.Explore;
   const defaultThinking = parseThinkingLevel(agent.defaultThinking);
   if (defaultThinking === undefined) delete agent.defaultThinking;
   else agent.defaultThinking = defaultThinking;
@@ -310,12 +318,13 @@ export function normalizeMaxNestingDepth(value: unknown): number {
 }
 
 function replaceConfig(target: SubagentsConfig, source: SubagentsConfig): void {
-  target.agent = structuredClone(source.agent);
-  target.concurrency = structuredClone(source.concurrency);
-  target.thinkingOverrides = structuredClone(source.thinkingOverrides ?? {});
-  target.mode = source.mode;
-  target.ecoModelOverrides = structuredClone(source.ecoModelOverrides ?? {});
-  target.ecoThinkingOverrides = structuredClone(source.ecoThinkingOverrides ?? {});
+  const normalized = normalizeConfig(source);
+  target.agent = structuredClone(normalized.agent);
+  target.concurrency = structuredClone(normalized.concurrency);
+  target.thinkingOverrides = structuredClone(normalized.thinkingOverrides ?? {});
+  target.mode = normalized.mode;
+  target.ecoModelOverrides = structuredClone(normalized.ecoModelOverrides ?? {});
+  target.ecoThinkingOverrides = structuredClone(normalized.ecoThinkingOverrides ?? {});
 }
 
 function atomicWrite(targetPath: string, contents: Buffer): void {

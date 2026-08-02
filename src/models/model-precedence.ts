@@ -36,15 +36,6 @@ export interface SubagentsConfig {
     default: string | null;
     forceBackground: boolean;
     graceTurns?: number;
-    showCost?: boolean;
-    widgetMaxLines?: number;
-    widgetMaxLinesCompact?: number;
-    widgetCompact?: boolean;
-    widgetShortcut?: boolean;
-    /** Whether to show model names and thinking levels in widget rows. */
-    widgetShowModelThinking?: boolean;
-    /** Whether to show local start times in widget rows. */
-    widgetShowStartTime?: boolean;
     systemPromptMode?: SystemPromptMode;
     includeContextFiles?: boolean;
     defaultThinking?: ThinkingLevel;
@@ -54,14 +45,6 @@ export interface SubagentsConfig {
     disableDefaultAgents?: boolean;
     /** Whether to append dynamic parent-agent orchestration guidance. */
     orchestrationPrompt?: boolean;
-    showTools?: boolean;
-    showTurns?: boolean;
-    showInput?: boolean;
-    showOutput?: boolean;
-    showContext?: boolean;
-    showTime?: boolean;
-    widgetDescLengthFull?: number;
-    widgetDescLengthCompact?: number;
     outputThinkingBufferSize?: number;
     finishedRetentionMinutes?: number;
     /** Maximum subagent depth, including the initial child of the root session. */

@@ -1,10 +1,25 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { writeFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { isUnsafeName, isSymlink, safeReadFile } from "../src/utils.ts";
+import { isUnsafeName, isSymlink, safeReadFile, summarizeToolArgs } from "../src/utils.ts";
 import { canCreateSymlinks, tempDirFixture } from "./fixtures";
 
 const itWithSymlinkSupport = it.skipIf(!canCreateSymlinks());
+
+describe("summarizeToolArgs", () => {
+  it("keeps log summaries neutral and compact for common tools", () => {
+    expect(summarizeToolArgs("read", { path: "src/index.ts" })).toBe('("src/index.ts")');
+    expect(summarizeToolArgs("write", { file_path: "out.txt", content: "hello" })).toBe('("out.txt", 5 chars)');
+    expect(summarizeToolArgs("edit", { path: "out.txt", edits: [{ oldText: "a", newText: "b" }] })).toBe('("out.txt", 1 edits)');
+    expect(summarizeToolArgs("bash", { command: "cat <<EOF\\nbody\\nEOF" })).toBe('("cat")');
+    expect(summarizeToolArgs("rg", { pattern: "Agent", path: "src" })).toBe('("Agent", "src")');
+  });
+
+  it("falls back to bounded JSON for unknown tools", () => {
+    expect(summarizeToolArgs("custom", { value: "ok" })).toBe('("ok")');
+    expect(summarizeToolArgs("custom", {})).toBe("");
+  });
+});
 
 /* ------------------------------------------------------------------ */
 /*  isUnsafeName                                                      */

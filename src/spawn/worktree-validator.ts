@@ -30,7 +30,7 @@ export interface WorktreeValidationSuccess {
   resolvedPath?: string;
   /** Worktree root directory. */
   worktreeRoot?: string;
-  /** Short display label for the widget. */
+  /** Short label retained with the agent record and tool details. */
   label?: string;
 }
 
