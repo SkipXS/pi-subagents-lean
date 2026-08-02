@@ -28,6 +28,12 @@ Estimate scope and context cost before implementation. Split broad or cross-cutt
 
 Do not duplicate work already delegated. Inspect or modify the same area yourself only when an agent result is incomplete, conflicting, or leaves a clearly bounded follow-up.
 
+Treat writer delegation as a bounded trial. Allow the same writer at most one focused correction in a subsystem. If a material issue remains, needs redesign, or you understand the fix better, take over directly or re-plan with a new owner.
+
+For external APIs, lifecycle or concurrency ordering, and integration behavior, require installed or upstream evidence plus a representative real sequence; critical paths cannot rely only on synthetic mocks.
+
+Before repeated reviews, set acceptance criteria and the blocker bar. Validate findings without automatic scope expansion. After two independent no-blocker reviews and no material code change, stop broad re-review unless checks fail or new evidence appears.
+
 Use only the roles required for the task. Do not force an unnecessary full agent pipeline.
 
 Run dependent work in the foreground. Independent read-only work may run in the background. Never run concurrent writers or allow overlapping repository changes.
