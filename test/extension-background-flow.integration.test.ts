@@ -65,6 +65,7 @@ interface OfflineSession {
   prompt: ReturnType<typeof vi.fn>;
   promptStarted: Promise<void>;
   setActiveToolsByName: ReturnType<typeof vi.fn>;
+  abort: ReturnType<typeof vi.fn>;
   dispose: ReturnType<typeof vi.fn>;
   finish: (text: string) => void;
 }
@@ -145,7 +146,7 @@ function listener(api: ReturnType<typeof createOfflinePi>, event: string) {
   return handler;
 }
 
-describe("offline extension background flow", () => {
+describe("offline extension headless lifecycle", () => {
   it("runs registered background agents through completion delivery and shutdown", async () => {
     const api = createOfflinePi();
     const sessions: OfflineSession[] = [];
@@ -219,11 +220,21 @@ describe("offline extension background flow", () => {
       run_in_background: true,
     }, undefined, undefined, ctx);
     expect(firstSpawn.isError).toBeUndefined();
+    expect(firstSpawn.content[0].text).toMatch(/^\[Agent running\]/);
+    expect(api.api.sendMessage).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(sessions).toHaveLength(1));
     await vi.waitFor(() => expect(sessions[0].prompt).toHaveBeenCalledWith("Find the relevant files"));
 
+    // Headless tool_execution_start must not enter the UI/widget path while
+    // an agent is active.
+    await expect(listener(api, "tool_execution_start")({}, ctx)).resolves.toBeUndefined();
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
+    const runningStatus = await agentStatusTool.execute("status-running", {}, undefined, undefined, ctx);
+    expect(runningStatus.content[0].text).toContain(" running");
+
     sessions[0].finish("First result");
     await vi.waitFor(() => expect(api.api.sendMessage).toHaveBeenCalledTimes(1));
+    expect(api.api.sendMessage).toHaveBeenCalledTimes(1);
     expect(api.api.sendMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({
         customType: "subagent-result",
@@ -232,6 +243,8 @@ describe("offline extension background flow", () => {
       }),
       { deliverAs: "followUp", triggerTurn: true },
     );
+    const completedStatus = await agentStatusTool.execute("status-completed", {}, undefined, undefined, ctx);
+    expect(completedStatus.content[0].text).toContain(" completed");
 
     parentIdle = false;
     await agentTool.execute("call-2", {
@@ -265,8 +278,9 @@ describe("offline extension background flow", () => {
     }, undefined, undefined, ctx);
     expect(continueAck.isError).toBeUndefined();
     expect(continueAck.content[0].text).toContain("[AgentContinue]");
-    // Immediate acknowledgement: no new session is created.
+    // Immediate acknowledgement: no new session or completion message is created.
     expect(sessions).toHaveLength(2);
+    expect(api.api.sendMessage).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => expect(sessions[0].prompt).toHaveBeenCalledWith("Wrap up the findings"));
 
     sessions[0].finish("Continued result");
@@ -312,6 +326,208 @@ describe("offline extension background flow", () => {
     expect(afterShutdown.every((result) => result.status === "rejected")).toBe(true);
     expect(sessions).toHaveLength(sessionCount);
     expect(api.api.sendMessage).toHaveBeenCalledTimes(sendMessageCalls);
+  });
+
+  it("keeps an initial foreground run headless until its final result", async () => {
+    const api = createOfflinePi();
+    const sessions: OfflineSession[] = [];
+    boundary.createAgentSession.mockImplementation(async () => {
+      const session = createOfflineSession();
+      sessions.push(session);
+      return { session };
+    });
+    const ctx = {
+      cwd: "/offline/project",
+      hasUI: false,
+      isIdle: () => true,
+      isProjectTrusted: () => false,
+      model: { provider: "offline", id: "test-model" },
+      modelRegistry: {
+        find: vi.fn(() => ({ provider: "offline", id: "test-model" })),
+        getAvailable: vi.fn(() => []),
+      },
+      getSystemPrompt: () => "parent prompt",
+      ui: { notify: vi.fn() },
+    };
+
+    extension(api.api as any);
+    const agentTool = api.tools.find((tool) => tool.name === "Agent")!;
+    const agentStatusTool = api.tools.find((tool) => tool.name === "AgentStatus")!;
+    let started = false;
+    try {
+      await listener(api, "session_start")({}, ctx);
+      started = true;
+
+      const foreground = agentTool.execute("foreground", {
+        agent: "Scout",
+        prompt: "Return the foreground result",
+      }, undefined, undefined, ctx);
+      await vi.waitFor(() => expect(sessions).toHaveLength(1));
+      await sessions[0].promptStarted;
+
+      let settled = false;
+      foreground.then(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(api.api.sendMessage).not.toHaveBeenCalled();
+
+      const running = await agentStatusTool.execute("status-running", {}, undefined, undefined, ctx);
+      expect(running.content[0].text).toContain(" running");
+
+      sessions[0].finish("Foreground result");
+      const result = await foreground;
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain("Foreground result");
+      expect(api.api.sendMessage).not.toHaveBeenCalled();
+
+      const completed = await agentStatusTool.execute("status-completed", {}, undefined, undefined, ctx);
+      expect(completed.content[0].text).toContain(" completed");
+    } finally {
+      if (started) await listener(api, "session_shutdown")({}, ctx);
+    }
+  });
+
+  it("stops running and queued root agents through the headless tools", async () => {
+    const api = createOfflinePi();
+    const sessions: OfflineSession[] = [];
+    boundary.createAgentSession.mockImplementation(async () => {
+      const session = createOfflineSession();
+      sessions.push(session);
+      return { session };
+    });
+    const ctx = {
+      cwd: "/offline/project",
+      hasUI: false,
+      isIdle: () => true,
+      isProjectTrusted: () => false,
+      model: { provider: "offline", id: "test-model" },
+      modelRegistry: {
+        find: vi.fn(() => ({ provider: "offline", id: "test-model" })),
+        getAvailable: vi.fn(() => []),
+      },
+      getSystemPrompt: () => "parent prompt",
+      ui: { notify: vi.fn() },
+    };
+
+    extension(api.api as any);
+    const agentTool = api.tools.find((tool) => tool.name === "Agent")!;
+    const stopAgentTool = api.tools.find((tool) => tool.name === "StopAgent")!;
+    const agentStatusTool = api.tools.find((tool) => tool.name === "AgentStatus")!;
+    let started = false;
+    try {
+      await listener(api, "session_start")({}, ctx);
+      started = true;
+      const manager = getManager()!;
+      manager.setConcurrency({ default: 1 });
+
+      await agentTool.execute("running", {
+        agent: "Scout",
+        prompt: "Keep the running agent active",
+        run_in_background: true,
+      }, undefined, undefined, ctx);
+      await sessions[0].promptStarted;
+      const runningRecord = manager.listAgents().find((record) => (record.execution.session as unknown) === sessions[0])!;
+
+      await agentTool.execute("queued", {
+        agent: "Scout",
+        prompt: "Wait in the root queue",
+        run_in_background: true,
+      }, undefined, undefined, ctx);
+      const queuedRecord = manager.listAgents().find((record) => record.lifecycle.status === "queued")!;
+
+      const activeStatuses = await agentStatusTool.execute("status-active", {}, undefined, undefined, ctx);
+      expect(activeStatuses.content[0].text).toContain(" running");
+      expect(activeStatuses.content[0].text).toContain(" queued");
+
+      const queuedStop = await stopAgentTool.execute("stop-queued", {
+        agent_id: queuedRecord.id,
+      }, undefined, undefined, ctx);
+      expect(queuedStop.isError).toBeUndefined();
+      expect(queuedStop.content[0].text).toContain("Stopped agent");
+      expect(queuedRecord.lifecycle.status).toBe("stopped");
+
+      sessions[0].abort.mockImplementation(() => sessions[0].finish("stopped result"));
+      const runningStop = await stopAgentTool.execute("stop-running", {
+        agent_id: runningRecord.id,
+      }, undefined, undefined, ctx);
+      expect(runningStop.isError).toBeUndefined();
+      expect(runningStop.content[0].text).toContain("Stopped agent");
+      expect(runningRecord.lifecycle.status).toBe("stopped");
+      expect(sessions[0].abort).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(runningRecord.lifecycle.settled).toBe(true));
+
+      const stoppedStatuses = await agentStatusTool.execute("status-stopped", {}, undefined, undefined, ctx);
+      expect(stoppedStatuses.content[0].text).toContain(" stopped");
+    } finally {
+      if (started) await listener(api, "session_shutdown")({}, ctx);
+    }
+  });
+
+  it("shuts down active and queued root work without UI or result delivery", async () => {
+    const api = createOfflinePi();
+    const sessions: OfflineSession[] = [];
+    boundary.createAgentSession.mockImplementation(async () => {
+      const session = createOfflineSession();
+      sessions.push(session);
+      return { session };
+    });
+    const ctx = {
+      cwd: "/offline/project",
+      hasUI: false,
+      isIdle: () => true,
+      isProjectTrusted: () => false,
+      model: { provider: "offline", id: "test-model" },
+      modelRegistry: {
+        find: vi.fn(() => ({ provider: "offline", id: "test-model" })),
+        getAvailable: vi.fn(() => []),
+      },
+      getSystemPrompt: () => "parent prompt",
+      ui: { notify: vi.fn() },
+    };
+
+    extension(api.api as any);
+    const agentTool = api.tools.find((tool) => tool.name === "Agent")!;
+    const agentStatusTool = api.tools.find((tool) => tool.name === "AgentStatus")!;
+    let started = false;
+    try {
+      await listener(api, "session_start")({}, ctx);
+      started = true;
+      const manager = getManager()!;
+      manager.setConcurrency({ default: 1 });
+
+      await agentTool.execute("shutdown-running", {
+        agent: "Scout",
+        prompt: "Remain active until shutdown",
+        run_in_background: true,
+      }, undefined, undefined, ctx);
+      await sessions[0].promptStarted;
+      const activeRecord = manager.listAgents().find((record) => (record.execution.session as unknown) === sessions[0])!;
+
+      await agentTool.execute("shutdown-queued", {
+        agent: "Scout",
+        prompt: "Remain queued until shutdown",
+        run_in_background: true,
+      }, undefined, undefined, ctx);
+      const queuedRecord = manager.listAgents().find((record) => record.lifecycle.status === "queued")!;
+      const statuses = await agentStatusTool.execute("status-before-shutdown", {}, undefined, undefined, ctx);
+      expect(statuses.content[0].text).toContain(" running");
+      expect(statuses.content[0].text).toContain(" queued");
+
+      sessions[0].abort.mockImplementation(() => sessions[0].finish("shutdown result"));
+      await listener(api, "session_shutdown")({}, ctx);
+      started = false;
+
+      expect(sessions[0].abort).toHaveBeenCalledOnce();
+      expect(sessions[0].dispose).toHaveBeenCalledOnce();
+      expect(queuedRecord.execution.session).toBeUndefined();
+      expect(activeRecord.execution.session).toBeUndefined();
+      expect(manager.listAgents()).toHaveLength(0);
+      expect(getManager()).toBeNull();
+      expect(getCoordinator()).toBeNull();
+      expect(api.api.sendMessage).not.toHaveBeenCalled();
+    } finally {
+      if (started) await listener(api, "session_shutdown")({}, ctx);
+    }
   });
 
   it("isolates a direct executor-less run before extension loading", async () => {

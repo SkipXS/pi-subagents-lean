@@ -246,6 +246,11 @@ export function setupEventListeners(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_execution_start", async (_event, ctx) => {
+    // Headless sessions have no widget/UI contract to bind. In particular,
+    // do not pass a minimal headless ui object into the widget path: an active
+    // agent would otherwise try to call setStatus/setWidget on it.
+    if (ctx.hasUI === false) return;
+
     // Set UI context on first tool execution
     if (!getWidget()) {
       ensureManagerAndWidget();
