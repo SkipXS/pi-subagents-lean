@@ -14,7 +14,7 @@
  * SelectList (SettingsList receives its own `onCancel` at construction).
  */
 
-import { type Component, isFocusable } from "@earendil-works/pi-tui";
+import { isFocusable, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 
 export interface SettingsListWrapperTheme {
   bold: (text: string) => string;
@@ -110,8 +110,15 @@ export class SettingsListWrapper implements Component {
     this.settingsList.invalidate?.();
   }
 
+  // Let a parent wrapper see an active nested picker. This keeps key
+  // passthrough (especially for searchable/focusable inputs) intact when a
+  // role editor is itself framed by another SettingsListWrapper.
+  get submenuComponent(): Component | null {
+    return (this.settingsList as any)?.submenuComponent ?? null;
+  }
+
   private get hasSubmenu(): boolean {
-    let submenu = (this.settingsList as any)?.submenuComponent ?? null;
+    let submenu = this.submenuComponent;
     const visited = new Set<unknown>();
     while (submenu && !visited.has(submenu)) {
       if (isFocusable(submenu)) return true;
@@ -149,30 +156,33 @@ export class SettingsListWrapper implements Component {
 
   render(width: number): string[] {
     const lines: string[] = [];
+    const safeWidth = Math.max(0, Math.floor(width));
+    const separator = truncateToWidth(this.separatorChar.repeat(safeWidth), safeWidth, "");
 
     // Top separator
-    lines.push(this.separatorChar.repeat(width));
+    lines.push(separator);
     lines.push("");
 
-    // Header (left-aligned with spacing, bold and colored)
+    // Header (left-aligned with spacing, bold and colored). Keep dynamic
+    // submenu titles within the TUI component width on narrow terminals.
     const styledTitle = this.theme.bold(this.theme.fg("accent", this.title));
-    lines.push("  " + styledTitle);
+    lines.push(truncateToWidth("  " + styledTitle, safeWidth, ""));
     lines.push("");
 
     // SettingsList content — strip the hint line that pi-tui always appends
     // (empty line + "Enter/Space to change · Esc to cancel"). Descriptions
-    // already explain what each item does, so the hint is redundant.
-    const settingsLines = this.settingsList.render(width);
+    // already explain what each item does, so the hint is redundant. The
+    // final truncation is a defensive fallback for nested/custom components.
+    const settingsLines = this.settingsList.render(safeWidth);
     const hintPattern = /Enter\/Space|Esc to cancel/;
-    if (settingsLines.length >= 2 && hintPattern.test(settingsLines[settingsLines.length - 1] ?? "")) {
-      lines.push(...settingsLines.slice(0, -2));
-    } else {
-      lines.push(...settingsLines);
-    }
+    const contentLines = settingsLines.length >= 2 && hintPattern.test(settingsLines[settingsLines.length - 1] ?? "")
+      ? settingsLines.slice(0, -2)
+      : settingsLines;
+    lines.push(...contentLines.map((line) => truncateToWidth(line, safeWidth, "")));
 
     // Bottom separator
     lines.push("");
-    lines.push(this.separatorChar.repeat(width));
+    lines.push(separator);
 
     return lines;
   }

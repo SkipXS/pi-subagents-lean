@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { SettingsListWrapper } from "../../../../src/ui/menu/wrappers/settings-list.js";
 
 const theme = {
@@ -159,6 +160,29 @@ describe("SettingsListWrapper — nested submenu input", () => {
 
     expect(handleInput.mock.calls.map(([key]) => key)).toEqual(["j", "k", "\x1b[C", "\x1b[D"]);
   });
+
+  it("passes keys through a nested role wrapper to its active picker", () => {
+    const handleInput = vi.fn();
+    const picker = { focused: false };
+    const roleList = {
+      ...makeSettingsList([{ id: "model", label: "Standard Model", currentValue: "model" }]),
+      submenuComponent: picker,
+    };
+    const roleWrapper = new SettingsListWrapper(roleList, { title: "Role Settings", theme });
+    const overviewList = {
+      ...makeSettingsList([{ id: "role", label: "Role", currentValue: "summary" }]),
+      submenuComponent: roleWrapper,
+      handleInput,
+    };
+    const overviewWrapper = new SettingsListWrapper(overviewList, { title: "Agent Settings", theme });
+
+    overviewWrapper.handleInput("j");
+    overviewWrapper.handleInput("k");
+    overviewWrapper.handleInput("\x1b[C");
+    overviewWrapper.handleInput("\x1b[D");
+
+    expect(handleInput.mock.calls.map(([key]) => key)).toEqual(["j", "k", "\x1b[C", "\x1b[D"]);
+  });
 });
 
 describe("SettingsListWrapper — render frame", () => {
@@ -177,5 +201,22 @@ describe("SettingsListWrapper — render frame", () => {
     expect(lines[2]).toBe("  My Title");
     expect(lines[4]).toBe("  → A     value");
     expect(lines[lines.length - 1]).toBe("─".repeat(40));
+  });
+
+  it("truncates dynamic titles and nested lines to narrow terminal widths", () => {
+    const list = {
+      items: [{ id: "role", label: "role", currentValue: "" }] as any[],
+      selectedIndex: 0,
+      render: () => ["a very long nested role setting line"],
+      handleInput: () => {},
+      invalidate: () => {},
+    };
+    const width = 12;
+    const wrapper = new SettingsListWrapper(list, {
+      title: "A very long role name Settings",
+      theme,
+    });
+
+    expect(wrapper.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
   });
 });

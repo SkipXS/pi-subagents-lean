@@ -53,6 +53,12 @@ vi.mock("../../../src/ui/menu/wrappers/settings-list.js", () => ({
   SettingsListWrapper: class MockSettingsListWrapper {
     constructor(component: any, options: any) {
       settingsListWrapperCalls.push({ component, options });
+      options.onRebuild?.((items: any[]) => {
+        component.items = items;
+        component.filteredItems = items;
+        component.selectedIndex = 0;
+        component.submenuComponent = null;
+      });
     }
     render() { return []; }
     handleInput() {}
@@ -228,14 +234,48 @@ describe("showModelSettingsMenu — per-type overrides", () => {
     (getAllTypes as any).mockReturnValue(["general-purpose", "Explore"]);
   });
 
-  it("shows model and thinking settings for every agent", async () => {
+  it("shows one Default/Eco summary row per agent and opens a four-field editor", async () => {
     const ctx = createMockCtx();
     await showModelSettingsMenu(ctx, ["anthropic/claude-sonnet-4-20250514", "openai/gpt-4o"]);
-    const ids = settingsListCalls[0].items.map((i: any) => i.id);
-    expect(ids).toEqual(expect.arrayContaining([
-      "model:general-purpose", "thinking:general-purpose",
-      "model:Explore", "thinking:Explore",
-    ]));
+    const overviewItems = settingsListCalls[0].items;
+    const roleItems = overviewItems.filter((item: any) => item.id.startsWith("role:"));
+
+    expect(roleItems.map((item: any) => item.id)).toEqual(["role:general-purpose", "role:Explore"]);
+    expect(overviewItems.some((item: any) => item.id === "model:general-purpose")).toBe(false);
+    expect(roleItems[0].currentValue).toContain("Default:");
+    expect(roleItems[0].currentValue).toContain("Eco:");
+
+    const done = vi.fn();
+    roleItems[0].submenu("", done);
+    const editor = settingsListCalls.at(-1)!;
+    expect(editor.items.map((item: any) => item.label)).toEqual([
+      "Standard Model",
+      "Standard Thinking",
+      "Eco Model",
+      "Eco Thinking",
+    ]);
+
+    editor.onCancel();
+    expect(done).toHaveBeenCalledWith();
+  });
+
+  it("returns to the overview after role edits and refreshes session reset actions", async () => {
+    const ctx = createMockCtx();
+    await showModelSettingsMenu(ctx, ["openai/gpt-4o"]);
+
+    const role = settingsListCalls[0].items.find((entry: any) => entry.id === "role:Explore");
+    const roleDone = vi.fn();
+    role.submenu("", roleDone);
+    const editor = settingsListCalls.at(-1)!;
+    const modelField = editor.items.find((entry: any) => entry.id === "model:Explore");
+    modelField.submenu("", vi.fn());
+    selectListInstances.at(-1)!.onSelect!({ value: "session" });
+    selectDialogInstances.at(-1)!.callbacks.onSelect("openai/gpt-4o");
+
+    expect(mockModules.mockSessionOverrides.Explore).toBe("openai/gpt-4o");
+    editor.onCancel();
+    expect(roleDone).toHaveBeenCalledWith();
+    expect(settingsListCalls[0].items.map((entry: any) => entry.id)).toContain("clearSession");
   });
 
   it.each(["session", "permanent"] as const)("Eco model Inherit clears only the %s override and falls back to Default", async (scope) => {
@@ -243,7 +283,9 @@ describe("showModelSettingsMenu — per-type overrides", () => {
     mockModules.mockConfig.ecoModelOverrides.Explore = "openai/gpt-4o";
     const ctx = createMockCtx();
     await showModelSettingsMenu(ctx, ["openai/gpt-4o"]);
-    const item = settingsListCalls[0].items.find((entry: any) => entry.id === "eco-model:Explore");
+    const roleItem = settingsListCalls[0].items.find((entry: any) => entry.id === "role:Explore");
+    roleItem.submenu("", vi.fn());
+    const item = settingsListCalls.at(-1)!.items.find((entry: any) => entry.id === "eco-model:Explore");
     item.submenu("", vi.fn());
     expect(selectListInstances.at(-1)!.items.map((entry: any) => entry.value)).not.toContain("clear");
     expect(selectDialogInstances.at(-1)!.items[0]).toMatchObject({ value: "(inherits parent)", label: "Inherit Default" });
@@ -259,7 +301,9 @@ describe("showModelSettingsMenu — per-type overrides", () => {
     mockModules.mockConfig.ecoThinkingOverrides.Explore = "high";
     const ctx = createMockCtx();
     await showModelSettingsMenu(ctx, ["openai/gpt-4o"]);
-    const item = settingsListCalls[0].items.find((entry: any) => entry.id === "eco-thinking:Explore");
+    const roleItem = settingsListCalls[0].items.find((entry: any) => entry.id === "role:Explore");
+    roleItem.submenu("", vi.fn());
+    const item = settingsListCalls.at(-1)!.items.find((entry: any) => entry.id === "eco-thinking:Explore");
     item.submenu("", vi.fn());
     const modeList = selectListInstances.at(-2)!;
     const levelList = selectListInstances.at(-1)!;
@@ -278,9 +322,12 @@ describe("showModelSettingsMenu — per-type overrides", () => {
     const ctx = createMockCtx();
     await showModelSettingsMenu(ctx, ["anthropic/claude-sonnet-4-20250514", "openai/gpt-4o"]);
 
-    expect(settingsListCalls[0].items.find((i: any) => i.id === "model:Explore").currentValue)
+    const editorItems = settingsListCalls[0].items.find((i: any) => i.id === "role:Explore");
+    editorItems.submenu("", vi.fn());
+    const roleSettings = settingsListCalls.at(-1)!.items;
+    expect(roleSettings.find((i: any) => i.id === "model:Explore").currentValue)
       .toBe("openai/gpt-4o (session override)");
-    expect(settingsListCalls[0].items.find((i: any) => i.id === "thinking:Explore").currentValue)
+    expect(roleSettings.find((i: any) => i.id === "thinking:Explore").currentValue)
       .toBe("xhigh (saved override)");
   });
 
@@ -288,9 +335,14 @@ describe("showModelSettingsMenu — per-type overrides", () => {
     const ctx = createMockCtx();
     await showModelSettingsMenu(ctx, ["anthropic/claude-sonnet-4-20250514", "openai/gpt-4o"]);
 
-    expect(settingsListCalls[0].items.find((i: any) => i.id === "model:Explore").currentValue)
+    const roleItem = settingsListCalls[0].items.find((i: any) => i.id === "role:Explore");
+    roleItem.submenu("", vi.fn());
+    const roleSettings = settingsListCalls.at(-1)!.items;
+    expect(roleSettings.find((i: any) => i.id === "model:Explore").currentValue)
       .toBe("openai/gpt-4o (agent MD)");
-    expect(settingsListCalls[0].items.find((i: any) => i.id === "thinking:general-purpose").currentValue)
+    const generalRole = settingsListCalls[0].items.find((i: any) => i.id === "role:general-purpose");
+    generalRole.submenu("", vi.fn());
+    expect(settingsListCalls.at(-1)!.items.find((i: any) => i.id === "thinking:general-purpose").currentValue)
       .toBe("medium (agent MD)");
   });
 
@@ -300,7 +352,9 @@ describe("showModelSettingsMenu — per-type overrides", () => {
     ctx.modelRegistry.find = vi.fn(() => ({ provider: "openai", id: "gpt-4o", reasoning: false }));
     await showModelSettingsMenu(ctx, ["openai/gpt-4o"]);
 
-    const item = settingsListCalls[0].items.find((i: any) => i.id === "thinking:Explore");
+    const roleItem = settingsListCalls[0].items.find((i: any) => i.id === "role:Explore");
+    roleItem.submenu("", vi.fn());
+    const item = settingsListCalls.at(-1)!.items.find((i: any) => i.id === "thinking:Explore");
     expect(item.currentValue).toBe("off (saved override)");
     expect(item.description).toContain("requested high from saved override");
 
