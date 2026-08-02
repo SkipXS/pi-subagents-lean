@@ -237,6 +237,113 @@ describe("buildAgentDetails", () => {
     expect(details.turnCount).toBe(42);
   });
 
+  // --- per-execution continuation deltas ---
+
+  it("reports the exact continuation execution summary instead of cumulative totals", () => {
+    const record = makeRecord({
+      stats: {
+        ...makeRecord().stats,
+        executions: [
+          {
+            id: "exec-0", prompt: "initial", mode: "foreground", status: "completed",
+            startedAt: 1000, completedAt: 3000, responseText: "initial",
+            usage: { input: 100, output: 200, cacheWrite: 50, cacheRead: 75, cost: 0.01 },
+            turnCount: 10, toolUses: 5, compactionCount: 1,
+          },
+          {
+            id: "exec-1", prompt: "follow-up", mode: "foreground", status: "completed",
+            startedAt: 3000, completedAt: 4000, responseText: "follow-up",
+            usage: { input: 40, output: 15, cacheWrite: 5, cacheRead: 20, cost: 0.02 },
+            turnCount: 3, toolUses: 2, compactionCount: 2,
+          },
+        ],
+      },
+    });
+    const details = buildAgentDetails(record, { includeStats: true });
+
+    // Continuation top-level fields come from the exact execution summary...
+    expect(details.turnCount).toBe(3);
+    expect(details.toolUses).toBe(2);
+    expect(details.input).toBe(40);
+    expect(details.output).toBe(15);
+    expect(details.cacheRead).toBe(20);
+    expect(details.cacheWrite).toBe(5);
+    expect(details.cost).toBeCloseTo(0.02);
+    expect(details.compactions).toBe(2);
+    expect(details.compactionCount).toBe(2);
+    expect(details.durationMs).toBe(1000);
+    // ...never the cumulative record totals.
+    expect(details.turnCount).not.toBe(record.stats.turnCount);
+    expect(details.toolUses).not.toBe(record.stats.toolUses);
+    expect(details.input).not.toBe(record.stats.lifetimeUsage.input);
+    expect(details.cost).not.toBe(record.stats.lifetimeUsage.cost);
+    // The current execution block mirrors the summary without ids or history.
+    expect(details.currentExecution).toMatchObject({
+      mode: "foreground",
+      status: "completed",
+      responseText: "follow-up",
+      usage: { input: 40, output: 15, cacheWrite: 5, cacheRead: 20, cost: 0.02 },
+      turnCount: 3,
+      toolUses: 2,
+      compactionCount: 2,
+    });
+    expect((details.currentExecution as Record<string, unknown>).id).toBeUndefined();
+    expect(details.executions).toBeUndefined();
+  });
+
+  it("keeps lifetime-cumulative top-level fields for the initial spawn execution", () => {
+    const record = makeRecord({
+      stats: {
+        ...makeRecord().stats,
+        executions: [{
+          id: "exec-0", prompt: "initial", mode: "foreground", status: "completed",
+          startedAt: 1000, completedAt: 5000, responseText: "initial",
+          usage: { input: 100, output: 200, cacheWrite: 50, cacheRead: 75, cost: 0.01 },
+          turnCount: 10, toolUses: 5, compactionCount: 1,
+        }],
+      },
+    });
+    const details = buildAgentDetails(record, { includeStats: true });
+
+    expect(details.turnCount).toBe(10);
+    expect(details.toolUses).toBe(5);
+    expect(details.input).toBe(100);
+    expect(details.output).toBe(200);
+    expect(details.cacheRead).toBe(75);
+    expect(details.cacheWrite).toBe(50);
+    expect(details.cost).toBeCloseTo(0.01);
+    expect(details.compactions).toBe(1);
+    expect(details.compactionCount).toBe(1);
+    expect(details.currentExecution).toMatchObject({
+      mode: "foreground", status: "completed", turnCount: 10, toolUses: 5, compactionCount: 1,
+    });
+  });
+
+  it("falls back to cumulative totals when the current execution has no summary yet", () => {
+    const record = makeRecord({
+      stats: {
+        ...makeRecord().stats,
+        executions: [{
+          id: "exec-0", prompt: "initial", mode: "foreground", status: "completed",
+          startedAt: 1000, completedAt: 3000, responseText: "initial",
+          turnCount: 10, toolUses: 5, compactionCount: 1,
+        }, {
+          id: "exec-1", prompt: "follow-up", mode: "foreground", status: "running",
+          startedAt: 3000,
+        }],
+      },
+    });
+    const details = buildAgentDetails(record, { includeStats: true });
+
+    // A running execution has no finalized summary; keep the cumulative
+    // fallback rather than exposing partial or undefined stats.
+    expect(details.turnCount).toBe(10);
+    expect(details.toolUses).toBe(5);
+    expect(details.input).toBe(100);
+    expect(details.cost).toBeCloseTo(0.01);
+    expect(details.currentExecution).toMatchObject({ mode: "foreground", status: "running" });
+  });
+
   // --- Edge cases ---
 
   it("handles record with no invocation", () => {

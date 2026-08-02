@@ -170,7 +170,7 @@ describe("offline extension background flow", () => {
     };
 
     extension(api.api as any);
-    expect(api.tools.map((tool) => tool.name)).toEqual(["Agent", "StopAgent", "AgentStatus"]);
+    expect(api.tools.map((tool) => tool.name)).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
     expect(api.messageRenderers).toContain("subagent-result");
 
     const agentTool = api.tools.find((tool) => tool.name === "Agent")!;
@@ -252,6 +252,50 @@ describe("offline extension background flow", () => {
       }),
       { deliverAs: "steer", triggerTurn: true },
     );
+
+    // AgentContinue: continue the finished first agent in the background. It
+    // reuses its retained session, acknowledges immediately, and delivers
+    // exactly one automatic completion for the new execution.
+    const agentContinueTool = api.tools.find((tool) => tool.name === "AgentContinue")!;
+    const firstRecord = getManager()!.listAgents().find((r) => (r.execution.session as unknown) === sessions[0])!;
+    const continueAck = await agentContinueTool.execute("continue-1", {
+      agent_id: firstRecord.id,
+      prompt: "Wrap up the findings",
+      run_in_background: true,
+    }, undefined, undefined, ctx);
+    expect(continueAck.isError).toBeUndefined();
+    expect(continueAck.content[0].text).toContain("[AgentContinue]");
+    // Immediate acknowledgement: no new session is created.
+    expect(sessions).toHaveLength(2);
+    await vi.waitFor(() => expect(sessions[0].prompt).toHaveBeenCalledWith("Wrap up the findings"));
+
+    sessions[0].finish("Continued result");
+    await vi.waitFor(() => expect(api.api.sendMessage).toHaveBeenCalledTimes(3));
+    expect(api.api.sendMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        customType: "subagent-result",
+        content: expect.stringContaining("Continued result"),
+        display: true,
+      }),
+      { deliverAs: "steer", triggerTurn: true },
+    );
+
+    // A foreground continuation on the same record awaits its execution delta.
+    const fgContinue = agentContinueTool.execute("continue-2", {
+      agent_id: firstRecord.id,
+      prompt: "Synthesize the outcome",
+    }, undefined, undefined, ctx);
+    await vi.waitFor(() => expect(sessions[0].prompt).toHaveBeenCalledWith("Synthesize the outcome"));
+    let fgSettled = false;
+    fgContinue.then(() => { fgSettled = true; });
+    await Promise.resolve();
+    expect(fgSettled).toBe(false); // foreground awaits the execution
+    sessions[0].finish("FG result");
+    const fgResult = await fgContinue;
+    expect(fgResult.isError).toBeUndefined();
+    expect(fgResult.content[0].text).toContain("FG result");
+    // Foreground completions never produce a notification.
+    expect(api.api.sendMessage).toHaveBeenCalledTimes(3);
 
     await listener(api, "session_shutdown")({}, ctx);
     expect(sessions.every((session) => session.dispose.mock.calls.length === 1)).toBe(true);
@@ -434,7 +478,7 @@ describe("offline extension background flow", () => {
       expect(getSessionCtx()).toBe(ctx);
       expect(getManager()).not.toBeNull();
       expect(getCoordinator()).not.toBeNull();
-      expect(api.tools.map((tool) => tool.name)).toEqual(["Agent", "StopAgent", "AgentStatus"]);
+      expect(api.tools.map((tool) => tool.name)).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
 
       releaseFirstSetup.resolve();
       await Promise.all([setups[0].session.promptStarted, setups[1].session.promptStarted]);
@@ -461,6 +505,7 @@ describe("offline extension background flow", () => {
       expect(reviewer.options.tools).not.toContain("Agent");
       expect(reviewer.options.tools).not.toContain("StopAgent");
       expect(reviewer.options.tools).not.toContain("AgentStatus");
+      expect(reviewer.options.tools).not.toContain("AgentContinue");
       expect(reviewer.extensionApi.tools).toHaveLength(0);
       expect(reviewer.extensionApi.listeners).toHaveLength(0);
 

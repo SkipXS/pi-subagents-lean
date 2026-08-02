@@ -120,7 +120,7 @@ interface SupplementalUsageCallbacks {
   onSupplementalUsage?: (usage: AgentUsage) => void;
 }
 
-interface RunOptions extends RunTunables, RunCallbacks, SupplementalUsageCallbacks {
+export interface RunOptions extends RunTunables, RunCallbacks, SupplementalUsageCallbacks {
   /** Detached definition captured before queueing; never re-resolve at start. */
   agentConfig?: AgentConfig;
   /** ExtensionAPI instance — used for pi.exec() for git detection. */
@@ -681,7 +681,7 @@ function wireTurnTracking(
 async function runTurnLoop(
   session: AgentSession,
   prompt: string,
-  options: RunOptions,
+  options: AgentTurnOptions,
   unsubTurns: () => void,
 ) {
   const unsubEvents = subscribeToSessionEvents(session, options);
@@ -695,7 +695,47 @@ async function runTurnLoop(
     collector.unsubscribe();
     cleanupAbort();
   }
-  return collector.getText().trim() || getLastAssistantText(session);
+  return collector.getText().trim();
+}
+
+/**
+ * Options consumed by one turn execution on an existing session (AgentContinue).
+ * Narrower than RunOptions: continuation never re-creates the session, so no
+ * pi/ctx/config/catalog inputs are needed.
+ */
+export type AgentTurnOptions = Pick<RunOptions,
+  | "maxTurns" | "graceTurns" | "signal"
+  | "onTurnEnd" | "onToolActivity" | "onAssistantUsage" | "onSupplementalUsage" | "onCompaction" | "onTextDelta"
+> & {
+  /**
+   * When the current turn emits no text, fall back to the last non-empty
+   * assistant message in session history. Initial runs keep this behavior;
+   * continuations must never return prior-execution text as their own result.
+   */
+  fallbackToLastAssistantText?: boolean;
+};
+
+/**
+ * Execute one prompt turn on an already-created session.
+ *
+ * Shared by the initial spawn (runAgent) and every AgentContinue execution so
+ * event wiring, turn tracking, and response collection behave identically on
+ * the same session. Turn limits apply per execution.
+ */
+export async function executeAgentTurn(
+  session: AgentSession,
+  prompt: string,
+  options: AgentTurnOptions,
+): Promise<{ responseText: string; aborted: boolean; turnLimited: boolean }> {
+  const { unsubscribe: unsubTurns, getAborted, getTurnLimited } = wireTurnTracking(session, options);
+  const text = await runTurnLoop(session, prompt, options, unsubTurns);
+  // The history fallback is opt-in (initial runs only): a continuation that
+  // produces no output must return an empty result rather than the previous
+  // execution's assistant text.
+  const responseText = options.fallbackToLastAssistantText === true
+    ? text || getLastAssistantText(session)
+    : text;
+  return { responseText, aborted: getAborted(), turnLimited: getTurnLimited() };
 }
 
 // ── main entry ─────────────────────────────────────────────────────
@@ -832,12 +872,11 @@ async function runAgentImpl(
   }
   options.onSessionCreated?.(session);
 
-  const { unsubscribe: unsubTurns, getAborted, getTurnLimited } = wireTurnTracking(session, {
+  const { responseText, aborted, turnLimited } = await executeAgentTurn(session, prompt, {
     ...options,
     maxTurns: options.maxTurns ?? agentConfig?.maxTurns,
+    fallbackToLastAssistantText: true,
   });
-
-  const responseText = await runTurnLoop(session, prompt, options, unsubTurns);
 
   // Flush buffered warnings now that tool_result is in the session tree.
   for (const msg of warnings) {
@@ -845,5 +884,5 @@ async function runAgentImpl(
     else console.warn(`[pi-subagents-lean] ${msg}`);
   }
 
-  return { responseText, session, aborted: getAborted(), turnLimited: getTurnLimited() };
+  return { responseText, session, aborted, turnLimited };
 }

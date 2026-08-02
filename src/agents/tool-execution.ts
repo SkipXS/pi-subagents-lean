@@ -19,7 +19,7 @@ import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-
 import { parseModelKey, findModelInRegistry, parseThinkingLevel } from "../utils.js";
 import { normalizeThinkingLevel } from "../models/thinking.js";
 import { requireAvailableModel } from "../models/model-availability.js";
-import { runWithSubagentRuntime, type NestedAgentExecutor, type SubagentRuntimeContext } from "../shell.js";
+import { runWithSubagentRuntime, type NestedAgentExecutor, type SubagentRuntimeContext, getSubagentRuntimeContext } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import type { AgentManager } from "./agent-manager.js";
 import type { SpawnCoordinator } from "../spawn/spawn-coordinator.js";
@@ -115,11 +115,21 @@ export function buildAgentDetails(
   }
 
   if (opts?.includeStats) {
-    const elapsedMs = record.lifecycle.completedAt ? record.lifecycle.completedAt - record.lifecycle.startedAt : 0;
+    // Only the current execution's compact delta/result is exposed: never
+    // execution history, execution ids, timestamps, or prior responses. The
+    // initial spawn's summary stays lifetime-cumulative; every continuation
+    // reports the exact per-execution summary (usage/turn/tool/compaction
+    // deltas) instead of cumulative record totals.
+    const current = record.stats.executions?.at(-1);
+    const continuation = current && (record.stats.executions?.length ?? 0) > 1 ? current : undefined;
+    const usage = continuation?.usage;
+    const elapsedMs = continuation
+      ? (continuation.completedAt !== undefined ? continuation.completedAt - continuation.startedAt : 0)
+      : (record.lifecycle.completedAt ? record.lifecycle.completedAt - record.lifecycle.startedAt : 0);
 
-    details.turnCount = record.stats.turnCount;
+    details.turnCount = continuation?.turnCount ?? record.stats.turnCount;
     details.maxTurns = record.stats.maxTurns;
-    details.toolUses = record.stats.toolUses;
+    details.toolUses = continuation?.toolUses ?? record.stats.toolUses;
     const terminal = record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
     // Terminal records retain manager-populated telemetry; their session may
     // already be disposed, so never perform a live branch read here.
@@ -143,10 +153,10 @@ export function buildAgentDetails(
         usingSubscription: liveSnapshot?.usingSubscription ?? terminalSnapshot.usingSubscription,
       };
 
-    details.input = record.stats.lifetimeUsage.input;
-    details.output = record.stats.lifetimeUsage.output;
-    details.cacheRead = record.stats.cacheRead;
-    details.cacheWrite = record.stats.lifetimeUsage.cacheWrite;
+    details.input = usage?.input ?? record.stats.lifetimeUsage.input;
+    details.output = usage?.output ?? record.stats.lifetimeUsage.output;
+    details.cacheRead = usage?.cacheRead ?? record.stats.cacheRead;
+    details.cacheWrite = usage?.cacheWrite ?? record.stats.lifetimeUsage.cacheWrite;
     details.latestCacheHitRate = record.stats.latestCacheHitRate;
     const contextStats = record.stats.contextStats?.count ? record.stats.contextStats : undefined;
     // Keep the explicit live/terminal snapshot so shared formatting can prefer
@@ -165,13 +175,29 @@ export function buildAgentDetails(
       details.contextCount = contextStats.count;
     }
     details.durationMs = elapsedMs;
-    details.compactions = record.stats.compactionCount;
-    details.compactionCount = record.stats.compactionCount;
+    details.compactions = continuation?.compactionCount ?? record.stats.compactionCount;
+    details.compactionCount = continuation?.compactionCount ?? record.stats.compactionCount;
     details.modelName = record.display.invocation?.modelName;
     // The session is the source of truth: Pi may normalize the requested
     // invocation level for the selected model when it creates the session.
     details.thinkingLevel = record.execution.session?.thinkingLevel ?? record.display.invocation?.thinkingLevel;
-    details.cost = record.stats.lifetimeUsage.cost;
+    details.cost = usage?.cost ?? record.stats.lifetimeUsage.cost;
+    // Only the current execution's compact delta/result is exposed: never
+    // execution history, execution ids, timestamps, or prior responses. The
+    // caller authored the current prompt and can recover earlier context from
+    // the record itself.
+    if (current) {
+      details.currentExecution = {
+        mode: current.mode,
+        status: current.status,
+        ...(current.responseText !== undefined ? { responseText: current.responseText } : {}),
+        ...(current.usage !== undefined ? { usage: current.usage } : {}),
+        ...(current.turnCount !== undefined ? { turnCount: current.turnCount } : {}),
+        ...(current.toolUses !== undefined ? { toolUses: current.toolUses } : {}),
+        ...(current.compactionCount !== undefined ? { compactionCount: current.compactionCount } : {}),
+        ...(current.error !== undefined ? { error: current.error } : {}),
+      };
+    }
   }
 
   return details;
@@ -587,6 +613,87 @@ export async function executeStopAgentTool(
   }
 
   return errorResult(`Failed to stop agent ${agentId}`);
+}
+
+// ============================================================================
+// AgentContinue execute handler
+// ============================================================================
+
+/**
+ * Execute the AgentContinue tool: continue an existing agent's session.
+ *
+ * Root-only by registration; this handler additionally rejects any call that
+ * reaches it from a child runtime so nested sessions can never continue an
+ * ancestor's session through a forwarded or legacy tool definition.
+ */
+export async function executeContinueAgentTool(
+  _toolCallId: string,
+  params: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  _onUpdate: ((update: any) => void) | undefined,
+  ctx: ExtensionContext,
+): Promise<any> {
+  if (signal?.aborted) return cancelledResult();
+  if (getSubagentRuntimeContext()) {
+    return errorResult("AgentContinue is only available to the root agent");
+  }
+
+  const coordinator = getCoordinator();
+  if (!coordinator || !getManager()) {
+    return errorResult("AgentContinue is unavailable until the root session is ready");
+  }
+
+  const agentId = params.agent_id as string | undefined;
+  if (typeof agentId !== "string" || agentId.trim() === "") {
+    return errorResult("agent_id is required");
+  }
+  const prompt = params.prompt as string | undefined;
+  if (typeof prompt !== "string" || prompt.trim() === "") {
+    return errorResult("prompt is required");
+  }
+  const runInBackground = params.run_in_background === true;
+
+  try {
+    const { record } = await coordinator.continueAgent(getPiInstance(), ctx, {
+      agentId: agentId.trim(),
+      prompt,
+      runInBackground,
+      signal,
+    });
+
+    if (runInBackground) {
+      const details = buildAgentDetails(record, { includeStatus: true });
+      const suffix = "A notification will arrive when done - User asks you not to poll, check status or duplicate the delegated work.\n\n"
+        // The manager resolved the caller's id (possibly a short prefix) to
+        // the record's full id; the acknowledgement must carry the resolved id.
+        + `Agent ID: ${record.id}`;
+      return successResult(`[AgentContinue] ${suffix}`, details);
+    }
+
+    const details = buildAgentDetails(record, { includeStats: true });
+    if (signal?.aborted || record.lifecycle.status === "aborted" || record.lifecycle.status === "stopped") {
+      return cancelledResult(details);
+    }
+    if (record.lifecycle.status === "error") {
+      return errorResult(`Agent failed: ${record.error || "unknown error"}`, details);
+    }
+    return successResult(formatResultContent(record), details);
+  } catch (error) {
+    // A queued foreground continuation is rejected when StopAgent removes it
+    // from the global queue. Preserve that error contract, but include the
+    // finalized execution details so a stopped continuation cannot fall back
+    // to the record's lifetime totals in its tool result.
+    const manager = getManager();
+    const stoppedRecord = manager?.getRecord(agentId.trim())
+      ?? manager?.listAgents().find((candidate) => candidate.id.startsWith(agentId.trim()));
+    if (stoppedRecord && (stoppedRecord.lifecycle.status === "stopped" || stoppedRecord.lifecycle.status === "aborted")) {
+      const details = buildAgentDetails(stoppedRecord, { includeStats: true });
+      if (signal?.aborted) return cancelledResult(details);
+      return errorResult(error instanceof Error ? error.message : String(error), details);
+    }
+    if (signal?.aborted) return cancelledResult();
+    return errorResult(error instanceof Error ? error.message : String(error));
+  }
 }
 
 // ============================================================================

@@ -169,14 +169,18 @@ function formatMessageLine(
  * and unsubscribes.
  *
  * The optional stats parameter provides final summary data for the DONE line.
+ * `startIndex` selects the first session message still missing from the file;
+ * continuation attaches reuse the current message count so earlier executions
+ * are never rewritten.
  */
 export function streamToOutputFile(
   session: AgentSession,
   path: string,
   stats?: { turnCount: number; toolUseCount: number; totalTokens: number; cost: number },
   bufferSize: number = 0,
+  startIndex: number = 1,
 ): () => void {
-  let writtenCount = 1; // initial user prompt already written
+  let writtenCount = startIndex; // initial user prompt (or prior executions) already written
   let thinkingBuffer = "";
   let streamedThinkingBlocks = 0; // thinking blocks written live; skipped in the final flush
   let streamedThinkingChars = 0; // track total chars streamed for deduplication
@@ -302,20 +306,37 @@ export class AgentOutputLog {
   private statsRef?: OutputFinalStats;
   private bufferSize: number;
 
-  constructor(agentId: string, prompt: string, baseDir?: string, bufferSize: number = 0) {
+  constructor(agentId: string, prompt: string, baseDir?: string, bufferSize: number = 0, append: boolean = false) {
     this.path = createOutputFilePath(agentId, baseDir);
-    writeInitialEntry(this.path, prompt);
+    if (append) {
+      // Continuation: reuse the existing file and append the new prompt.
+      this.append(prompt);
+    } else {
+      writeInitialEntry(this.path, prompt);
+    }
     this.bufferSize = bufferSize;
+  }
+
+  /**
+   * Append a continuation's user prompt to the existing log file. Never
+   * truncates: the file accumulates one [USER] entry per execution.
+   */
+  append(prompt: string): void {
+    safeAppend(this.path, `${timestamp()} [USER] ${prompt}\n`);
   }
 
   /**
    * Subscribe to session events so messages stream to the output file.
    * Internally passes a mutable stats reference that `finalize()` populates
    * before the DONE line is written.
+   *
+   * `startIndex` is the first session message that still needs flushing;
+   * continuation attaches pass the current message count so already-written
+   * messages from earlier executions are not duplicated.
    */
-  attach(session: AgentSession): void {
+  attach(session: AgentSession, startIndex: number = 1): void {
     this.statsRef = { turnCount: 0, toolUseCount: 0, totalTokens: 0, cost: 0 };
-    this.cleanup = streamToOutputFile(session, this.path, this.statsRef, this.bufferSize);
+    this.cleanup = streamToOutputFile(session, this.path, this.statsRef, this.bufferSize, startIndex);
   }
 
   /**

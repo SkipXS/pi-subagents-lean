@@ -13,6 +13,7 @@ const state = vi.hoisted(() => {
     renderSubagentResult: vi.fn(),
     showAgentsMainMenu: vi.fn(),
     executeAgentTool: vi.fn(),
+    executeContinueAgentTool: vi.fn(),
     executeStopAgentTool: vi.fn(),
     executeAgentStatusTool: vi.fn(),
     getStore: vi.fn(),
@@ -40,6 +41,7 @@ vi.mock("@earendil-works/pi-tui", () => ({
 }));
 vi.mock("../src/agents/tool-execution.js", () => ({
   executeAgentTool: state.executeAgentTool,
+  executeContinueAgentTool: state.executeContinueAgentTool,
   executeStopAgentTool: state.executeStopAgentTool,
   toolCallListener: vi.fn(),
 }));
@@ -137,6 +139,7 @@ beforeEach(() => {
   state.renderSubagentResult.mockClear();
   state.showAgentsMainMenu.mockClear();
   state.executeAgentTool.mockClear();
+  state.executeContinueAgentTool.mockClear();
   state.executeStopAgentTool.mockClear();
   state.executeAgentStatusTool.mockClear();
   state.scanAndMerge.mockClear();
@@ -234,6 +237,27 @@ describe("Agent tool registration", () => {
     expect(state.renderSubagentResult.mock.calls.map((call) => call[3])).toEqual([true, false]);
   });
 
+  it("wires AgentContinue to its executor with a constrained schema", () => {
+    const api = createApi();
+    extension(api.api as any);
+    const tool = api.tools.find(({ name }) => name === "AgentContinue")!;
+
+    expect(tool).toBeDefined();
+    expect(tool.description).toBe("Continue an existing agent's session with a new prompt.");
+    expect(tool.execute).not.toBe(state.executeContinueAgentTool);
+    expect(tool.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
+    expect(JSON.parse(JSON.stringify(tool.parameters))).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["agent_id", "prompt"],
+      properties: {
+        agent_id: { type: "string" },
+        prompt: { type: "string" },
+        run_in_background: { type: "boolean" },
+      },
+    });
+  });
+
   it("wires StopAgent and AgentStatus to constrained schema executors", () => {
     const api = createApi();
     extension(api.api as any);
@@ -279,8 +303,8 @@ describe("Agent tool registration", () => {
     expect(state.registerAgents).toHaveBeenCalledTimes(2);
     expect([...state.registerAgents.mock.calls[0][0].keys()]).toEqual(["reviewer"]);
     expect([...state.registerAgents.mock.calls[1][0].keys()]).toEqual(["planner"]);
-    expect(api.api.registerTool).toHaveBeenCalledTimes(3);
-    expect(api.tools).toHaveLength(3);
+    expect(api.api.registerTool).toHaveBeenCalledTimes(4);
+    expect(api.tools).toHaveLength(4);
     expect(JSON.stringify(agentTool(api).parameters)).toBe(schemaBeforeLifecycle);
   });
 });

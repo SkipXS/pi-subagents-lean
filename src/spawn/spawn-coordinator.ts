@@ -1,14 +1,15 @@
 import { getPiInstance, getSessionCtx, getStore, getSubagentRuntimeContext, getWidget } from "../shell.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 import { normalizeThinkingLevel } from "../models/thinking.js";
+import { getStatusNote } from "../status-note.js";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentRecord, SpawnConfig, ToolActivity } from "../types.js";
+import type { AgentExecutionSummary, AgentRecord, AgentStatus, SpawnConfig, ToolActivity } from "../types.js";
 import type { AgentConfig } from "../agents/types.js";
 import type { AgentManager, SpawnOptions } from "../agents/agent-manager.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import { resolveTypeInCatalog, snapshotRegisteredAgentCatalog } from "../agents/agent-types.js";
-import { buildAgentDetails, createNestedAgentExecutor, formatResultContent } from "../agents/tool-execution.js";
+import { buildAgentDetails, createNestedAgentExecutor } from "../agents/tool-execution.js";
 
 /**
  * spawn-coordinator.ts — Spawn-and-track coordination for subagents.
@@ -41,10 +42,71 @@ export interface SpawnResult {
   record: AgentRecord;
 }
 
+/** Input for continueAgent(). Built by the AgentContinue tool executor. */
+export interface ContinueIntent {
+  agentId: string;
+  prompt: string;
+  runInBackground: boolean;
+  /** Parent abort signal forwarded to the agent manager. */
+  signal?: AbortSignal;
+  /** Turn budget for the continued execution. */
+  graceTurns?: number;
+}
+
+export interface ContinueResult {
+  executionId: string;
+  record: AgentRecord;
+}
+
 /** Batch delay for automatic background-result delivery (ms). */
 const NUDGE_DELAY_MS = 200;
 
 type DeliverySource = "auto" | "manual";
+
+/** Immutable payload captured at one execution's completion boundary. */
+interface BackgroundPayload {
+  /** Resolved full record id; delivery never echoes a caller's short prefix. */
+  agentId: string;
+  type: string;
+  /** Terminal status of this execution, frozen at completion. */
+  status: AgentStatus;
+  /** Result text frozen at completion; a later execution can never overwrite it. */
+  result: string;
+  /** Prebuilt message content frozen at completion. */
+  content: string;
+  details: Record<string, unknown>;
+}
+
+/**
+ * Authoritative per-execution background delivery state.
+ *
+ * Everything one execution needs for its single automatic delivery — immutable
+ * payload, timer, retry counter, in-flight guard, and parent-abort binding —
+ * is keyed by the execution id, so a stale timer or callback can never send a
+ * later execution's mutable `record.result`. `record.delivery` remains only a
+ * UI projection of the latest execution.
+ */
+interface BackgroundDeliveryEntry {
+  /** Manager-assigned execution id (agent id for legacy record-level tracking). */
+  key: string;
+  agentId: string;
+  payload?: BackgroundPayload;
+  signal?: AbortSignal;
+  onParentAbort?: () => void;
+  state: "pending" | "accepted" | "failed" | "abandoned";
+  /** True once the runner reported completion and delivery may be scheduled. */
+  completed: boolean;
+  attempts: number;
+  lastAttemptAt?: number;
+  lastError?: string;
+  /** Claims the single automatic delivery attempt. */
+  autoNudgeIssued: boolean;
+  /** Waiting in the shared delay window. */
+  pendingNudge: boolean;
+  /** Reentrancy guard while one delivery attempt is in progress. */
+  inProgress: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+}
 
 /** Copy array-valued fields so queued work cannot observe later config mutation. */
 function snapshotAgentConfig(config: AgentConfig | undefined): AgentConfig | undefined {
@@ -77,23 +139,11 @@ export class SpawnCoordinator {
   /** Monotonic key prevents same-tool starts in the same clock tick from colliding. */
   private nextActivityId = 0;
 
-  /** Background agents that have not yet completed. */
-  private backgroundAgentIds = new Set<string>();
+  /** Authoritative per-execution background delivery state. */
+  private backgroundDeliveries = new Map<string, BackgroundDeliveryEntry>();
 
-  /** Parent cancellation listeners retained until delivery is accepted or abandoned. */
-  private backgroundParentAborts = new Map<string, { signal: AbortSignal; listener: () => void }>();
-
-  /** Pending automatic delivery IDs, batched within the delay window. */
-  private pendingNudges = new Set<string>();
-
-  /** IDs that already received their one automatic completion delivery attempt. */
-  private autoNudgeIssued = new Set<string>();
-
-  /** Guards synchronous/reentrant delivery calls so no attempt can be duplicated. */
-  private deliveryInProgress = new Set<string>();
-
-  /** Active automatic-delivery timer. */
-  private nudgeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Latest claimed execution per record, retained after accepted entries are cleared. */
+  private latestDeliveryKeys = new Map<string, string>();
 
   /** Set during dispose to prevent delivery through a stale Pi instance. */
   private disposed = false;
@@ -184,17 +234,26 @@ export class SpawnCoordinator {
       ? this.manager.spawnNested(parentId, pi, ctx, type, prompt, spawnOptions)
       : this.manager.spawn(pi, ctx, type, prompt, spawnOptions);
     const record = this.manager.getRecord(agentId)!;
-    if (runInBackground) this.initializeBackgroundDelivery(record);
+    if (runInBackground) {
+      // The initial spawn is execution 0; its completion carries the same id.
+      // Records without an execution summary (legacy doubles) fall back to a
+      // record-level claim keyed by the agent id.
+      this.claimBackgroundDelivery(record, record.stats.executions?.[0]?.id, signal);
+    }
 
     if (isTerminal(record)) {
       // An already-aborted parent can complete synchronously, before coordinator
       // tracking is registered. It has no remaining route for a result.
-      if (runInBackground && signal?.aborted) {
-        this.abandonBackgroundDelivery(agentId, record);
-      } else if (runInBackground) {
-        this.backgroundAgentIds.add(agentId);
-        this.trackBackgroundParentAbort(agentId, signal);
-        this.scheduleNudge(agentId);
+      if (runInBackground) {
+        const entry = this.latestDelivery(agentId);
+        if (signal?.aborted || !entry) {
+          if (entry) this.abandonBackgroundDelivery(entry, record);
+        } else {
+          // Defensive terminal acceptance without an abort: deliver directly.
+          entry.completed = true;
+          entry.payload ??= this.capturePayload(record, record.lifecycle.status);
+          this.scheduleEntry(entry);
+        }
       } else {
         record.lifecycle.resultConsumed = true;
       }
@@ -205,8 +264,7 @@ export class SpawnCoordinator {
     if (!inheritedRuntime) getWidget()?.ensureTimer();
 
     if (runInBackground) {
-      this.backgroundAgentIds.add(agentId);
-      this.trackBackgroundParentAbort(agentId, signal);
+      // The delivery claim above is the only background tracking needed.
     } else {
       await record.execution.promise;
       record.lifecycle.resultConsumed = true;
@@ -216,14 +274,62 @@ export class SpawnCoordinator {
     return { agentId, record };
   }
 
+  /**
+   * Continue an existing agent's session. Foreground callers await their own
+   * execution; background callers return immediately and receive a per-execution
+   * completion notification through the normal delivery path.
+   */
+  async continueAgent(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    intent: ContinueIntent,
+  ): Promise<ContinueResult> {
+    if (getSubagentRuntimeContext()) {
+      throw new Error("Root agent continuation is unavailable from a child runtime");
+    }
+    const liveView: LiveView = { activeTools: new Map(), responseText: "" };
+    const liveViewCallbacks = this.createLiveViewCallbacks(liveView);
+    const { executionId, record, promise } = this.manager.continueAgent(intent.agentId, intent.prompt, {
+      isBackground: intent.runInBackground,
+      signal: intent.signal,
+      graceTurns: intent.graceTurns,
+      ...liveViewCallbacks,
+    });
+
+    if (intent.runInBackground) {
+      // Fresh per-execution delivery state; an earlier execution's state is
+      // already consumed or still delivering under its own execution key.
+      record.delivery = { state: "pending", attempts: 0 };
+      record.lifecycle.resultConsumed = false;
+      this.claimBackgroundDelivery(record, executionId, intent.signal);
+      // Background callers never await this promise (a queued stop rejects
+      // it), so observe the rejection here as well as at the manager.
+      promise.catch(() => {});
+    }
+    this.liveViews.set(record.id, liveView);
+    if (!getSubagentRuntimeContext()) getWidget()?.ensureTimer();
+
+    if (!intent.runInBackground) {
+      try {
+        await promise;
+      } finally {
+        // Even a rejected continuation (stopped/cancelled while queued) is
+        // consumed by the caller's error result and leaves the live view.
+        record.lifecycle.resultConsumed = true;
+        this.liveViews.delete(record.id);
+      }
+    }
+    return { executionId, record };
+  }
+
   /** Read the live view for an agent. Widget calls this. */
   liveView(id: string): LiveView | undefined {
     return this.liveViews.get(id);
   }
 
-  /** Check if an agent is still awaiting background completion. */
+  /** Check if an agent still has a background execution awaiting completion. */
   isBackground(agentId: string): boolean {
-    return this.backgroundAgentIds.has(agentId);
+    return this.entriesFor(agentId).some((entry) => !entry.completed);
   }
 
   /**
@@ -233,78 +339,99 @@ export class SpawnCoordinator {
    */
   scheduleNudge(agentId: string): void {
     const record = this.manager.getRecord(agentId);
-    // Public callers can request this at any time. Only a retained terminal
-    // background result that is still pending may claim the automatic attempt.
-    if (this.disposed || this.autoNudgeIssued.has(agentId)
-      || !record || !isTerminal(record) || record.delivery?.state !== "pending") return;
-    this.autoNudgeIssued.add(agentId);
-    this.pendingNudges.add(agentId);
-    if (this.nudgeTimer) return;
-
-    this.nudgeTimer = setTimeout(() => {
-      this.nudgeTimer = null;
-      const batch = [...this.pendingNudges];
-      this.pendingNudges.clear();
-      for (const id of batch) this.deliver(id, "auto");
-    }, NUDGE_DELAY_MS);
+    const entry = this.latestDelivery(agentId);
+    if (this.disposed || !entry || !record || !isTerminal(record) || entry.state !== "pending") return;
+    entry.completed = true;
+    entry.payload ??= this.capturePayload(record, record.lifecycle.status);
+    this.scheduleEntry(entry);
   }
 
-  /** Called by AgentManager's completion callback. */
-  onAgentComplete(record: AgentRecord): void {
+  /** Called by AgentManager's completion callback, once per executed turn. */
+  onAgentComplete(record: AgentRecord, execution?: AgentExecutionSummary): void {
     this.liveViews.delete(record.id);
-    if (!this.backgroundAgentIds.has(record.id)) return;
-
-    this.backgroundAgentIds.delete(record.id);
-    this.initializeBackgroundDelivery(record);
-    if (this.backgroundParentAborts.get(record.id)?.signal.aborted) {
-      this.abandonBackgroundDelivery(record.id, record);
+    // Every background execution gets exactly one automatic delivery attempt,
+    // keyed by its own execution id so repeated continuations can never reuse
+    // a stale claim or read a later execution's mutable result.
+    if (execution?.mode === "background") {
+      const entry = this.backgroundDeliveries.get(execution.id);
+      if (!entry || entry.completed) return;
+      entry.completed = true;
+      entry.payload = this.capturePayload(record, execution.status);
+      if (this.disposed || entry.signal?.aborted) {
+        this.abandonBackgroundDelivery(entry, record);
+        return;
+      }
+      this.scheduleEntry(entry);
       return;
     }
-    // Every background completion gets exactly one automatic attempt. The set
-    // also protects against accidental duplicate completion notifications.
-    this.scheduleNudge(record.id);
+    // Legacy record-level path for completions without an execution summary
+    // (queued stops, startup failures, pre-continue records).
+    const legacy = this.latestDelivery(record.id);
+    if (!legacy || legacy.completed) return;
+    legacy.completed = true;
+    legacy.payload ??= this.capturePayload(record, record.lifecycle.status);
+    if (this.disposed || legacy.signal?.aborted) {
+      this.abandonBackgroundDelivery(legacy, record);
+      return;
+    }
+    this.scheduleEntry(legacy);
   }
 
-  /**
-   * Immediately retry a terminal failed background delivery. Returns false when
-   * the record is no longer eligible (accepted, abandoned, evicted, or active).
+  /** Whether a retained terminal delivery failure is available for retry. */
+  hasRetryableDelivery(agentId: string): boolean {
+    return !this.disposed && this.entriesFor(agentId).some((entry) => entry.state === "failed");
+  }
+
+  /** Immediately retry the oldest retained terminal delivery failure. Returns
+   * false when no eligible execution remains (accepted, abandoned, evicted, or active).
    */
   retryDelivery(agentId: string): boolean {
     if (this.disposed) return false;
     const record = this.manager.getRecord(agentId);
-    if (!record || !isTerminal(record) || record.delivery?.state !== "failed") return false;
-    return this.deliver(agentId, "manual");
+    const entry = this.entriesFor(agentId).find((candidate) => candidate.state === "failed");
+    if (!entry || !record || !isTerminal(record)) return false;
+    return this.deliver(entry, "manual");
   }
 
   /** Remove coordinator tracking when AgentManager fully evicts a record. */
   onRecordEvicted(record: AgentRecord): void {
-    this.clearBackgroundTracking(record.id, true);
+    for (const entry of this.entriesFor(record.id)) this.clearEntry(entry, true);
+    this.latestDeliveryKeys.delete(record.id);
   }
 
   /** Dispose without delivering any retained pending or failed result. */
   dispose(): void {
     this.disposed = true;
-    if (this.nudgeTimer) {
-      clearTimeout(this.nudgeTimer);
-      this.nudgeTimer = null;
-    }
-    this.pendingNudges.clear();
-
-    // Include completed failures and active background records: shutdown has no
-    // valid parent session, so none may be delivered if completion races dispose.
-    for (const record of this.manager.listAgents()) {
-      if (record.delivery?.state === "pending" || record.delivery?.state === "failed") {
-        this.abandonBackgroundDelivery(record.id, record);
+    for (const entry of this.backgroundDeliveries.values()) {
+      if (entry.state === "pending" || entry.state === "failed") {
+        this.abandonBackgroundDelivery(entry, this.manager.getRecord(entry.agentId));
+      } else {
+        this.clearEntry(entry, true);
       }
     }
+    this.backgroundDeliveries.clear();
+    this.latestDeliveryKeys.clear();
     this.liveViews.clear();
-    this.backgroundAgentIds.clear();
-    this.autoNudgeIssued.clear();
-    for (const id of [...this.backgroundParentAborts.keys()]) this.clearBackgroundParentAbort(id);
   }
 
-  private initializeBackgroundDelivery(record: AgentRecord): void {
+  /** Register one background execution's delivery claim at acceptance. */
+  private claimBackgroundDelivery(record: AgentRecord, executionId: string | undefined, signal?: AbortSignal): void {
+    const entry: BackgroundDeliveryEntry = {
+      key: executionId ?? record.id,
+      agentId: record.id,
+      signal,
+      state: "pending",
+      completed: false,
+      attempts: 0,
+      autoNudgeIssued: false,
+      pendingNudge: false,
+      inProgress: false,
+      timer: null,
+    };
+    this.backgroundDeliveries.set(entry.key, entry);
+    this.latestDeliveryKeys.set(record.id, entry.key);
     record.delivery ??= { state: "pending", attempts: 0 };
+    this.trackBackgroundParentAbort(entry, record);
   }
 
   /** Create callbacks that bridge manager events to a specific live view. */
@@ -323,79 +450,141 @@ export class SpawnCoordinator {
     };
   }
 
-  /** Keep delivery tied to the parent turn until Pi has accepted it. */
-  private trackBackgroundParentAbort(agentId: string, signal?: AbortSignal): void {
-    if (!signal || this.backgroundParentAborts.has(agentId)) return;
-    const listener = () => this.abandonBackgroundDelivery(agentId, this.manager.getRecord(agentId));
-    this.backgroundParentAborts.set(agentId, { signal, listener });
-    signal.addEventListener("abort", listener, { once: true });
-    if (signal.aborted && this.backgroundParentAborts.has(agentId)) listener();
+  /** Keep each execution's delivery tied to its parent turn until Pi accepts it. */
+  private trackBackgroundParentAbort(entry: BackgroundDeliveryEntry, record: AgentRecord): void {
+    const signal = entry.signal;
+    if (!signal) return;
+    if (signal.aborted) {
+      // AbortSignal does not dispatch a past abort event; abandon immediately.
+      this.abandonBackgroundDelivery(entry, record);
+      return;
+    }
+    entry.onParentAbort = () => this.abandonBackgroundDelivery(entry, this.manager.getRecord(entry.agentId));
+    signal.addEventListener("abort", entry.onParentAbort, { once: true });
   }
 
-  private clearBackgroundParentAbort(agentId: string): void {
-    const entry = this.backgroundParentAborts.get(agentId);
-    if (!entry) return;
-    entry.signal.removeEventListener("abort", entry.listener);
-    this.backgroundParentAborts.delete(agentId);
+  private removeParentAbortListener(entry: BackgroundDeliveryEntry): void {
+    if (!entry.signal || !entry.onParentAbort) return;
+    entry.signal.removeEventListener("abort", entry.onParentAbort);
+    entry.onParentAbort = undefined;
   }
 
   /** Parent/dispose abandonment is terminal and deliberately has no retry path. */
-  private abandonBackgroundDelivery(agentId: string, record?: AgentRecord): void {
-    if (record?.delivery && record.delivery.state !== "accepted") {
-      record.delivery.state = "abandoned";
-      record.lifecycle.resultConsumed = true;
+  private abandonBackgroundDelivery(entry: BackgroundDeliveryEntry, record?: AgentRecord): void {
+    if (entry.state !== "accepted") {
+      entry.state = "abandoned";
+      if (record) {
+        // Only the latest execution owns the record's projection and consumption flag.
+        if (this.isLatestDelivery(record.id, entry)) {
+          this.projectDelivery(record, entry);
+          record.lifecycle.resultConsumed = true;
+        }
+      }
     }
-    this.clearBackgroundTracking(agentId, true);
+    this.clearEntry(entry, true);
   }
 
-  /** Clear transient tracking; retain parent listener after failure for later parent abort. */
-  private clearBackgroundTracking(agentId: string, clearParent: boolean): void {
-    this.pendingNudges.delete(agentId);
-    this.backgroundAgentIds.delete(agentId);
-    this.liveViews.delete(agentId);
-    if (clearParent) {
-      this.autoNudgeIssued.delete(agentId);
-      this.clearBackgroundParentAbort(agentId);
+  /** Clear transient tracking for one execution; retain parent listener after failure. */
+  private clearEntry(entry: BackgroundDeliveryEntry, clearParent: boolean): void {
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
     }
+    entry.pendingNudge = false;
+    entry.inProgress = false;
+    if (clearParent) {
+      this.removeParentAbortListener(entry);
+      this.backgroundDeliveries.delete(entry.key);
+    }
+  }
+
+  /** All delivery entries for one record, in claim order. */
+  private entriesFor(agentId: string): BackgroundDeliveryEntry[] {
+    return [...this.backgroundDeliveries.values()].filter((entry) => entry.agentId === agentId);
+  }
+
+  /** The most recently claimed delivery entry for a record, if any. */
+  private latestDelivery(agentId: string): BackgroundDeliveryEntry | undefined {
+    const entries = this.entriesFor(agentId);
+    return entries.length > 0 ? entries[entries.length - 1] : undefined;
+  }
+
+  private isLatestDelivery(agentId: string, entry: BackgroundDeliveryEntry): boolean {
+    return this.latestDeliveryKeys.get(agentId) === entry.key;
+  }
+
+  /** Mirror one execution's delivery state onto the record's UI projection. */
+  private projectDelivery(record: AgentRecord, entry: BackgroundDeliveryEntry): void {
+    if (!this.isLatestDelivery(record.id, entry)) return;
+    record.delivery = {
+      state: entry.state,
+      attempts: entry.attempts,
+      ...(entry.lastAttemptAt !== undefined ? { lastAttemptAt: entry.lastAttemptAt } : {}),
+      ...(entry.lastError !== undefined ? { lastError: entry.lastError } : {}),
+    };
+  }
+
+  /** Freeze the completion-time payload; delivery never re-reads the mutable record. */
+  private capturePayload(record: AgentRecord, status: AgentStatus): BackgroundPayload {
+    const result = record.result ?? "";
+    return {
+      agentId: record.id,
+      type: record.display.type,
+      status,
+      result,
+      content: `[Subagent "${record.display.type}" ${record.id.slice(0, SHORT_ID_LENGTH)} ${status}]\n\n${result}${getStatusNote(record.lifecycle)}`,
+      details: buildAgentDetails(record, { includeStats: true, includeStatus: true }),
+    };
+  }
+
+  /** Claim and arm the one automatic delivery attempt for a completed execution. */
+  private scheduleEntry(entry: BackgroundDeliveryEntry): void {
+    if (this.disposed || entry.state !== "pending" || !entry.completed || entry.autoNudgeIssued) return;
+    entry.autoNudgeIssued = true;
+    entry.pendingNudge = true;
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      entry.pendingNudge = false;
+      this.deliver(entry, "auto");
+    }, NUDGE_DELAY_MS);
   }
 
   /** Shared delivery path: auto only from pending, manual only from failed. */
-  private deliver(agentId: string, source: DeliverySource): boolean {
-    const record = this.manager.getRecord(agentId);
-    const delivery = record?.delivery;
+  private deliver(entry: BackgroundDeliveryEntry, source: DeliverySource): boolean {
+    if (this.disposed) return false;
+    const record = this.manager.getRecord(entry.agentId);
     if (!record) {
-      this.clearBackgroundTracking(agentId, true);
+      this.clearEntry(entry, true);
       return false;
     }
-    if (!delivery || this.deliveryInProgress.has(agentId)) return false;
-    if (source === "auto" ? delivery.state !== "pending" : delivery.state !== "failed") return false;
-
-    if (this.disposed || this.backgroundParentAborts.get(agentId)?.signal.aborted) {
-      this.abandonBackgroundDelivery(agentId, record);
+    if (entry.state !== (source === "auto" ? "pending" : "failed") || entry.inProgress) return false;
+    if (entry.signal?.aborted) {
+      this.abandonBackgroundDelivery(entry, record);
       return false;
     }
 
-    this.deliveryInProgress.add(agentId);
-    delivery.attempts++;
-    delivery.lastAttemptAt = Date.now();
-    delete delivery.lastError;
+    entry.inProgress = true;
+    entry.attempts++;
+    entry.lastAttemptAt = Date.now();
+    delete entry.lastError;
     try {
       const pi = getPiInstance();
       if (!pi) throw new Error("Pi instance unavailable for background result delivery");
       // Check immediately before the irreversible handoff as well as before
       // preparation, so a queued timer can never send after parent/dispose.
-      if (this.disposed || this.backgroundParentAborts.get(agentId)?.signal.aborted) {
-        this.abandonBackgroundDelivery(agentId, record);
+      if (this.disposed || entry.signal?.aborted) {
+        this.abandonBackgroundDelivery(entry, record);
         return false;
       }
 
-      const details = buildAgentDetails(record, { includeStats: true, includeStatus: true });
+      const payload = entry.payload;
+      if (!payload) throw new Error("Background result payload is unavailable");
       const parentIdle = getSessionCtx()?.isIdle?.() ?? true;
       pi.sendMessage(
         {
           customType: "subagent-result",
-          content: `[Subagent "${record.display.type}" ${record.id.slice(0, SHORT_ID_LENGTH)} ${record.lifecycle.status}]\n\n${formatResultContent(record)}`,
-          details,
+          content: payload.content,
+          details: payload.details,
           display: true,
         },
         { deliverAs: parentIdle ? "followUp" : "steer", triggerTurn: true },
@@ -403,16 +592,22 @@ export class SpawnCoordinator {
 
       // This intentionally means only that Pi did not synchronously throw. It
       // is not an LLM/provider delivery confirmation.
-      delivery.state = "accepted";
-      record.lifecycle.resultConsumed = true;
-      this.clearBackgroundTracking(agentId, true);
+      entry.state = "accepted";
+      // deliveredText records an actual handoff only — never completion.
+      const execution = record.stats.executions?.find((e) => e.id === entry.key);
+      if (execution) execution.deliveredText = payload.result;
+      // Only the latest execution owns the record's consumption flag.
+      if (this.isLatestDelivery(record.id, entry)) record.lifecycle.resultConsumed = true;
+      this.projectDelivery(record, entry);
+      this.clearEntry(entry, true);
     } catch (error) {
       // Preserve result and terminal status for the explicit manual retry path.
-      delivery.state = "failed";
-      delivery.lastError = deliveryErrorMessage(error);
-      this.clearBackgroundTracking(agentId, false);
+      entry.state = "failed";
+      entry.lastError = deliveryErrorMessage(error);
+      this.projectDelivery(record, entry);
+      this.clearEntry(entry, false);
     } finally {
-      this.deliveryInProgress.delete(agentId);
+      entry.inProgress = false;
     }
     return true;
   }

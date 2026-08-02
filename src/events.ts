@@ -55,9 +55,9 @@ export function ensureManagerAndWidget(): void {
     setCoordinator(coordinator);
 
     // Wire the manager's onComplete to the coordinator
-    newManager.setOnComplete((record) => {
+    newManager.setOnComplete((record, execution) => {
       // Delegate completion side-effects to coordinator
-      coordinator.onAgentComplete(record);
+      coordinator.onAgentComplete(record, execution);
       getWidget()?.update();
     });
     newManager.setOnRecordEvicted?.((record) => coordinator.onRecordEvicted(record));

@@ -132,7 +132,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 
 // --- Import the module under test ---
 
-import { runAgent, subscribeToSessionEvents } from "../../src/agents/agent-runner.js";
+import { executeAgentTurn, runAgent, subscribeToSessionEvents } from "../../src/agents/agent-runner.js";
 
 const defaultConfig = {
   displayName: "Agent",
@@ -2277,6 +2277,29 @@ describe("runAgent — abort and callback event paths", () => {
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
 
     const result = await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+
+    expect(result.responseText).toBe("completed from history");
+  });
+
+  it("never returns prior assistant text for an empty continuation turn", async () => {
+    const session = createMockSession();
+    (session.messages as any).push({ role: "assistant", content: [{ type: "text", text: "previous answer" }] });
+    session.prompt = vi.fn().mockResolvedValue(undefined) as any;
+
+    const result = await executeAgentTurn(session as any, "follow up", {});
+
+    // The continuation emits no deltas and no new assistant message: the
+    // result must be empty, never the prior execution's text.
+    expect(result.responseText).toBe("");
+  });
+
+  it("keeps the opt-in history fallback for initial runs", async () => {
+    const session = createMockSession();
+    (session.messages as any).push({ role: "assistant", content: [{ type: "text", text: "completed from history" }] });
+    session.prompt = vi.fn().mockResolvedValue(undefined) as any;
+    mockModules.mockExtractText.mockImplementation((content: any[]) => content?.find((part) => part.type === "text")?.text ?? "");
+
+    const result = await executeAgentTurn(session as any, "do something", { fallbackToLastAssistantText: true });
 
     expect(result.responseText).toBe("completed from history");
   });

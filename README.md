@@ -86,7 +86,7 @@ picker. See [resolution and hidden roles](#dynamic-catalog-discovery-and-trust).
 
 ## Tools and execution
 
-The extension registers three intentionally bare schemas. Their stable names
+The extension registers four intentionally bare schemas. Their stable names
 and fields keep recurring parent-session schema tokens low; the generated parent
 orchestration guidance supplies the changing catalog and operating advice.
 
@@ -103,6 +103,21 @@ orchestration guidance supplies the changing catalog and operating advice.
 The tool deliberately has no model, thinking, turn, or token parameters.
 Configure those through an agent definition, persistent settings, or the manual
 spawn flow. `worktree_path` is rejected for nested children.
+
+### `AgentContinue`
+
+`AgentContinue({ agent_id, prompt, run_in_background? })` continues a
+finished agent on its existing session, reusing its model, working directory,
+output log, and stored `max_turns`/`grace_turns` limits. Only retained depth-1
+agents that completed successfully can be continued; running, queued,
+unsettled, stopped, aborted, turn-limited, or failed agents are rejected, as
+are nested children. A short `agent_id` prefix is accepted only when it matches
+exactly one retained agent; ambiguous prefixes are rejected. Foreground calls
+return the new execution's result; `run_in_background` acknowledges immediately
+and delivers one completion notification per execution. Each execution is
+retained as its own entry (`id`, `mode`, `status`, `usage`, `turnCount`) in the
+record's `executions` history and the accumulated usage, cost, tool, turn, and
+compaction totals stay cumulative across executions.
 
 ### `StopAgent`
 
@@ -492,7 +507,7 @@ per-role thinking overrides live in `thinkingOverrides`. Eco mode/settings use
 | `agent.widgetShortcut` | `false` | Let `ctrl+o` tool expansion control compact mode when forced compact is off. |
 | `agent.widgetShowModelThinking` | `true` | Show model and thinking in one widget column. |
 | `agent.widgetShowStartTime` | `true` | Show local `HH:MM` start/queue time per widget row. |
-| `agent.finishedRetentionMinutes` | `10` | Retain completed records in the widget for this many minutes. |
+| `agent.finishedRetentionMinutes` | `60` | Retain completed records in the widget for this many minutes. |
 | `agent.outputThinkingBufferSize` | `0` | Thinking-log buffer in characters: `0` writes at turn end; any positive value flushes during streaming near sentence boundaries. `/agents` offers 80/200/500/1000 presets. |
 | `agent.showTools` | `true` | Show tool count (⚙︎) in widget and viewer. |
 | `agent.showTurns` | `true` | Show turn count (⟳) in widget and viewer. |

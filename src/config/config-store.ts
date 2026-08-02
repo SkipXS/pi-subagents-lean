@@ -220,7 +220,7 @@ export class ConfigStore {
       showContext: a.showContext !== false,
       showTime: a.showTime !== false,
       outputThinkingBufferSize: a.outputThinkingBufferSize ?? 0,
-      finishedRetentionMinutes: a.finishedRetentionMinutes ?? 10,
+      finishedRetentionMinutes: a.finishedRetentionMinutes ?? 60,
       maxNestingDepth: normalizeMaxNestingDepth(a.maxNestingDepth),
     };
   }
