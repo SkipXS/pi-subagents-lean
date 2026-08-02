@@ -2,20 +2,21 @@
 
 ## Status
 
-Phase 3 ist auf diesem Branch umgesetzt. Dieses Dokument bleibt als Zielbild,
-Begründung und Akzeptanz-Checkliste erhalten.
+**Abgeschlossen: Phase 1–5.** Das flache, tool-first Modell ist umgesetzt und
+dieses Dokument beschreibt nun das erreichte Zielbild, die Begründung, die
+finalen Entscheidungen und die überprüfte Akzeptanz-Checkliste.
 
 ## Entscheidung
 
-Die Extension wird auf ein flaches, toolbasiertes Delegationsmodell reduziert:
+Die Extension ist auf ein flaches, toolbasiertes Delegationsmodell reduziert:
 
-- Die interaktive TUI wird entfernt.
-- Nested Delegation wird entfernt.
+- Die interaktive TUI ist entfernt.
+- Nested Delegation ist entfernt.
 - `AgentContinue` bleibt erhalten.
 - Root-Agents können weiterhin im Vordergrund oder Hintergrund ausgeführt werden.
 - `StopAgent` und `AgentStatus` bleiben als nicht-visuelle Kontrollmöglichkeiten erhalten.
 
-Das angestrebte Modell ist:
+Das erreichte Modell ist:
 
 ```text
 Parent-Session
@@ -71,7 +72,8 @@ Für `AgentContinue` gelten folgende Invarianten:
 2. Ein laufender oder wartender Agent ist nicht fortsetzbar.
 3. Pro Agent darf nur eine Ausführung oder Fortsetzung gleichzeitig aktiv sein.
 4. Gestoppte, abgebrochene oder fehlgeschlagene Agents bleiben gemäß bestehendem Vertrag nicht fortsetzbar.
-5. `run_in_background` bleibt unterstützt; das Ergebnis wird über den normalen Background-Zustellungsweg geliefert.
+5. `run_in_background` bleibt unterstützt; jede Background-Ausführung erhält
+   ihren eigenen exactly-once-Nudge über den normalen Zustellungsweg.
 6. Retention bleibt begrenzt, damit beendete Sessions nicht unbegrenzt Speicher belegen.
 
 ### `StopAgent`
@@ -80,7 +82,7 @@ Stoppt einen laufenden oder wartenden Root-Agent. Kaskadierende Child-Abbrüche 
 
 ### `AgentStatus`
 
-Liefert den Zustand direkt gestarteter Agents ohne Abhängigkeit von Widget oder Conversation Viewer.
+Liefert den Zustand direkt gestarteter Agents ohne visuelle Abhängigkeiten.
 
 ## Zu entfernender Umfang
 
@@ -151,69 +153,89 @@ Subagent-Sessions dürfen die Extension weiterhin isoliert laden, aber sie erhal
 
 Die Entfernung soll bestehende Konfigurationsdateien nicht unnötig unlesbar machen.
 
-- Alte UI-Schlüssel werden zunächst tolerant ignoriert, statt das Laden abzulehnen.
-- `delegate_to`, `max_child_agents` und Nesting-Einstellungen werden zunächst als veraltete Felder akzeptiert und ignoriert.
-- Neue Schreibvorgänge sollen entfernte Felder nicht mehr erzeugen.
+- Alte UI-Schlüssel werden tolerant ignoriert, statt das Laden abzulehnen.
+- `delegate_to`, `max_child_agents` und Nesting-Einstellungen werden als
+  veraltete Felder akzeptiert und ignoriert.
+- Neue Schreibvorgänge erzeugen entfernte Felder nicht mehr.
 - Eine spätere Hauptversion kann die veralteten Felder und Parser endgültig entfernen.
-- Eco-Einstellungen benötigen eine gesonderte Entscheidung: Bleibt Eco fachlich erhalten, muss es ohne TUI über Konfiguration nutzbar sein; andernfalls wird es ausdrücklich als Teil der TUI-Entfernung gestrichen.
-- README, `CONTEXT.md`, Agent-Beispiele und Konfigurationsreferenz müssen den flachen Ausführungsbaum beschreiben.
+- Eco bleibt fachlich erhalten und wird dateibasiert über Konfiguration genutzt;
+  es gibt dafür keine TUI-Abhängigkeit.
+- README, `CONTEXT.md`, Agent-Beispiele und Konfigurationsreferenz beschreiben
+  den flachen Ausführungsbaum.
 
 ## Umsetzung in Phasen
 
-### Phase 1: Headless-Vertrag absichern
+### Phase 1: Headless-Vertrag absichern (umgesetzt)
 
 Vor strukturellen Änderungen werden bestehende Integrationstests auf den gewünschten Kernvertrag ausgerichtet:
 
 - Foreground-Start liefert das finale Ergebnis.
-- Background-Start bestätigt sofort und liefert später genau eine Abschlussnachricht.
+- Background-Start bestätigt sofort und liefert pro Ausführung genau eine
+  automatische Abschlussnachricht.
 - `AgentContinue` funktioniert im Vordergrund und Hintergrund.
 - `StopAgent` stoppt laufende oder wartende Root-Agents.
 - `AgentStatus` zeigt Root-Zustände korrekt.
 - Shutdown beendet oder bereinigt alle Root-Ausführungen.
 - Alle Kernpfade funktionieren mit `hasUI: false`.
 
-### Phase 2: TUI entfernen
+### Phase 2: TUI entfernen (umgesetzt)
 
-1. `/agents`, Widget, Viewer und Navigation aus Registrierung, Events und Shell lösen.
-2. Fachliche Logik von rein visuellen Callbacks trennen.
-3. `src/ui/` und die zugehörigen Tests entfernen.
-4. Nicht-visuelle Hilfsfunktionen verschieben oder vereinfachen.
-5. TUI-Abhängigkeiten erst entfernen, wenn keine verbleibenden Runtime-Imports existieren.
-6. Dokumentation auf toolbasierte Bedienung umstellen.
+1. `/agents`, Widget, Viewer und Navigation wurden aus Registrierung, Events
+   und Shell gelöst.
+2. Fachliche Logik wurde von rein visuellen Callbacks getrennt.
+3. `src/ui/` und die zugehörigen Tests wurden entfernt.
+4. Nicht-visuelle Hilfsfunktionen wurden verschoben oder vereinfacht.
+5. TUI-Abhängigkeiten wurden erst nach der Entfernung aller Runtime-Imports
+   entfernt.
+6. Die Dokumentation wurde auf toolbasierte Bedienung umgestellt.
 
 Nach dieser Phase muss das Verhalten der vier Tools unverändert sein; die
 Ausführung bleibt auf direkte Root-Agents beschränkt.
 
 ### Phase 3: Nested Delegation entfernen (umgesetzt)
 
-1. Das `Agent`-Proxy-Tool aus Subagent-Sessions entfernen.
-2. Child-Promptblöcke und Child-Kataloge entfernen.
-3. Nested Executor und Nested Runtime Context entfernen.
-4. Manager auf flache Root-Records reduzieren.
-5. Coordinator auf Root-Spawns und Root-Continuations reduzieren.
-6. Hierarchie-, Tiefen-, Child-Budget- und Kaskadenlogik entfernen.
-7. Agent-Definitionen und Konfiguration von Delegationsfeldern bereinigen.
-8. Nested-spezifische Tests entfernen und Root-Lifecycle-Tests beibehalten oder verstärken.
+1. Das `Agent`-Proxy-Tool wurde aus Subagent-Sessions entfernt.
+2. Child-Promptblöcke und Child-Kataloge wurden entfernt.
+3. Nested Executor und Nested Runtime Context wurden entfernt.
+4. Der Manager wurde auf flache Root-Records reduziert.
+5. Der Coordinator wurde auf Root-Spawns und Root-Continuations reduziert.
+6. Hierarchie-, Tiefen-, Child-Budget- und Kaskadenlogik wurde entfernt.
+7. Agent-Definitionen und Konfiguration wurden von Delegationsfeldern bereinigt.
+8. Nested-spezifische Tests wurden entfernt; Root-Lifecycle-Tests blieben erhalten
+   oder wurden verstärkt.
 
-### Phase 4: `AgentContinue` isolieren und vereinfachen
+### Phase 4: `AgentContinue` isolieren und vereinfachen (umgesetzt)
 
 `AgentContinue` bleibt funktional erhalten, wird aber vom entfernten Hierarchiemodell getrennt:
 
 - Fortsetzung arbeitet nur mit Root-Agent-IDs.
 - Berechtigungsprüfungen beziehen sich nicht mehr auf Parent-/Child-Beziehungen.
 - Retention speichert nur Daten, die für Status, Ergebnis und Fortsetzung benötigt werden.
-- Foreground- und Background-Fortsetzungen verwenden denselben Ausführungspfad wie möglich.
+- Foreground- und Background-Fortsetzungen verwenden denselben Ausführungspfad.
 - Ausgabe- und Usage-Historie bleiben pro Ausführung nachvollziehbar.
 
 Diese Phase ist eine interne Vereinfachung und keine Entfernung des Features.
 
-### Phase 5: Dokumentation und Bereinigung
+### Phase 5: Dokumentation und Bereinigung (umgesetzt)
 
-- README und `CONTEXT.md` aktualisieren.
-- Entfernte Optionen und UI-Beschreibungen löschen oder als Migration dokumentieren.
-- Paketinhalt und Abhängigkeiten prüfen.
-- Verwaiste Tests, Fixtures und Exporte entfernen.
-- Coverage-Schwellen an den kleineren Codebestand anpassen, ohne die Qualität des Kernpfads zu senken.
+- README, `CONTEXT.md`, ADR 0001 und dieser Plan beschreiben die statischen
+  Tool-Beschreibungen und das flache Root-Modell.
+- Öffentliche Tool-Schemas enthalten keine Model-/Thinking-Spawn-Overrides;
+  diese Werte werden intern aus Definitionen und Konfiguration aufgelöst.
+- Hintergrundzustellung ist pro Ausführung claim-basiert: jede Background- oder
+  `AgentContinue`-Ausführung erhält nach kurzer Verzögerung ihre eigene Message
+  und genau einen automatischen `sendMessage`-Versuch. Ein `sendMessage`-Fehler
+  bleibt bis zur Eviction als diagnostischer Delivery-Fehler erhalten; ein
+  Retry-Pfad ist nicht Bestandteil des Vertrags.
+- `refreshActiveSessions`, `SessionRevision` und der alte Viewer-Cadence-Pfad
+  samt ausschließlich zugehöriger Tests sind entfernt.
+- `defaultMaxTurns` ist keine ConfigStore- oder Typ-API mehr. `config-io` liest
+  alte Dateien weiterhin tolerant und droppt den Legacy-Key beim Normalisieren.
+- Stale Präsentationskommentare, Testnamen, Fixtures und historische TUI-
+  Arbeitsanweisungen sind bereinigt; historische Changelog-Einträge bleiben.
+- Paketinhalt, direkte Abhängigkeiten, Exporte und stale Strings wurden geprüft;
+  Typechecks, Volltests, Coverage, beide Package-Smokes und Pack-Check wurden
+  erfolgreich ausgeführt.
 
 ## Akzeptanzkriterien
 
@@ -224,13 +246,16 @@ Der Umbau ist abgeschlossen, wenn:
 3. Kein Subagent ein `Agent`-Tool erhält oder einen weiteren Subagent starten kann.
 4. Agent-Records keine fachlich wirksamen Parent-/Child-Zustände mehr benötigen.
 5. `Agent`, `AgentContinue`, `StopAgent` und `AgentStatus` weiterhin registriert sind.
-6. Foreground- und Background-Ausführung inklusive genau-einmaliger Ergebniszustellung funktionieren.
+6. Foreground- und Background-Ausführung inklusive genau-einmaliger
+   Ergebniszustellung pro Background-Ausführung funktionieren.
 7. Ein regulär beendeter Root-Agent erfolgreich fortgesetzt werden kann.
 8. Queue, Concurrency, Abbruch und Shutdown für Root-Agents getestet sind.
 9. Worktrees und Session-Isolation weiterhin funktionieren.
 10. Alte Konfigurationsdateien mit entfernten UI- oder Delegationsfeldern nicht zu einem Startfehler führen.
-11. `bun run typecheck` und `bun run test` erfolgreich durchlaufen.
-12. README, `CONTEXT.md` und Konfigurationsdokumentation dem tatsächlichen Verhalten entsprechen.
+11. `bun run typecheck`, `bun run typecheck:test`, `bun run test`, Coverage,
+    beide Package-Smokes und `bun run pack:check` erfolgreich durchlaufen.
+12. README, `CONTEXT.md`, ADR und Konfigurationsdokumentation dem tatsächlichen
+    Verhalten entsprechen.
 
 ## Risiken
 
@@ -254,14 +279,20 @@ Beendete Sessions müssen weiterhin zeitweise im Speicher bleiben. Ohne klare Gr
 
 Ein sofortiges hartes Ablehnen alter Felder würde vorhandene Installationen unnötig beschädigen. Die erste Version sollte entfernte Felder tolerant ignorieren und die Änderung deutlich dokumentieren.
 
-## Bewusst vertagte Entscheidungen
+## Finale Entscheidungen und verbleibende Fragen
 
-Nach Abschluss des Umbaus kann separat bewertet werden:
+Für Phase 5 sind zwei zuvor offene Punkte entschieden:
 
-- ob Eco Mode ohne TUI genügend Nutzen bietet;
+- **Eco bleibt erhalten.** Eco bleibt dateibasiert und wird über die persistierte
+  bzw. sessionbezogene Konfiguration ohne TUI genutzt.
+- **`AgentContinue` bleibt erhalten.** Es bleibt auf erfolgreich beendete Root-
+  Sessions beschränkt und verwendet den normalen Root-Slot sowie eigene
+  Ausführungs- und Nudge-Historie.
+
+Separat vertagt bleiben nur nicht-strukturelle Detailfragen:
+
 - ob persistente Konfiguration weiter vereinfacht werden kann;
 - wie lange fortsetzbare Sessions retained werden;
-- ob `AgentContinue` langfristig den verbleibenden Wartungsaufwand rechtfertigt;
 - ob `AgentStatus` zusätzlich kompakte Usage- oder Log-Informationen liefern soll.
 
-Diese Entscheidungen sind nicht Voraussetzung für das flache Zielmodell.
+Diese Fragen sind nicht Voraussetzung für das abgeschlossene flache Zielmodell.

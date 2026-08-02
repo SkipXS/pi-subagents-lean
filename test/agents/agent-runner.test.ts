@@ -4,7 +4,6 @@
  * Tests focus on:
  *   - isolated parameter handling (overrides extensions/skills)
  *   - tool filtering (excluded tools, whitelist, blacklist)
- *   - No inheritContext or memory code paths
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -37,7 +36,6 @@ function MockDefaultResourceLoader(this: any, opts: any) {
 const mockModules = vi.hoisted(() => ({
   mockGetConfig: vi.fn(),
   mockGetAgentConfig: vi.fn(),
-  mockGetToolNamesForType: vi.fn(),
   mockBuildAgentPrompt: vi.fn(),
   mockExtractText: vi.fn(),
   mockPreloadSkills: vi.fn().mockReturnValue([]),
@@ -67,7 +65,6 @@ vi.mock("../../src/agents/agent-types.js", async (importOriginal) => {
     ...actual,
     getConfig: mockModules.mockGetConfig,
     getAgentConfig: mockModules.mockGetAgentConfig,
-    getToolNamesForType: mockModules.mockGetToolNamesForType,
   };
 });
 
@@ -161,7 +158,6 @@ function resetMocks() {
 
   mockModules.mockGetConfig.mockReturnValue({ ...defaultConfig });
   mockModules.mockGetAgentConfig.mockReturnValue({ ...defaultAgentConfig });
-  mockModules.mockGetToolNamesForType.mockReturnValue(["read", "bash", "edit"]);
   mockModules.mockBuildAgentPrompt.mockReturnValue("system prompt");
   mockModules.mockExtractText.mockReturnValue("");
   mockModules.mockGetAgentDir.mockReturnValue("/home/test/.pi/agent");
@@ -2082,7 +2078,6 @@ describe("runAgent — agent config snapshot", () => {
     };
     mockModules.mockGetConfig.mockImplementation(() => { throw new Error("registry config must not be read"); });
     mockModules.mockGetAgentConfig.mockImplementation(() => { throw new Error("registry agent must not be read"); });
-    mockModules.mockGetToolNamesForType.mockImplementation((_type, config) => config.registeredTools);
 
     await runAgent(fakeCtx(), "reviewer", "review A", { pi: fakePi, agentConfig: snapshot });
 

@@ -153,7 +153,6 @@ vi.mock("../../src/agents/usage.js", () => ({
   getSessionUsageSnapshot: vi.fn(() => undefined),
   addUsage: vi.fn(),
   getLifetimeTotal: vi.fn(() => 0),
-  getSessionContextPercent: vi.fn(() => null),
 }));
 
 // Import after mocks are in place
@@ -617,7 +616,7 @@ describe("executeAgentTool — worktree_path validation", () => {
     });
   });
 
-  it("passes Agent tool model and thinking overrides to the shared resolver", async () => {
+  it("applies internally supplied model and thinking settings", async () => {
     (utils.parseModelKey as any).mockReturnValueOnce({ provider: "openai", modelId: "gpt-4o" });
     ctx.modelRegistry.find.mockReturnValueOnce({ provider: "openai", id: "gpt-4o", reasoning: true });
     await executeAgentTool(

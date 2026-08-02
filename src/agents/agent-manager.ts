@@ -71,16 +71,6 @@ interface ExecutionBaseline {
   compactionCount: number;
 }
 
-interface SessionRevision {
-  session: AgentSession;
-  sessionManager: unknown;
-  leafId: string | null | undefined;
-  model: unknown;
-  modelKey: string;
-  thinkingLevel: unknown;
-  autoCompactionEnabled: boolean | undefined;
-}
-
 interface SpawnArgs {
   pi: ExtensionAPI;
   ctx: ExtensionContext;
@@ -177,7 +167,6 @@ export class AgentManager {
   private queue: QueueEntry[] = [];
   private parentAbortListeners = new Map<string, { signal: AbortSignal; listener: () => void }>();
   private deferredContextSamples = new WeakMap<AgentRecord, AgentSession>();
-  private sessionRevisions = new Map<string, SessionRevision>();
   private executionBases = new Map<string, ExecutionBaseline>();
 
   constructor(
@@ -418,8 +407,10 @@ export class AgentManager {
     // session and computes deltas from this exact baseline.
     const executionId = randomUUID().slice(0, AGENT_ID_PREFIX_LENGTH);
     const baseline = this.snapshotExecutionBaseline(record);
-    let resolveRequest: (result: string) => void = () => {};
-    let rejectRequest: (error: Error) => void = () => {};
+    // Promise constructors invoke the executor synchronously; no placeholder
+    // resolver functions are needed before these assignments.
+    let resolveRequest: ((result: string) => void) | undefined;
+    let rejectRequest: ((error: Error) => void) | undefined;
     const promise = new Promise<string>((resolve, reject) => {
       resolveRequest = resolve;
       rejectRequest = reject;
@@ -437,8 +428,8 @@ export class AgentManager {
       signal: options.signal,
       onToolActivity: options.onToolActivity,
       onTextDelta: options.onTextDelta,
-      resolve: resolveRequest,
-      reject: rejectRequest,
+      resolve: resolveRequest!,
+      reject: rejectRequest!,
       startedAt,
     };
     if (request.isBackground) promise.catch(() => {});
@@ -731,89 +722,6 @@ export class AgentManager {
     return this.totalAgentCount;
   }
 
-  refreshActiveSessions(): boolean {
-    let refreshed = false;
-    for (const [id, record] of this.agents) {
-      if (record.lifecycle.status !== "running" || record.lifecycle.settled) continue;
-      const session = record.execution.session;
-      if (!session) {
-        this.sessionRevisions.delete(id);
-        continue;
-      }
-      const revision = this.readSessionRevision(session);
-      const previous = this.sessionRevisions.get(id);
-      if (!previous) {
-        this.sessionRevisions.set(id, revision);
-        continue;
-      }
-      if (!this.sessionRevisionChanged(previous, revision)) continue;
-      this.sessionRevisions.set(id, revision);
-      if (this.deferredContextSamples.get(record) === session) continue;
-      this.observeContext(record);
-      refreshed = true;
-    }
-    return refreshed;
-  }
-
-  private readSessionRevision(session: AgentSession): SessionRevision {
-    let sessionManager: unknown;
-    let leafId: string | null | undefined;
-    try {
-      const candidate = (session as unknown as { sessionManager?: { getLeafId?: () => string | null } }).sessionManager;
-      sessionManager = candidate;
-      if (typeof candidate?.getLeafId === "function") leafId = candidate.getLeafId();
-    } catch { /* optional upstream fields */ }
-
-    let model: unknown;
-    try {
-      const candidate = session as unknown as { model?: unknown; state?: { model?: unknown } };
-      model = candidate.model ?? candidate.state?.model;
-    } catch { model = undefined; }
-
-    let provider: unknown;
-    let modelId: unknown;
-    let contextWindow: unknown;
-    try {
-      const candidate = model as { provider?: unknown; id?: unknown; contextWindow?: unknown } | undefined;
-      provider = candidate?.provider;
-      modelId = candidate?.id;
-      contextWindow = candidate?.contextWindow;
-    } catch { /* optional model fields */ }
-
-    let thinkingLevel: unknown;
-    let autoCompactionEnabled: boolean | undefined;
-    try {
-      thinkingLevel = (session as unknown as { thinkingLevel?: unknown }).thinkingLevel;
-      const enabled = (session as unknown as { autoCompactionEnabled?: unknown }).autoCompactionEnabled;
-      if (typeof enabled === "boolean") autoCompactionEnabled = enabled;
-    } catch { /* optional session fields */ }
-
-    const revisionPart = (value: unknown): string => {
-      if (value === undefined) return "<undefined>";
-      if (value === null) return "<null>";
-      return String(value);
-    };
-    return {
-      session,
-      sessionManager,
-      leafId,
-      model,
-      modelKey: [provider, modelId, contextWindow].map(revisionPart).join("\u0000"),
-      thinkingLevel,
-      autoCompactionEnabled,
-    };
-  }
-
-  private sessionRevisionChanged(previous: SessionRevision, next: SessionRevision): boolean {
-    return previous.session !== next.session
-      || previous.sessionManager !== next.sessionManager
-      || previous.leafId !== next.leafId
-      || previous.model !== next.model
-      || previous.modelKey !== next.modelKey
-      || previous.thinkingLevel !== next.thinkingLevel
-      || previous.autoCompactionEnabled !== next.autoCompactionEnabled;
-  }
-
   private recordContextSample(record: AgentRecord, usage: SessionStatsContextUsage | undefined, skipUnchanged = false): void {
     if (!usage) return;
     const stats = record.stats.contextStats ??= createContextStats();
@@ -844,16 +752,10 @@ export class AgentManager {
     const session = record.execution.session;
     if (!session || this.agents.get(record.id) !== record) return;
     if (this.deferredContextSamples.get(record) === session) this.deferredContextSamples.delete(record);
-    try {
-      const contextRead = readSessionContextUsage(session);
-      if (!contextRead.failed) this.recordContextSample(record, contextRead.usage, skipUnchanged);
-      const snapshot = getSessionUsageSnapshot(session, contextRead.usage);
-      this.persistContextSnapshot(record, snapshot, !contextRead.failed && contextRead.usage !== undefined);
-    } finally {
-      if (record.execution.session === session && this.agents.get(record.id) === record) {
-        this.sessionRevisions.set(record.id, this.readSessionRevision(session));
-      }
-    }
+    const contextRead = readSessionContextUsage(session);
+    if (!contextRead.failed) this.recordContextSample(record, contextRead.usage, skipUnchanged);
+    const snapshot = getSessionUsageSnapshot(session, contextRead.usage);
+    this.persistContextSnapshot(record, snapshot, !contextRead.failed && contextRead.usage !== undefined);
   }
 
   private deferContextSample(record: AgentRecord, executionId?: string): void {
@@ -1047,7 +949,6 @@ export class AgentManager {
   private removeRecord(id: string, record: AgentRecord): void {
     try { this.onRecordEvicted?.(record); } catch { /* coordinator cleanup is best effort */ }
     this.deferredContextSamples.delete(record);
-    this.sessionRevisions.delete(id);
     for (const execution of record.stats.executions ?? []) this.executionBases.delete(execution.id);
     this.releaseExecution(record);
     this.agents.delete(id);
@@ -1074,6 +975,5 @@ export class AgentManager {
     for (const record of this.agents.values()) record.execution.abortController?.abort();
     for (const [id, record] of this.agents) this.removeRecord(id, record);
     this.agents.clear();
-    this.sessionRevisions.clear();
   }
 }

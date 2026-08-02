@@ -55,7 +55,7 @@ export interface EnvInfo {
 
 /**
  * Streaming/callback surface shared by RunOptions and SpawnOptions.
- * Bridges agent-runner events to record tracking and live-view updates.
+ * Bridges agent-runner events to record tracking and result observers.
  */
 export interface RunCallbacks {
   onToolActivity?: (activity: ToolActivity) => void;
@@ -69,7 +69,7 @@ export interface RunCallbacks {
 /**
  * Coordinator-side spawn config shared by SpawnOptions and SpawnIntent.
  * The resolved run params that both the manager and coordinator agree on;
- * extends RunTunables with display/identity fields.
+ * extends RunTunables with metadata and identity fields.
  */
 export interface SpawnConfig extends RunTunables {
   /** Detached definition resolved at selection/tool invocation time. */
@@ -85,7 +85,7 @@ export interface SpawnConfig extends RunTunables {
   invocation?: AgentInvocation;
 }
 
-/** How many characters of agent ID to show in display. */
+/** How many characters of agent ID to show in status output. */
 export const SHORT_ID_LENGTH = 8;
 
 /** Reason for a context compaction event. */
@@ -118,10 +118,10 @@ export interface CompactionReasonMetadata {
 /** Possible agent lifecycle statuses. */
 export type AgentStatus = "queued" | "running" | "completed" | "turn_limited" | "aborted" | "stopped" | "error";
 
-/** Who initiated an agent stop: UI user, agent tool, or its parent turn. */
+/** Who initiated an agent stop: a control tool, the agent, or its parent turn. */
 export type StopInitiator = "user" | "agent" | "parent";
 
-/** Background-result delivery state. `accepted` only means Pi did not synchronously reject sendMessage. */
+/** Background-result delivery state; `accepted` only means no synchronous throw, while `failed` records a diagnostic error until eviction. */
 export type BackgroundDeliveryState = "pending" | "accepted" | "failed" | "abandoned";
 
 /** Whether an execution runs in the foreground (awaited) or background (notification). */
@@ -160,9 +160,10 @@ export interface AgentExecutionSummary {
   error?: string;
 }
 
-/** Metadata retained with a background agent result for delivery retry and UI status. */
+/** Delivery diagnostics retained with a background result until its record is evicted. */
 export interface BackgroundDelivery {
   state: BackgroundDeliveryState;
+  /** Number of automatic sendMessage attempts; failed delivery is not retried. */
   attempts: number;
   lastAttemptAt?: number;
   lastError?: string;
@@ -186,14 +187,14 @@ export interface AgentLifecycle {
   resultConsumed?: boolean;
   /**
    * True only after all runner/queue work has settled. A stopped running agent is
-   * terminal for display purposes before its runner has actually released its
+   * terminal for status reporting before its runner has actually released its
    * session, so retention must not release execution handles until this is true.
    */
   settled?: boolean;
 }
 
 /**
- * Display-oriented fields: type name, description, output file, invocation params.
+ * Record metadata: type name, description, output file, and invocation params.
  * Agent identity and output metadata retained for tool results and diagnostics.
  */
 export interface AgentDisplayInfo {
@@ -201,7 +202,7 @@ export interface AgentDisplayInfo {
   description: string;
   /** Path to the streaming output transcript file. */
   outputFile?: string;
-  /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
+  /** Resolved spawn params, captured for tool details. Fixed at spawn time. */
   invocation?: AgentInvocation;
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;

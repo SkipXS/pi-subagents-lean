@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   registerAgents,
-  getAvailableTypes,
+  getAvailableAgents,
   resolveType,
   getAgentConfig,
   setAgentScanDirs,
@@ -23,6 +23,8 @@ import {
 import { DEFAULT_AGENTS } from "../../src/agents/default-agents.js";
 import type { AgentConfig } from "../../src/agents/types.js";
 import { makeAgentMd, tempDirWithFiles } from "../fixtures.ts";
+
+const availableNames = () => getAvailableAgents().map(({ name }) => name);
 
 /* ------------------------------------------------------------------ */
 /*  registerAgents with disableDefaultAgents                          */
@@ -37,7 +39,7 @@ describe("registerAgents — disableDefaultAgents", () => {
   it("includes exactly the five bundled Markdown defaults by default", () => {
     registerAgents(new Map());
     const defaultNames = ["architect", "scout", "implementer", "reviewer", "verifier"];
-    expect(getAvailableTypes()).toEqual(defaultNames);
+    expect(availableNames()).toEqual(defaultNames);
     expect([...DEFAULT_AGENTS.keys()]).toEqual(defaultNames);
     for (const config of DEFAULT_AGENTS.values()) {
       expect(config.source).toBe("default");
@@ -79,7 +81,7 @@ describe("registerAgents — disableDefaultAgents", () => {
 
   it("skips the five bundled defaults when disableDefaultAgents is true", () => {
     registerAgents(new Map(), { disableDefaultAgents: true });
-    expect(getAvailableTypes()).toEqual([]);
+    expect(availableNames()).toEqual([]);
   });
 
   it("still includes user-defined agents when disableDefaultAgents is true", () => {
@@ -90,7 +92,7 @@ describe("registerAgents — disableDefaultAgents", () => {
       systemPrompt: "test",
     });
     registerAgents(userAgents, { disableDefaultAgents: true });
-    const types = getAvailableTypes();
+    const types = availableNames();
     expect(types).toContain("my-agent");
     expect(types).not.toContain("explorer");
   });
@@ -110,7 +112,7 @@ describe("registerAgents — disableDefaultAgents", () => {
 
   it("returns empty types when defaults disabled and no user agents", () => {
     registerAgents(new Map(), { disableDefaultAgents: true });
-    expect(getAvailableTypes()).toEqual([]);
+    expect(availableNames()).toEqual([]);
   });
 });
 
@@ -173,7 +175,7 @@ describe("discoverNewAgents — disableDefaultAgents", () => {
 
       await discoverNewAgents({ disableDefaultAgents: true });
 
-      const types = getAvailableTypes();
+      const types = availableNames();
       expect(types).toContain("custom");
       expect(types).not.toContain("explorer");
       expect(types).not.toContain("implementer");

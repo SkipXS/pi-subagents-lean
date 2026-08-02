@@ -39,7 +39,6 @@ export interface SubagentsConfig {
     systemPromptMode?: SystemPromptMode;
     includeContextFiles?: boolean;
     defaultThinking?: ThinkingLevel;
-    defaultMaxTurns?: number;
     loadSkillsImplicitly?: boolean;
     loadExtensionsImplicitly?: boolean;
     disableDefaultAgents?: boolean;
@@ -114,7 +113,7 @@ function firstDefined<T>(
   return undefined;
 }
 
-/** Resolve a model and retain the source for transparent UI display. */
+/** Resolve a model and retain the source for diagnostic tool details. */
 export function resolveModelSetting(options: ResolveModelOptions): ResolvedSetting<string> {
   const { subagentType, explicitModel, agentConfig, config, parentModelId, sessionOverrides } = options;
   const candidates: Array<{ value: unknown; source: SettingSource }> = [

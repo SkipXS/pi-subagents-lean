@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getAvailableAgents, getAvailableTypes, registerAgents } from "../../src/agents/agent-types.ts";
+import { getAvailableAgents, registerAgents } from "../../src/agents/agent-types.ts";
 import {
   MAX_ORCHESTRATION_AGENTS,
   MAX_ORCHESTRATION_CATALOG_LENGTH,
@@ -118,9 +118,9 @@ ${ORCHESTRATION_PROMPT_END_MARKER}`);
     expect([...prompt].some(point => point.length === 1 && point.charCodeAt(0) >= 0xD800 && point.charCodeAt(0) <= 0xDFFF)).toBe(false);
   });
 
-  it("preserves built-in and registry/UI insertion order while sorting only the catalog", () => {
+  it("preserves built-in and registry insertion order while sorting only the catalog", () => {
     registerAgents(new Map([["reviewer", agent("reviewer", "Reviews")]]));
-    expect(getAvailableTypes()).toEqual(["architect", "scout", "implementer", "reviewer", "verifier"]);
+    expect(getAvailableAgents().map(({ name }) => name)).toEqual(["architect", "scout", "implementer", "reviewer", "verifier"]);
 
     // The catalog itself is sorted below for prompt cache stability.
 
@@ -132,11 +132,11 @@ ${ORCHESTRATION_PROMPT_END_MARKER}`);
 
     registerAgents(firstRegistry, { disableDefaultAgents: true });
     const firstPrompt = buildOrchestrationPrompt(getAvailableAgents());
-    expect(getAvailableTypes()).toEqual(["zebra", "alpha"]);
+    expect(getAvailableAgents().map(({ name }) => name)).toEqual(["zebra", "alpha"]);
 
     registerAgents(secondRegistry, { disableDefaultAgents: true });
     expect(buildOrchestrationPrompt(getAvailableAgents())).toBe(firstPrompt);
-    expect(getAvailableTypes()).toEqual(["alpha", "zebra"]);
+    expect(getAvailableAgents().map(({ name }) => name)).toEqual(["alpha", "zebra"]);
   });
 
   it("replaces only complete extension blocks and ignores marker collisions", () => {

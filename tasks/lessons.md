@@ -13,7 +13,7 @@
 - Test public interfaces and behavior, not implementation details or hardcoded data.
 - User manual testing result ("all works") → record and proceed, don't insist on automated loop.
 - When AC review returns NEEDS_REVISION on recently fixed code, re-review fresh.
-- Tests must interact through component tree, not captured mock references.
+- Tests must exercise public behavior, not captured mock references.
 - Export testable functions early to avoid mock ceremony.
 - Existing tests that mock away the real path mask the bug. Assert constructor args, not just downstream behavior.
 
@@ -48,7 +48,7 @@
 - Subagents are built with `createAgentSession`, which runs its own `DefaultResourceLoader.reload()` and `session.bindExtensions()`. That re-executes EVERY extension factory and re-fires `session_start`/`session_shutdown` in the subagent's context, NOT just the parent's.
 - An extension that writes parent-owned state in its factory or `session_start` handler (module-level shell singletons like `pi`/`ctx`) will have that state clobbered by every subagent spawn. Last subagent to load wins, so later reads route to a dead/wrong session. Failures are silent because misrouted `sendMessage` swallows internally.
 - Fix: bracket the subagent entry point (`runAgent`) with a nesting-depth flag. Make the factory + `session_start`/`session_shutdown` handlers a no-op while a subagent is in flight. Parent reload still refreshes the shell (flag is false outside `runAgent`). `dispose()` gates deferred work after `session_shutdown`.
-- `AgentSession.dispose()` does NOT emit `session_shutdown` (only the interactive runtime's `teardownCurrent` does). So subagent cleanup won't dispose parent state, but subagent `bindExtensions` WILL fire the parent's `session_start` handler.
+- `AgentSession.dispose()` does NOT emit `session_shutdown` (only host teardown does). So subagent cleanup won't dispose parent state, but subagent `bindExtensions` WILL fire the parent's `session_start` handler.
 
 ### Extension Tools
 - Registry/allowlist gates reject before you can patch the result. When tools/resources are silently missing, find the gate first (search where the set is built and filtered), and seed it at construction — pushing names in after construction cannot resurrect filtered-out entries. `setActiveToolsByName` silently ignoring unknown names is the tell that the registry, not activation, is the bug.
@@ -56,19 +56,11 @@
 - Whitelist must gate builtins too. Seeding gate with `registeredTools` as unconditional base leaks unlisted builtins and raw wildcard literals as bogus tool names. Gate must derive from whitelist expansion alone in whitelist mode.
 - Confirmed against pi source: `agent-session.ts:_refreshToolRegistry` (~2454-2545) and `sdk.ts` (~245-251). `options.tools` becomes both `allowedToolNames` and `initialActiveToolNames`.
 
-### SettingsList
-- Supports: toggles, submenus, section separators (`__sep__` items), static display.
-- Does NOT support: multi-step dialogs, action buttons, dynamic item sets.
-- Never call `ctx.ui.input/select/custom` from within active SettingsList. Design submenu-Component layer before touching complex menus.
-- Dispatcher menus → `ctx.ui.select` with `while(true)` loop. SettingsList only for cursor-persistence menus. SettingsList + async select submenus don't mix.
-
-### Menus & Components
-- Proxy pattern (`createDelegatingComponent`) chains submenus cleanly. Shared submenu components earned keep with 2-3 uses each.
-- When submenu callbacks chain Components, verify returned Component is renderable, not immediately closed.
-- Breaking `extensionPackageName` into memoizing wrapper + pure resolver clarifies concerns. `.has()` presence check solves negative caching bugs cleanly. Use `.has()` for nullable caches, not value-guard patterns.
+### Caching
+- Breaking `extensionPackageName` into a memoizing wrapper plus pure resolver clarifies concerns. `.has()` presence checks solve negative caching bugs cleanly; use them for nullable caches instead of value-guard patterns.
 
 ### Issue Design
-- Prototype code blocks in issue.md (state machine, key handler) give builder a clear contract.
+- Prototype code blocks in issue.md (state machine, boundary cases) give the implementer a clear contract.
 - Call out overflow behavior as a hard gate in the AC.
 - Prefer public API for cross-package access — private fields break silently on upstream changes.
 - Specify test location and approach in the issue or builder prompt. "Test frontmatter parsing of max" not "cover max in tests".

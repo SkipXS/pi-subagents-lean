@@ -3,11 +3,12 @@
  *
  * Registers the four tools and root lifecycle listeners at init time.
  *
- * Stealth tool registration:
+ * Fixed tool registration:
  *   - All tools register at extension init (not runtime)
- *   - No description, no promptSnippet, no promptGuidelines
+ *   - Static descriptions only; no promptSnippet or promptGuidelines
  *   - Parameters without .description()
- *   - Model/thinking may be explicit per spawn; otherwise resolved by the tool_call listener/executor
+ *   - Model/thinking are resolved internally from settings and agent definitions;
+ *     they are not public Agent-tool parameters
  *
  * Config:
  *   - Loaded from ~/.pi/agent/subagents-lean.json at session_start

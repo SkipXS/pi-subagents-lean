@@ -2,7 +2,7 @@
  * index.test.ts — Tests for the extension entry point.
  *
  * Tests focus on:
- *   - Tool schema shapes (stealth schemas with description: ".", no promptSnippet/promptGuidelines)
+ *   - Tool schema shapes (fixed schemas with static descriptions and no prompt metadata)
  *   - Listener guards (only mutates event.input.model for Agent tool)
  *   - Schema field exclusion (no model, inherit_context, schedule, isolation params)
  *
@@ -74,8 +74,6 @@ vi.mock("../src/agents/agent-types.js", () => ({
   getAgentConfig: vi.fn(() => ({})),
   registerAgents: vi.fn(),
   getAvailableAgents: vi.fn(() => []),
-  getAvailableTypes: vi.fn(() => ["general-purpose", "Explore"]),
-  getAllTypes: vi.fn(() => ["general-purpose", "Explore"]),
 }));
 
 vi.mock("../src/agents/agent-discovery.js", () => ({
@@ -103,20 +101,11 @@ function findTool(api: MockExtensionAPI, name: string) {
   return api.tools.find((t) => t.name === name);
 }
 
-/**
- * Verify stealth schema properties: description ".", no promptSnippet, no promptGuidelines.
- */
-function expectStealthSchema(tool: any) {
-  expect(tool.description).toBe(".");
-  expect(tool.promptSnippet).toBeUndefined();
-  expect(tool.promptGuidelines).toBeUndefined();
-}
-
 /* ------------------------------------------------------------------ */
-/*  Agent tool schema — stealth                                       */
+/*  Agent tool schema — fixed public contract                       */
 /* ------------------------------------------------------------------ */
 
-describe("Agent tool schema — stealth", () => {
+describe("Agent tool schema — fixed public contract", () => {
   let api: MockExtensionAPI;
 
   beforeAll(async () => {
@@ -266,7 +255,7 @@ describe("tool_call listener — guards", () => {
       input: {
         prompt: "do something",
         description: "test",
-        agent: "Explore",
+        agent: "scout",
       } as Record<string, unknown>,
     };
 

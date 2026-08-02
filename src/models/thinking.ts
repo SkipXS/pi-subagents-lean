@@ -1,5 +1,4 @@
-/** Model-aware thinking-level support shared by spawn and settings UI. */
-
+/** Model-aware thinking-level support shared by spawn and configuration. */
 import {
   clampThinkingLevel,
   getSupportedThinkingLevels,

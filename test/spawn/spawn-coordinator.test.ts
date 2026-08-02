@@ -1,7 +1,7 @@
 /**
  * spawn-coordinator.test.ts — Tests for SpawnCoordinator.
 
- * Verifies: spawn (foreground/background), nudge batching, completion delivery,
+ * Verifies: spawn (foreground/background), delayed individual nudges, completion delivery,
  * onAgentComplete, dispose, stale pi protection.
  */
 
@@ -308,7 +308,7 @@ describe("SpawnCoordinator", () => {
     expect(options.invocation.mode).toBe("eco");
   });
 
-  it("registers background agent in backgroundAgentIds", async () => {
+  it("tracks a background execution in its delivery entries", async () => {
     const coordinator = new SpawnCoordinator(manager as any);
     const result = await coordinator.spawn(mockPi, ctx, {
       type: "builder",
@@ -321,7 +321,7 @@ describe("SpawnCoordinator", () => {
     expect(coordinator.isBackground(result.agentId)).toBe(true);
   });
 
-  it("does not register foreground agent in backgroundAgentIds", async () => {
+  it("does not track a foreground execution for background delivery", async () => {
     const coordinator = new SpawnCoordinator(manager as any);
     const result = await coordinator.spawn(mockPi, ctx, {
       type: "builder",
@@ -335,7 +335,7 @@ describe("SpawnCoordinator", () => {
   });
 
   describe("nudge scheduling", () => {
-    it("emits individual nudge after delay window", async () => {
+    it("emits one individual nudge after a short delay", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const result = await coordinator.spawn(mockPi, ctx, {
@@ -352,14 +352,14 @@ describe("SpawnCoordinator", () => {
       // Not yet emitted — timer pending
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
 
-      // Advance past the 200ms batch window
+      // Advance past the 200ms delivery delay
       vi.advanceTimersByTime(200);
 
       // Now the nudge should have been emitted
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
     });
 
-    it("batches multiple nudges within the delay window", async () => {
+    it("delivers multiple nudges as individual messages after the delay", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const r1 = await coordinator.spawn(mockPi, ctx, {
@@ -374,7 +374,7 @@ describe("SpawnCoordinator", () => {
       coordinator.scheduleNudge(r1.agentId);
       coordinator.scheduleNudge(r2.agentId);
 
-      // Advance past the batch window
+      // Advance past the individual delivery delay
       vi.advanceTimersByTime(200);
 
       // Both should be emitted as individual messages
@@ -409,7 +409,7 @@ describe("SpawnCoordinator", () => {
       expect((coordinator as any).backgroundDeliveries.size).toBe(0);
     });
 
-    it("starts new batch window for nudges arriving after the previous window", async () => {
+    it("delivers a later nudge after its own short delay", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const r1 = await coordinator.spawn(mockPi, ctx, {
@@ -426,7 +426,7 @@ describe("SpawnCoordinator", () => {
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
 
-      // New nudge after the window
+      // A later execution gets its own delivery delay
       coordinator.scheduleNudge(r2.agentId);
 
       // Not yet emitted
@@ -674,7 +674,7 @@ describe("SpawnCoordinator", () => {
       expect(deliveryEntries(coordinator)).toHaveLength(0);
     });
 
-    it("sets deliveredText only after a successful background handoff, never on completion", async () => {
+    it("does not mark a failed background handoff as delivered", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const record = continuedRecord({
         result: "bg result",
@@ -707,88 +707,6 @@ describe("SpawnCoordinator", () => {
       expect(record.lifecycle.resultConsumed).toBe(false); // never marked consumed without a handoff
       expect(record.stats.executions![0]!.deliveredText).toBeUndefined();
 
-      // Manual retry succeeds: the successful handoff is what marks delivered.
-      mockGetPiInstance.mockReturnValue(mockPi);
-      mockPi.sendMessage.mockReset();
-      expect(coordinator.retryDelivery("agent-x")).toBe(true);
-      expect(record.delivery).toMatchObject({ state: "accepted", attempts: 2 });
-      expect(record.lifecycle.resultConsumed).toBe(true);
-      expect(record.stats.executions![0]!.deliveredText).toBe("bg result");
-    });
-
-    it("keeps an older failed delivery retryable after a later continuation is accepted", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      mockPi.sendMessage.mockReset();
-      const firstExecution: any = {
-        id: "exec-a", prompt: "first", mode: "background", status: "running", startedAt: 1_000,
-      };
-      const secondExecution: any = {
-        id: "exec-b", prompt: "second", mode: "background", status: "running", startedAt: 2_000,
-      };
-      const record = continuedRecord({
-        result: "A immutable result",
-        stats: {
-          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-          toolUses: 0,
-          turnCount: 1,
-          compactionCount: 0,
-          cacheRead: 0,
-          executions: [firstExecution],
-        },
-      });
-      manager.getRecord.mockReturnValue(record);
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-a",
-        record,
-        promise: new Promise<string>(() => {}),
-      });
-      await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "first", runInBackground: true,
-      });
-
-      // A's automatic handoff fails, but its frozen payload remains retained.
-      record.lifecycle.status = "completed";
-      mockGetPiInstance.mockReturnValue(null);
-      coordinator.onAgentComplete(record, { ...firstExecution, status: "completed", completedAt: 1_100 } as any);
-      vi.advanceTimersByTime(200);
-      expect(record.delivery).toMatchObject({ state: "failed", attempts: 1 });
-
-      // B uses the same record and is accepted successfully. It must not
-      // replace A's retryable delivery entry or its immutable payload.
-      record.result = "B result";
-      record.stats.executions!.push(secondExecution);
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-b",
-        record,
-        promise: new Promise<string>(() => {}),
-      });
-      await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "second", runInBackground: true,
-      });
-      record.lifecycle.status = "completed";
-      mockGetPiInstance.mockReturnValue(mockPi);
-      coordinator.onAgentComplete(record, { ...secondExecution, status: "completed", completedAt: 2_100 } as any);
-      vi.advanceTimersByTime(200);
-
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-      expect(mockPi.sendMessage.mock.calls[0]![0].content).toContain("B result");
-      expect(mockPi.sendMessage.mock.calls[0]![0].content).not.toContain("A immutable result");
-      expect(coordinator.hasRetryableDelivery("agent-x")).toBe(true);
-      expect(deliveryEntries(coordinator).map((entry) => entry.executionId)).toEqual(["exec-a"]);
-
-      // The record-level menu retry selects A's oldest failed execution and
-      // sends it once; B is neither duplicated nor substituted.
-      expect(coordinator.retryDelivery("agent-x")).toBe(true);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
-      expect(mockPi.sendMessage.mock.calls[1]![0].content).toContain("A immutable result");
-      expect(mockPi.sendMessage.mock.calls[1]![0].content).not.toContain("B result");
-      // B remains the visible latest delivery projection even though A was
-      // the older entry selected for retry.
-      expect(record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
-      expect(coordinator.retryDelivery("agent-x")).toBe(false);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
-      expect(firstExecution.deliveredText).toBe("A immutable result");
-      expect(secondExecution.deliveredText).toBe("B result");
     });
 
     it("reports per-execution deltas, not lifetime totals, in background continuation details", async () => {
@@ -947,17 +865,6 @@ describe("SpawnCoordinator", () => {
   });
 
   describe("onAgentComplete", () => {
-    it("deletes live view on completion", () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      // Manually add a live view
-
-      coordinator.onAgentComplete(
-        { id: "agent-1" } as AgentRecord,
-        { id: "execution-1", mode: "foreground", status: "completed", startedAt: Date.now() } as any,
-      );
-
-    });
-
     it("schedules nudge for background agents", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
@@ -1015,7 +922,7 @@ describe("SpawnCoordinator", () => {
 
     it("does not schedule nudge for foreground agents", () => {
       const coordinator = new SpawnCoordinator(manager as any);
-      // Not in backgroundAgentIds
+      // Foreground executions do not claim background delivery entries.
 
       coordinator.onAgentComplete(
         { id: "agent-1" } as AgentRecord,
@@ -1026,7 +933,7 @@ describe("SpawnCoordinator", () => {
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
     });
 
-    it("catches sendMessage errors silently (stale pi)", async () => {
+    it("records sendMessage errors as delivery diagnostics (stale pi)", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const result = await coordinator.spawn(mockPi, ctx, {
@@ -1040,8 +947,9 @@ describe("SpawnCoordinator", () => {
       coordinator.scheduleNudge(result.agentId);
       vi.advanceTimersByTime(200);
 
-      // sendMessage was attempted
+      // sendMessage was attempted once; the failed state is diagnostic until eviction.
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
+      expect(result.record.delivery).toMatchObject({ state: "failed", attempts: 1, lastError: "stale context" });
     });
 
     it("skips nudge emission when disposed", async () => {
@@ -1081,12 +989,6 @@ describe("SpawnCoordinator", () => {
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
     });
 
-    it("clears live views", () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      coordinator.dispose();
-
-    });
   });
 
   describe("stale pi protection", () => {
@@ -1127,11 +1029,8 @@ describe("SpawnCoordinator", () => {
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
     });
 
-    it("skips nudge silently when shell has no pi", () => {
+    it("ignores a nudge for an unknown record", () => {
       const coordinator = new SpawnCoordinator(manager as any);
-
-      // Simulate shell having no pi
-      mockGetPiInstance.mockReturnValue(null);
 
       coordinator.scheduleNudge("agent-999");
       vi.advanceTimersByTime(200);
@@ -1233,8 +1132,8 @@ describe("SpawnCoordinator", () => {
       });
       const record = manager.getRecord(result.agentId);
 
-      // sendMessage throws — LLM never received the result, so it remains
-      // available for the explicit manual retry path.
+      // sendMessage throws — LLM never received the result, so the failure
+      // remains diagnostic until the record is evicted.
       mockPi.sendMessage.mockImplementation(() => { throw new Error("stale context"); });
       record.lifecycle.status = "completed";
       coordinator.scheduleNudge(result.agentId);
@@ -1292,32 +1191,6 @@ describe("SpawnCoordinator", () => {
       }
     });
   });
-
-  describe("delivery interleavings", () => {
-    it("fails once, manually retries once, then accepts without duplicate sends", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "retry", graceTurns: 6, runInBackground: true,
-      });
-      result.record.lifecycle.status = "completed";
-      mockPi.sendMessage.mockReset().mockImplementation(() => { throw new Error("stale Pi"); });
-
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-      expect(result.record.delivery).toMatchObject({ state: "failed", attempts: 1, lastError: "stale Pi" });
-      expect(mockPi.sendMessage).toHaveBeenCalledOnce();
-
-      mockPi.sendMessage.mockReset().mockImplementation(() => {
-        // Reentrant UI selection cannot create a parallel manual attempt.
-        expect(coordinator.retryDelivery(result.agentId)).toBe(false);
-      });
-      expect(coordinator.retryDelivery(result.agentId)).toBe(true);
-      expect(mockPi.sendMessage).toHaveBeenCalledOnce();
-      expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 2 });
-      expect(result.record.lifecycle.resultConsumed).toBe(true);
-      expect(coordinator.retryDelivery(result.agentId)).toBe(false);
-      expect(mockPi.sendMessage).toHaveBeenCalledOnce();
-    });
 
     it("abandons pending or failed delivery on parent abort, but cannot retract an accepted handoff", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
@@ -1408,5 +1281,4 @@ describe("SpawnCoordinator", () => {
       expect((coordinator as any).backgroundDeliveries.size).toBe(0);
       expect(removeListener).toHaveBeenCalledTimes(2);
     });
-  });
 });

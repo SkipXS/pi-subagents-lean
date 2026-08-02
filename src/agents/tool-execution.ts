@@ -2,9 +2,9 @@ import { getStatusNote } from "../status-note.js";
 /**
  * tool-execution.ts — Agent tool execution handlers.
  *
- * Contains the execute callbacks registered for the Agent tool.
- * Spawn coordination, nudge scheduling, and live-view tracking have moved
- * to spawn-coordinator.ts. buildAgentDetails stays here as a pure helper.
+ * Contains the execute callbacks registered for the public control tools.
+ * Spawn coordination and nudge scheduling live in spawn-coordinator.ts;
+ * buildAgentDetails remains a pure result-details helper.
  */
 
 import type { ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
@@ -198,7 +198,7 @@ export function buildAgentDetails(
 }
 
 /**
- * Result text plus status note, for display.
+ * Result text plus status note, for tool delivery.
  *
  * Shared by the foreground tool result and the subagent-result nudge so both
  * callers stay in sync on the nullish default and separator handling — they
@@ -585,7 +585,7 @@ export async function toolCallListener(
   if (event.toolName !== "Agent") return;
 
   const input = event.input;
-  // Preserve an explicit model in the invocation display even for worktrees.
+  // Preserve an explicit model in invocation details even for worktrees.
   if (typeof input.model === "string") {
     const parsed = parseModelKey(input.model);
     if (parsed) input._modelOverride = parsed.modelId;

@@ -119,7 +119,6 @@ describe("AgentManager.continueAgent", () => {
     expect(result).toBe("follow-up result");
     expect(record).toBe(manager.getRecord(id));
     expect(manager.listAgents()).toContain(record);
-    expect(manager.refreshActiveSessions()).toBe(false);
     expect(mockModules.mockExecuteAgentTurn).toHaveBeenCalledTimes(1);
     const [turnSession, turnPrompt, turnOptions] = mockModules.mockExecuteAgentTurn.mock.calls[0]!;
     expect(turnSession).toBe(session); // same-session continuation
@@ -911,7 +910,7 @@ describe("AgentManager.continueAgent", () => {
 
     // A late turn-end/text delta from execution 1 arrives while execution 2
     // runs: it must not mutate the cumulative total or the older summary, and
-    // must never reach the caller's live view.
+    // must never reach the caller's result callback.
     firstCallbacks.onTurnEnd(9);
     firstCallbacks.onTextDelta("stale", "stale full text");
     await Promise.resolve();

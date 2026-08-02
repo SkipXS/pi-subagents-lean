@@ -431,7 +431,7 @@ describe("offline extension headless lifecycle", () => {
     }
   });
 
-  it("shuts down active and queued root work without UI or result delivery", async () => {
+  it("shuts down active and queued root work without result delivery", async () => {
     const api = createOfflinePi();
     const sessions: OfflineSession[] = [];
     boundary.createAgentSession.mockImplementation(async () => {
