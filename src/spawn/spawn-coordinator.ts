@@ -50,10 +50,8 @@ export interface ContinueResult {
   record: AgentRecord;
 }
 
-/** Batch delay for automatic background-result delivery (ms). */
+/** Short delay before each automatic background-result delivery (ms). */
 const NUDGE_DELAY_MS = 200;
-
-type DeliverySource = "auto" | "manual";
 
 /** Immutable payload captured at one execution's completion boundary. */
 interface BackgroundPayload {
@@ -73,7 +71,7 @@ interface BackgroundPayload {
  * Authoritative per-execution background delivery state.
  *
  * Everything one execution needs for its single automatic delivery — immutable
- * payload, timer, retry counter, in-flight guard, and parent-abort binding —
+ * payload, timer, attempt state, in-flight guard, and parent-abort binding —
  * is keyed by the execution id, so a stale timer or callback can never send a
  * later execution's mutable `record.result`. `record.delivery` remains only a
  * public projection of the latest execution.
@@ -93,14 +91,10 @@ interface BackgroundDeliveryEntry {
   lastError?: string;
   /** Claims the single automatic delivery attempt. */
   autoNudgeIssued: boolean;
-  /** Waiting in the shared delay window. */
-  pendingNudge: boolean;
-  /** Reentrancy guard while one delivery attempt is in progress. */
-  inProgress: boolean;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
-/** Copy array-valued fields so queued work cannot observe later config mutation. */
+/** Return whether a record has reached a terminal lifecycle status. */
 function isTerminal(record: AgentRecord): boolean {
   return record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
 }
@@ -281,22 +275,6 @@ export class SpawnCoordinator {
     this.onAgentComplete(record, execution);
   }
 
-  /** Whether a retained terminal delivery failure is available for retry. */
-  hasRetryableDelivery(agentId: string): boolean {
-    return !this.disposed && this.entriesFor(agentId).some((entry) => entry.state === "failed");
-  }
-
-  /** Immediately retry the oldest retained terminal delivery failure. Returns
-   * false when no eligible execution remains (accepted, abandoned, evicted, or active).
-   */
-  retryDelivery(agentId: string): boolean {
-    if (this.disposed) return false;
-    const record = this.manager.getRecord(agentId);
-    const entry = this.entriesFor(agentId).find((candidate) => candidate.state === "failed");
-    if (!entry || !record || !isTerminal(record)) return false;
-    return this.deliver(entry, "manual");
-  }
-
   /** Remove coordinator tracking when AgentManager fully evicts a record. */
   onRecordEvicted(record: AgentRecord): void {
     for (const entry of this.entriesFor(record.id)) this.clearEntry(entry, true);
@@ -327,8 +305,6 @@ export class SpawnCoordinator {
       completed: false,
       attempts: 0,
       autoNudgeIssued: false,
-      pendingNudge: false,
-      inProgress: false,
       timer: null,
     };
     this.backgroundDeliveries.set(entry.executionId, entry);
@@ -337,7 +313,7 @@ export class SpawnCoordinator {
     this.trackBackgroundParentAbort(entry, record);
   }
 
-  /** Keep each execution's delivery tied to its parent turn until Pi accepts it. */
+  /** Keep each execution's delivery tied to its parent turn until acceptance or eviction. */
   private trackBackgroundParentAbort(entry: BackgroundDeliveryEntry, record: AgentRecord): void {
     const signal = entry.signal;
     if (!signal) return;
@@ -371,14 +347,12 @@ export class SpawnCoordinator {
     this.clearEntry(entry, true);
   }
 
-  /** Clear transient tracking for one execution; retain parent listener after failure. */
+  /** Clear transient tracking; failed delivery entries remain until record eviction. */
   private clearEntry(entry: BackgroundDeliveryEntry, clearParent: boolean): void {
     if (entry.timer) {
       clearTimeout(entry.timer);
       entry.timer = null;
     }
-    entry.pendingNudge = false;
-    entry.inProgress = false;
     if (clearParent) {
       this.removeParentAbortListener(entry);
       this.backgroundDeliveries.delete(entry.executionId);
@@ -428,29 +402,26 @@ export class SpawnCoordinator {
   private scheduleEntry(entry: BackgroundDeliveryEntry): void {
     if (this.disposed || entry.state !== "pending" || !entry.completed || entry.autoNudgeIssued) return;
     entry.autoNudgeIssued = true;
-    entry.pendingNudge = true;
     entry.timer = setTimeout(() => {
       entry.timer = null;
-      entry.pendingNudge = false;
-      this.deliver(entry, "auto");
+      this.deliver(entry);
     }, NUDGE_DELAY_MS);
   }
 
-  /** Shared delivery path: auto only from pending, manual only from failed. */
-  private deliver(entry: BackgroundDeliveryEntry, source: DeliverySource): boolean {
-    if (this.disposed) return false;
+  /** Attempt the one automatic delivery for a completed execution. */
+  private deliver(entry: BackgroundDeliveryEntry): void {
+    if (this.disposed) return;
     const record = this.manager.getRecord(entry.agentId);
     if (!record) {
       this.clearEntry(entry, true);
-      return false;
+      return;
     }
-    if (entry.state !== (source === "auto" ? "pending" : "failed") || entry.inProgress) return false;
+    if (entry.state !== "pending") return;
     if (entry.signal?.aborted) {
       this.abandonBackgroundDelivery(entry, record);
-      return false;
+      return;
     }
 
-    entry.inProgress = true;
     entry.attempts++;
     entry.lastAttemptAt = Date.now();
     delete entry.lastError;
@@ -461,7 +432,7 @@ export class SpawnCoordinator {
       // preparation, so a queued timer can never send after parent/dispose.
       if (this.disposed || entry.signal?.aborted) {
         this.abandonBackgroundDelivery(entry, record);
-        return false;
+        return;
       }
 
       const payload = entry.payload;
@@ -488,14 +459,12 @@ export class SpawnCoordinator {
       this.projectDelivery(record, entry);
       this.clearEntry(entry, true);
     } catch (error) {
-      // Preserve result and terminal status for the explicit manual retry path.
+      // Keep the result and record the sendMessage failure diagnostically until
+      // record eviction; there is no automatic or manual retry path.
       entry.state = "failed";
       entry.lastError = deliveryErrorMessage(error);
       this.projectDelivery(record, entry);
       this.clearEntry(entry, false);
-    } finally {
-      entry.inProgress = false;
     }
-    return true;
   }
 }

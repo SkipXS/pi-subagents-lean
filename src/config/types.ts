@@ -6,7 +6,6 @@ export const CONFIG_AGENT_NON_MODEL_KEYS = [
   "systemPromptMode",
   "includeContextFiles",
   "defaultThinking",
-  "defaultMaxTurns",
   "loadSkillsImplicitly",
   "loadExtensionsImplicitly",
   "disableDefaultAgents",

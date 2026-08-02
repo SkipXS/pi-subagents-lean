@@ -81,7 +81,7 @@ function createContext(): ExtensionContext {
   } as unknown as ExtensionContext;
 }
 
-describe("extension session lifecycle without a custom UI", () => {
+describe("headless extension session lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.manager = null;
@@ -95,7 +95,7 @@ describe("extension session lifecycle without a custom UI", () => {
     state.scanAndMerge.mockReset().mockResolvedValue(new Map());
   });
 
-  it("registers root lifecycle hooks without terminal input or widget hooks", () => {
+  it("registers root lifecycle hooks without terminal input listeners", () => {
     const listeners = new Map<string, (...args: any[]) => any>();
     setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
 

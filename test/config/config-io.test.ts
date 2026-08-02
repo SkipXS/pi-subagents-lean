@@ -139,7 +139,7 @@ describe("config I/O paths", () => {
     });
   });
 
-  it("tolerates and drops legacy UI fields while retaining functional settings", async () => {
+  it("tolerates and drops legacy presentation fields while retaining functional settings", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({
       agent: {
@@ -169,7 +169,7 @@ describe("config I/O paths", () => {
     expect(config.agent.orchestrationPrompt).toBe(false);
   });
 
-  it("does not recreate legacy UI keys when a write callback touches them", async () => {
+  it("does not recreate removed presentation keys when a write callback touches them", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({
       agent: { default: null, forceBackground: false },

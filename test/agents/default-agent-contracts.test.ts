@@ -7,7 +7,7 @@ import { CONFIG_AGENT_NON_MODEL_KEYS } from "../../src/config/types.ts";
 
 const expectedNonModelKeys = [
   "default", "forceBackground", "graceTurns", "systemPromptMode", "includeContextFiles",
-  "defaultThinking", "defaultMaxTurns", "loadSkillsImplicitly", "loadExtensionsImplicitly",
+  "defaultThinking", "loadSkillsImplicitly", "loadExtensionsImplicitly",
   "disableDefaultAgents", "orchestrationPrompt", "outputThinkingBufferSize",
   "finishedRetentionMinutes",
 ];

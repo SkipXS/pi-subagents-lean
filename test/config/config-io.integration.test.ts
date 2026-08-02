@@ -207,7 +207,7 @@ describe("config I/O with the real filesystem", () => {
     expect(JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8"))).toEqual(replacement);
   });
 
-  it("fails menu persistence immediately when another live host owns the config lock", async () => {
+  it("fails config persistence immediately when another live host owns the config lock", async () => {
     const { updateConfigAtomic, ConfigLockTimeoutError, CONFIG_LOCK_TIMEOUT_MS } = await loadConfigModule();
     const configPath = join(testDir!, "subagents-lean.json");
     const lockPath = `${configPath}.lock`;

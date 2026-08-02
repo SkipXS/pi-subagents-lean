@@ -185,18 +185,6 @@ export function getAvailableAgents(): Array<{ name: string; description: string 
     .map(([name, config]) => ({ name, description: config.description }));
 }
 
-/** Get all visible type names (for spawning and tool descriptions). */
-export function getAvailableTypes(): string[] {
-  return [...agents.entries()]
-    .filter(([_, config]) => config.hidden !== true)
-    .map(([name]) => name);
-}
-
-/** Get all type names including hidden (for UI listing). */
-export function getAllTypes(): string[] {
-  return [...agents.keys()];
-}
-
 /** Agent is a root-session control tool and is never registered in agent sessions. */
 export const EXCLUDED_TOOL_NAMES = ["Agent"];
 
@@ -359,14 +347,6 @@ export function resolveSessionAllowedTools(opts: {
     if (!excludedTools.includes(t)) names.add(t);
   }
   return [...names].filter(t => !excludedTools.includes(t));
-}
-
-/** Get built-in tool names for a type (case-insensitive). */
-export function getToolNamesForType(type: string, configOverride?: AgentConfig): string[] {
-  const config = configOverride ?? getAgentConfig(type);
-  return config?.registeredTools?.length
-    ? config.registeredTools
-    : [...BUILTIN_TOOL_NAMES];
 }
 
 /** Resolved config shape returned by getConfig. */

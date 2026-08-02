@@ -38,14 +38,17 @@ pi -e git:github.com/SkipXS/pi-subagents-lean          # try without installing
 ```
 
 Ask pi to delegate through the `Agent` tool. A foreground agent returns its
-result in the current turn. A background agent acknowledges immediately and
-sends one completion notification later.
+result in the current turn. A background execution acknowledges immediately and
+gets one per-execution automatic completion nudge after a short delay (exactly one
+automatic delivery attempt). A background
+`AgentContinue` execution gets its own nudge and never reuses the original
+execution's delivery claim.
 
 ```text
 Parent session
   │ Agent({ agent: "scout", prompt: "Find the authentication entry points" })
   ├─ foreground ── waits ──► result and usage in this turn
-  └─ background ── continues ─► automatic result notification when finished
+  └─ background ── continues ─► one automatic result nudge when finished
 ```
 
 Use background work only for independent work. Do not poll `AgentStatus`, sleep,
@@ -54,9 +57,10 @@ when its notification arrives.
 
 ## Tools and execution
 
-The extension registers four intentionally bare schemas. Their stable names
-and fields keep recurring parent-session schema tokens low; the generated parent
-orchestration guidance supplies the changing catalog and operating advice.
+The extension registers four fixed, minimal schemas with concise static tool
+descriptions. Their stable names and fields keep recurring parent-session schema
+tokens low; the generated parent orchestration guidance supplies the changing
+catalog and operating advice.
 
 ### `Agent`
 
@@ -65,11 +69,14 @@ orchestration guidance supplies the changing catalog and operating advice.
 | `prompt` | yes | Task and relevant constraints for the root agent. |
 | `agent` | yes | Role to resolve from the current catalog. Names and `display_name` values resolve case-insensitively; use the canonical name shown by the catalog when practical. |
 | `description` | no | Short caller-facing label. If omitted, the first prompt line (up to 80 characters) is used. |
-| `run_in_background` | no | Return immediately and deliver one result notification later. `forceBackground: true` can make all root launches background. |
+| `run_in_background` | no | Return immediately; this execution receives exactly one automatic completion nudge after a short delay. `forceBackground: true` can make all root launches background. |
 | `worktree_path` | no | Root-only absolute path or parent-CWD-relative path inside a worktree of the parent repository. It is validated with Git. A trusted selected worktree may add a spawn-local `.pi/agents/` overlay. |
 
-The tool deliberately has no model, thinking, turn, or token parameters.
-Configure those through an agent definition or persistent/session settings. Every `Agent` call is a root launch owned by the parent session.
+The public tool deliberately has no model, thinking, turn, or token
+parameters. Configure model and thinking through an agent definition or
+persistent/session settings; those values are applied internally and are not
+caller-controlled spawn overrides. Turn and token limits come from the agent
+definition. Every `Agent` call is a root launch owned by the parent session.
 
 ### `AgentContinue`
 
@@ -77,8 +84,10 @@ Configure those through an agent definition or persistent/session settings. Ever
 finished agent on its existing session, reusing its model, working directory,
 output log, and stored `max_turns`/`grace_turns` limits. `run_in_background`
 is a mandatory boolean (strict-mode tool schemas cannot declare optional
-parameters): pass `true` to acknowledge immediately with a completion
-notification, or `false` to await the new execution's result. Only retained root
+parameters): pass `true` to acknowledge immediately and receive exactly one
+automatic completion nudge for this execution, or `false` to await the new
+execution's result. Delivery claims are per execution, so each background
+continuation gets its own nudge. Only retained root
 agents that completed successfully can be continued; running, queued, unsettled,
 stopped, aborted, turn-limited, or failed agents are rejected. A short `agent_id`
 prefix is accepted only when it matches
@@ -97,8 +106,9 @@ displays IDs as `short_id (type)`.
 ### `AgentStatus`
 
 Lists retained agents as `short_id (type) status`, with an optional
-`delivery:<state>` field. It is useful for discovery or recovery, not for
-waiting: background completion is delivered automatically.
+`delivery:<state>` field. Delivery state is diagnostic: a `sendMessage` error
+remains visible until record eviction, with no retry promise. Use the tool for
+discovery, not for waiting; background completion is delivered automatically.
 
 ## Agent definitions
 
@@ -301,18 +311,22 @@ never registered in a subagent session.
 
 Model and thinking use the same highest-to-lowest precedence:
 
-1. Explicit tool/configuration override
+1. Extension-internal spawn value (not a public tool parameter)
 2. Session per-role override
 3. Persisted per-role override in `subagents-lean.json`
 4. Agent Markdown `model` or `thinking`
 5. Session global default, then persisted global default
 6. Calling parent value
 
-A missing frontmatter model or thinking value therefore does not necessarily
-inherit the parent: any higher global or per-role setting can win.
+The public `Agent` schema does not expose model or thinking spawn overrides.
+The first level describes only the internal settings plumbing used while the
+extension prepares a tool call. A missing frontmatter model or thinking value
+therefore does not necessarily inherit the parent: any higher global or
+per-role setting can win.
 
 Eco mode is selected through the persisted `mode` setting or another host-side
-configuration writer; there is no custom UI. Each Eco field resolves
+configuration writer; it remains dateibasiert and has no custom UI dependency.
+Each Eco field resolves
 independently as an explicit value > Eco session role override > saved Eco role
 override > Agent Markdown `eco_*` > the fully resolved Default-mode field. Mode
 and resolved settings are captured when a root spawn is accepted, so queued work
@@ -344,8 +358,8 @@ The extension has no custom terminal UI, `/agents` command, widget, conversation
 viewer, or manual steering surface. Use the four tools from the parent session:
 `Agent` starts work, `AgentContinue` resumes a retained completed root agent,
 `StopAgent` cancels running or queued work, and `AgentStatus` reports retained
-records. Background completion is still delivered once through Pi's normal
-message path.
+records. Each background execution delivers one automatic nudge through Pi's
+normal message path, including every background continuation.
 
 Finished records are retained for `finishedRetentionMinutes`, and thinking
 output can be streamed to the append-only output log with
@@ -391,9 +405,10 @@ Older UI-only keys such as `widgetMaxLines`, `widgetCompact`, `showCost`, and
 `showTools` are accepted and ignored when loading existing files. Deprecated
 nested-delegation fields (`delegate_to`, `max_child_agents`, and
 `maxNestingDepth`) are also accepted for migration compatibility, but have no
-effect and are removed from newly written configuration. The former manual-UI
-field `agent.defaultMaxTurns` is retained only for tolerant reads; root tools do
-not use it as a turn-limit fallback. `finishedRetentionMinutes` and
+effect and are removed from newly written configuration. The former
+`agent.defaultMaxTurns` field is ignored and dropped during config
+normalization; it never supplies a root turn-limit fallback. Use `max_turns` in
+Agent Markdown for a role limit. `finishedRetentionMinutes` and
 `outputThinkingBufferSize` remain functional because they govern retention and
 output logs, not presentation.
 Example configuration:

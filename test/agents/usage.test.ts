@@ -5,12 +5,9 @@ import {
   formatCost,
   formatTokens,
   getLifetimeTotal,
-  getSessionContextPercent,
-  getSessionContextUsage,
   getSessionUsageSnapshot,
   observeContextStats,
   type LifetimeUsage,
-  type SessionLike,
 } from "../../src/agents/usage.js";
 
 describe("usage accounting", () => {
@@ -24,14 +21,6 @@ describe("usage accounting", () => {
 });
 
 describe("context telemetry", () => {
-  it("keeps the legacy stats shape assignable when contextWindow is omitted", () => {
-    const legacySession: SessionLike = {
-      getSessionStats: () => ({ contextUsage: { percent: 42 } }),
-    };
-
-    expect(getSessionContextUsage(legacySession)).toEqual({ percent: 42 });
-  });
-
   it("retains a known window when a later stats sample omits it", () => {
     const stats = createContextStats();
     observeContextStats(stats, { percent: 80, contextWindow: 100 });
@@ -61,7 +50,7 @@ describe("context telemetry", () => {
   });
 });
 
-describe("Pi footer primitives", () => {
+describe("Pi-compatible formatting", () => {
   it("uses Pi token thresholds exactly", () => {
     expect([
       formatTokens(999),
@@ -118,7 +107,6 @@ describe("Pi footer primitives", () => {
       contextWindow: 32_000,
       usingSubscription: false,
     });
-    expect(getSessionContextPercent(session)).toBe(42);
   });
 
   it("contains OAuth probe failures and treats unavailable sessions as absent", () => {
@@ -127,6 +115,5 @@ describe("Pi footer primitives", () => {
       modelRuntime: { isUsingOAuth: () => { throw new Error("provider unavailable"); } },
     })).toEqual({ contextPercent: null, usingSubscription: false });
     expect(getSessionUsageSnapshot(undefined)).toBeUndefined();
-    expect(getSessionContextPercent(undefined)).toBeNull();
   });
 });

@@ -1,17 +1,17 @@
 /**
  * package-name-matching.test.ts — Extension matching by package name from package.json.
  *
- * Uses real temp directories (no fs mocking) with exported buildExtOverride.
+ * Uses real temp directories (no fs mocking) with the extension override helper.
  * Tests the override function directly with real package.json files.
  *
  * Port from pi-subagents #143.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildExtOverride, resetPackageNameCache } from "../../src/agents/agent-runner.js";
+import { buildExtOverride } from "../../src/agents/agent-runner.js";
 
 /**
  * Create a temp directory with a package.json that declares an extension entry.
@@ -33,10 +33,6 @@ function createPkgDir(pkgName: string, entry: string, piExtensions: string[]): {
 
 describe("extension matching by package name — whitelist", () => {
   const tmpDirs: string[] = [];
-
-  beforeEach(() => {
-    resetPackageNameCache();
-  });
 
   afterEach(() => {
     while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
@@ -162,10 +158,6 @@ describe("extension matching by package name — whitelist", () => {
 describe("extension matching by package name — blacklist", () => {
   const tmpDirs: string[] = [];
 
-  beforeEach(() => {
-    resetPackageNameCache();
-  });
-
   afterEach(() => {
     while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
   });
@@ -193,10 +185,6 @@ describe("extension matching by package name — blacklist", () => {
 /* ------------------------------------------------------------------ */
 
 describe("extensions without package.json are unaffected", () => {
-  beforeEach(() => {
-    resetPackageNameCache();
-  });
-
   it("falls back to path-derived name when no package.json", () => {
     const override = buildExtOverride(["my-extension"], undefined, undefined);
     const result = override!({
@@ -227,10 +215,6 @@ describe("extensions without package.json are unaffected", () => {
 /* ------------------------------------------------------------------ */
 
 describe("warnings for unmatched extension names", () => {
-  beforeEach(() => {
-    resetPackageNameCache();
-  });
-
   it("warns when whitelist name doesn't match any loaded extension", () => {
     const warnings: string[] = [];
     const override = buildExtOverride(["nonexistent"], undefined, (msg) => warnings.push(msg));
@@ -268,10 +252,6 @@ describe("warnings for unmatched extension names", () => {
 
 describe("malformed package.json", () => {
   const tmpDirs: string[] = [];
-
-  beforeEach(() => {
-    resetPackageNameCache();
-  });
 
   afterEach(() => {
     while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });

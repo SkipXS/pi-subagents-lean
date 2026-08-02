@@ -726,7 +726,7 @@ describe("AgentManager", () => {
       const record = manager.getRecord(id)!;
       await record.execution.promise;
 
-      // Retention bounds result text even while a failed delivery is retryable.
+      // Retention bounds result text while a failed delivery remains diagnostic.
       record.delivery = { state: "failed", attempts: 1, lastError: "Pi unavailable" };
       record.lifecycle.completedAt = Date.now() - 70 * 60_000;
       (manager as any).cleanup();
@@ -841,6 +841,26 @@ describe("AgentManager", () => {
       // Should survive because retention was raised
       expect(manager.getRecord(id)).toBeDefined();
     });
+
+    it("runs scheduled cleanup for an old settled record", async () => {
+      vi.useFakeTimers();
+      try {
+        manager = new AgentManager(onComplete);
+        mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
+
+        const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
+        const record = manager.getRecord(id)!;
+        await record.execution.promise;
+        record.lifecycle.completedAt = Date.now() - 70 * 60_000;
+
+        vi.advanceTimersByTime(60_000);
+
+        expect(manager.getRecord(id)).toBeUndefined();
+      } finally {
+        manager?.dispose();
+        vi.useRealTimers();
+      }
+    });
   });
 
 describe("usage accounting", () => {
@@ -927,38 +947,6 @@ describe("usage accounting", () => {
     expect(manager.getRecord(id)?.stats.contextPercent).toBeUndefined();
   });
 
-  it("refreshes active root context after a session leaf changes", async () => {
-    manager = new AgentManager(onComplete);
-    const deferred = makeResolvablePromise();
-    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
-    const record = manager.getRecord(id)!;
-
-    // A root can be accepted before its session is initialized.
-    expect(manager.refreshActiveSessions()).toBe(false);
-
-    let leafId = "leaf-1";
-    const getLeafId = vi.fn(() => leafId);
-    const getContextUsage = vi.fn(() => ({ percent: 20, contextWindow: 100 }));
-    const session = {
-      ...mockAgentSession(),
-      getContextUsage,
-      sessionManager: { getLeafId },
-      model: { provider: "test", id: "model", contextWindow: 100 },
-    };
-    record.execution.session = session;
-
-    // The first observation establishes the cheap revision baseline.
-    expect(manager.refreshActiveSessions()).toBe(false);
-    leafId = "leaf-2";
-    expect(manager.refreshActiveSessions()).toBe(true);
-    expect(getContextUsage).toHaveBeenCalledOnce();
-    expect(record.stats.contextPercent).toBe(20);
-
-    deferred.resolve(mockRunResult({ session }));
-    await record.execution.promise;
-  });
-
   it("persists final context, auto-compaction, and subscription snapshots", async () => {
     manager = new AgentManager(onComplete);
     const session = {
@@ -979,68 +967,6 @@ describe("usage accounting", () => {
     });
   });
 
-  it("refreshes active telemetry once for a leaf/model switch and ignores terminal records", async () => {
-    manager = new AgentManager(onComplete);
-    let leafId = "leaf-1";
-    let contextWindow = 100;
-    const getLeafId = vi.fn(() => leafId);
-    const getBranch = vi.fn(() => []);
-    const getContextUsage = vi.fn(() => {
-      getBranch();
-      return { percent: 12, contextWindow };
-    });
-    const session = {
-      ...mockAgentSession(),
-      getContextUsage,
-      sessionManager: { getLeafId, getBranch },
-      model: { provider: "test", id: "model-1", contextWindow },
-    };
-    const deferred = makeResolvablePromise();
-    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
-    const record = manager.getRecord(id)!;
-    mockModules.mockRunAgent.mock.calls[0]![3].onSessionCreated(session);
-
-    expect(getContextUsage).toHaveBeenCalledOnce();
-    getContextUsage.mockClear();
-    getBranch.mockClear();
-
-    // Repeated widget cadence checks only the O(1) leaf/model identity.
-    for (let tick = 0; tick < 8; tick++) manager.refreshActiveSessions();
-    expect(getContextUsage).not.toHaveBeenCalled();
-    expect(getBranch).not.toHaveBeenCalled();
-
-    // An idle branch/model switch takes one coalesced context/auth snapshot.
-    leafId = "leaf-2";
-    contextWindow = 200;
-    session.model = { provider: "test", id: "model-2", contextWindow };
-    expect(manager.refreshActiveSessions()).toBe(true);
-    expect(getContextUsage).toHaveBeenCalledOnce();
-    expect(getBranch).toHaveBeenCalledOnce();
-    expect(record.stats.contextWindow).toBe(200);
-
-    getContextUsage.mockClear();
-    getBranch.mockClear();
-    for (let tick = 0; tick < 8; tick++) manager.refreshActiveSessions();
-    expect(getContextUsage).not.toHaveBeenCalled();
-    expect(getBranch).not.toHaveBeenCalled();
-
-    deferred.resolve(mockRunResult({ session }));
-    await record.execution.promise;
-    getContextUsage.mockClear();
-    getBranch.mockClear();
-
-    // Terminal records remain persisted projections and are never sampled by
-    // the active-session cadence.
-    expect(manager.refreshActiveSessions()).toBe(false);
-    expect(getContextUsage).not.toHaveBeenCalled();
-    expect(getBranch).not.toHaveBeenCalled();
-    expect((manager as any).sessionRevisions.size).toBe(1);
-
-    manager.dispose();
-    expect((manager as any).sessionRevisions.size).toBe(0);
-  });
-
   it("disposes a late session when shutdown evicted the record before setup finished", async () => {
     manager = new AgentManager(onComplete);
     const deferred = makeResolvablePromise();
@@ -1058,9 +984,9 @@ describe("usage accounting", () => {
   it("does not resample a session after dispose races a late runner settlement", async () => {
     manager = new AgentManager(onComplete);
     const getContextUsage = vi.fn(() => ({ percent: 20, contextWindow: 100 }));
-    const session = {      ...mockAgentSession(),
+    const session = {
+      ...mockAgentSession(),
       getContextUsage,
-      sessionManager: { getLeafId: () => "leaf-1" },
     };
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
@@ -1075,57 +1001,6 @@ describe("usage accounting", () => {
     await runnerPromise;
 
     expect(getContextUsage).not.toHaveBeenCalled();
-    expect((manager as any).sessionRevisions.size).toBe(0);
-  });
-
-  it("coalesces an idle tick with the deferred assistant persistence sample", async () => {
-    manager = new AgentManager(onComplete);
-    let leafId = "leaf-1";
-    let persisted = false;
-    const getLeafId = vi.fn(() => leafId);
-    const getBranch = vi.fn(() => []);
-    const getContextUsage = vi.fn(() => {
-      getBranch();
-      return persisted
-        ? { percent: 40, contextWindow: 200 }
-        : { percent: null, contextWindow: 100 };
-    });
-    const session = {
-      ...mockAgentSession(),
-      getContextUsage,
-      sessionManager: { getLeafId, getBranch },
-      model: { provider: "test", id: "model-1", contextWindow: 100 },
-    };
-    const deferred = makeResolvablePromise();
-    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
-    const record = manager.getRecord(id)!;
-    const callbacks = mockModules.mockRunAgent.mock.calls[0]![3];
-    callbacks.onSessionCreated(session);
-    getContextUsage.mockClear();
-    getBranch.mockClear();
-
-    callbacks.onAssistantUsage({ input: 1, output: 1, cacheWrite: 0, cacheRead: 0, cost: 0 });
-    persisted = true;
-    leafId = "leaf-2";
-
-    // The pending post-persistence observation owns this boundary; an idle
-    // widget tick must not race it with a second full read.
-    expect(manager.refreshActiveSessions()).toBe(false);
-    expect(getContextUsage).not.toHaveBeenCalled();
-    await Promise.resolve();
-
-    expect(getContextUsage).toHaveBeenCalledOnce();
-    expect(getBranch).toHaveBeenCalledOnce();
-    expect(record.stats.contextWindow).toBe(200);
-    getContextUsage.mockClear();
-    getBranch.mockClear();
-    expect(manager.refreshActiveSessions()).toBe(false);
-    expect(getContextUsage).not.toHaveBeenCalled();
-    expect(getBranch).not.toHaveBeenCalled();
-
-    deferred.resolve(mockRunResult({ session }));
-    await record.execution.promise;
   });
 
   it("resamples context after message_end persistence while keeping accounting immediate", async () => {

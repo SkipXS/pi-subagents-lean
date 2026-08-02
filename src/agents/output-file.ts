@@ -33,7 +33,7 @@ function formatDoneLine(stats: { turnCount: number; toolUseCount: number; totalT
   const costStr = formatCost(stats.cost);
   return `${timestamp()} [DONE] ${stats.turnCount} turns, ${stats.toolUseCount} tool uses, ${tokensStr}, ${costStr}\n`;
 }
-/** Max content length for full tool result display — longer results get a summary line. */
+/** Max content length for a full tool result log entry — longer results get a summary line. */
 const MAX_TOOL_RESULT_DISPLAY_LENGTH = 500;
 
 /** Get an ISO 8601 timestamp string suitable for log output. */

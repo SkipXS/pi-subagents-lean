@@ -194,8 +194,8 @@ export function setupEventListeners(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
     ++sessionEpoch;
 
-    // A standard host notification is retained for diagnostics; no custom TUI
-    // state or terminal input is involved.
+    // A standard host notification is retained for diagnostics; no custom
+    // presentation state or terminal input is involved.
     const currentManager = getManager();
     if (currentManager) {
       const records = currentManager.listAgents();

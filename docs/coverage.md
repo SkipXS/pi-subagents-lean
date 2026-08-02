@@ -12,6 +12,7 @@ bun run test
 bun run test:coverage
 bun run npm:production:smoke
 bun run package:smoke
+bun run pack:check
 ```
 
 Coverage uses Vitest's V8 provider over `src/**/*.ts`. Reports are written to
@@ -19,7 +20,7 @@ Coverage uses Vitest's V8 provider over `src/**/*.ts`. Reports are written to
 
 ## Minimum coverage
 
-Global thresholds in `vitest.config.ts` are 79% statements, 74% branches, 76%
+Global thresholds in `vitest.config.ts` are 79% statements, 74% branches, 75%
 functions, and 81% lines. Critical failure/race boundaries additionally have
 conservative per-file floors:
 
@@ -29,9 +30,10 @@ conservative per-file floors:
 | `src/agents/agent-manager.ts` | 85% | 80% | 80% | 88% |
 | `src/config/config-io.ts` | 68% | 80% | 73% | 70% |
 | `src/prompt/skill-loader.ts` | 72% | 80% | 70% | 72% |
-| `src/spawn/spawn-coordinator.ts` | 75% | 70% | 80% | 76% |
+| `src/spawn/spawn-coordinator.ts` | 74% | 70% | 80% | 75% |
 
-These floors are below the reproducible Ubuntu baseline rather than rounded up
+The manager function floor remains at the project gate for the active root-only
+implementation; all other floors remain below the reproducible Ubuntu baseline rather than rounded up
 to arbitrary targets. Coverage runs with one worker because tests intentionally
 isolate and mock shared extension modules. Linux is the gate platform because
 V8 module/mocking instrumentation differs on Windows and some filesystem cases

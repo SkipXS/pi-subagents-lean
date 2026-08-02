@@ -2,7 +2,7 @@
 
 /**
  * Billable token usage accumulated from `message_end` events. Cache reads are
- * tracked separately on AgentAccumulatedStats so their Pi display total can be
+ * tracked separately on AgentAccumulatedStats so their Pi-compatible total can be
  * maintained without changing this long-standing lifetime usage shape.
  */
 export type LifetimeUsage = { input: number; output: number; cacheWrite: number; cost: number };
@@ -37,7 +37,7 @@ export type SessionContextUsage = {
 /** Historical stats shape; older session doubles omitted `contextWindow`. */
 export type SessionStatsContextUsage = Omit<SessionContextUsage, "contextWindow"> & { contextWindow?: number };
 
-/** Minimal session surface used by UI accounting. Methods are optional for test doubles. */
+/** Minimal session surface used by defensive context telemetry. Methods are optional for test doubles. */
 export type SessionLike = {
   getSessionStats?: () => { contextUsage?: SessionStatsContextUsage };
   getContextUsage?: () => SessionContextUsage | undefined;
@@ -93,16 +93,6 @@ export function createContextStats(): ContextStats {
   return { current: null, lastKnown: null, peak: null, count: 0 };
 }
 
-/**
- * Read the exact upstream context snapshot defensively.
- *
- * The object may contain null `tokens`/`percent` immediately after compaction;
- * only an absent or failed read is treated as an unavailable snapshot.
- */
-export function getSessionContextUsage(session: SessionLike | undefined): SessionStatsContextUsage | undefined {
-  return readSessionContextUsage(session).usage;
-}
-
 /** Record one context snapshot; null-valued samples count, and a window updates only when supplied. */
 export function observeContextStats(stats: ContextStats, usage: SessionStatsContextUsage | undefined): void {
   if (!usage) return;
@@ -123,8 +113,8 @@ export interface SessionUsageSnapshot {
   usingSubscription?: boolean;
 }
 
-/** Format a token count exactly like Pi's interactive footer. */
-export function formatTokens(count: number, _compact?: boolean): string {
+/** Format a token count using Pi's established compact notation. */
+export function formatTokens(count: number): string {
   if (count < 1_000) return count.toString();
   if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
   if (count < 1_000_000) return `${Math.round(count / 1_000)}k`;
@@ -132,7 +122,7 @@ export function formatTokens(count: number, _compact?: boolean): string {
   return `${Math.round(count / 1_000_000)}M`;
 }
 
-/** Format cost exactly like Pi's interactive footer. */
+/** Format cost using Pi's established three-decimal notation. */
 export function formatCost(cost: number): string {
   return `$${cost.toFixed(3)}`;
 }
@@ -175,9 +165,4 @@ export function getSessionUsageSnapshot(
   } catch {
     return undefined;
   }
-}
-
-/** Context-window utilization (0–100), or null when unavailable. */
-export function getSessionContextPercent(session: SessionLike | undefined): number | null {
-  return getSessionUsageSnapshot(session)?.contextPercent ?? null;
 }

@@ -97,11 +97,6 @@ function resolvePackageShortName(extPath: string): string | undefined {
   }
 }
 
-/** Clear the package name cache. Exposed for test isolation. */
-export function resetPackageNameCache() {
-  packageNameCache.clear();
-}
-
 /** Normalize max turns. undefined or 0 = unlimited, otherwise minimum 1. */
 function normalizeMaxTurns(n: number | undefined): number | undefined {
   if (n == null || n === 0) return undefined;

@@ -1,12 +1,24 @@
-# Stealth tool registration
+# Fixed tool registration
 
-The Agent tool is registered once at extension init with a minimal, byte-stable schema: no description, no prompt snippets or guidelines, and parameters without descriptions. Its required `agent` field is always a bare `Type.String()`; it never has a config- or registry-driven enum. Model and thinking are intentionally absent from the LLM-visible schema and remain controlled through Agent Markdown and settings.
+The four public tools are registered once at extension init with minimal,
+byte-stable parameter schemas and concise static descriptions. They have no
+prompt snippets or guidelines, parameter descriptions, or runtime-generated
+enums. The required `agent` field is always a bare `Type.String()`; it never
+has a config- or registry-driven enum. Model and thinking are intentionally
+absent from the LLM-visible `Agent` schema and remain controlled through Agent
+Markdown and settings. Turn and token limits are likewise configuration-only.
 
 ## Why
 
 Calling `registerTool()` at runtime rebuilds tools and can invalidate the system-prompt/KV-cache prefix. A fixed schema prevents mid-session tool registration and cache churn.
 
-When enabled, the parent-only orchestration block is the sole automatic catalog of visible agents. It is regenerated from the trusted live registry before each parent turn, independently of the tool schema. Disabling that block deliberately provides no automatic catalog. Model and thinking use the shared precedence: explicit spawn > session-agent > persistent agent > agent Markdown > global > parent.
+When enabled, the parent-only orchestration block is the sole automatic catalog
+of visible agents. It is regenerated from the trusted live registry before each
+parent turn, independently of the tool schema. Disabling that block deliberately
+provides no automatic catalog. Model and thinking use the shared precedence:
+internal spawn value > session-agent > persistent agent > Agent Markdown >
+global > parent. The internal spawn level is settings plumbing, not a public
+tool override.
 
 ## Trade-off
 

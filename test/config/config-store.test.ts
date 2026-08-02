@@ -85,7 +85,7 @@ describe("ConfigStore runtime settings", () => {
     expect(snapshot).not.toHaveProperty("mutate");
   });
 
-  it("retains Eco resolution independently from the removed UI", () => {
+  it("retains Eco resolution independently from presentation", () => {
     const { io, current } = memIO({
       ecoModelOverrides: { scout: "saved/eco" },
       ecoThinkingOverrides: { scout: "low" },
@@ -125,7 +125,7 @@ describe("ConfigStore runtime settings", () => {
     expect(saves).toHaveLength(0);
   });
 
-  it("resolves scalar defaults without exposing legacy UI fields", () => {
+  it("resolves scalar defaults without exposing legacy presentation fields", () => {
     const { io } = memIO({
       agent: {
         default: null,
@@ -134,6 +134,7 @@ describe("ConfigStore runtime settings", () => {
         // expose or recreate presentation-only fields.
         widgetMaxLines: 20,
         showCost: true,
+        defaultMaxTurns: 40,
       },
     });
     const settings = new ConfigStore(io).agent;
@@ -148,9 +149,10 @@ describe("ConfigStore runtime settings", () => {
     });
     expect(settings).not.toHaveProperty("widgetMaxLines");
     expect(settings).not.toHaveProperty("showCost");
+    expect(settings).not.toHaveProperty("defaultMaxTurns");
   });
 
-  it("does not recreate removed delegation fields through dynamic writes", () => {
+  it("does not recreate removed fields through dynamic writes", () => {
     const { io, current } = memIO({
       agent: {
         default: null,
@@ -158,17 +160,20 @@ describe("ConfigStore runtime settings", () => {
         delegate_to: ["scout"] as any,
         max_child_agents: 2,
         maxNestingDepth: 2,
+        defaultMaxTurns: 40,
       },
     });
     const store = new ConfigStore(io);
 
     store.mutate.agent.setModelOverride("delegate_to", "reviewer");
+    store.mutate.agent.setModelOverride("defaultMaxTurns", "40");
     store.mutate.agent.setModelOverride("max_child_agents", "4");
     store.mutate.agent.setModelOverride("maxNestingDepth", "2");
 
     expect(current().agent).not.toHaveProperty("delegate_to");
     expect(current().agent).not.toHaveProperty("max_child_agents");
     expect(current().agent).not.toHaveProperty("maxNestingDepth");
+    expect(current().agent).not.toHaveProperty("defaultMaxTurns");
   });
 });
 
@@ -403,7 +408,7 @@ describe("ConfigStore lifecycle and session overrides", () => {
     expect(retentions).toEqual([]);
   });
 
-  it("persists output-log buffering without a UI dependency", () => {
+  it("persists output-log buffering without a presentation dependency", () => {
     const { io, current } = memIO();
     const store = new ConfigStore(io);
     store.mutate.agent.setOutputThinkingBufferSize(200);

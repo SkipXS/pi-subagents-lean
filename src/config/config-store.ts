@@ -70,8 +70,6 @@ export interface ResolvedAgentSettings {
   readonly includeContextFiles: boolean;
   /** Default thinking level for spawned agents. Undefined = inherit from agent config. */
   readonly defaultThinking: ThinkingLevel | undefined;
-  /** Legacy manual-UI value retained for tolerant reads; root tools ignore it. */
-  readonly defaultMaxTurns: number | undefined;
   /** Global default for skills loading: true (load all) or false (none). */
   readonly loadSkillsImplicitly: boolean;
   /** Global default for extensions loading: true (load all) or false (none). */
@@ -162,7 +160,6 @@ export class ConfigStore {
       systemPromptMode: VALID_SYSTEM_PROMPT_MODES.has(a.systemPromptMode as string) ? (a.systemPromptMode as SystemPromptMode) : "replace",
       includeContextFiles: a.includeContextFiles ?? true,
       defaultThinking: parseThinkingLevel(a.defaultThinking),
-      defaultMaxTurns: a.defaultMaxTurns,
       loadSkillsImplicitly: a.loadSkillsImplicitly !== false,
       loadExtensionsImplicitly: a.loadExtensionsImplicitly !== false,
       disableDefaultAgents: a.disableDefaultAgents === true,
@@ -425,14 +422,6 @@ export class ConfigStore {
         }
         this.persist();
       },
-      setDefaultMaxTurns: (n: number | undefined): void => {
-        if (n === undefined) {
-          delete this.config.agent.defaultMaxTurns;
-        } else {
-          this.config.agent.defaultMaxTurns = n;
-        }
-        this.persist();
-      },
       setLoadSkillsImplicitly: (value: boolean): void => {
         this.config.agent.loadSkillsImplicitly = value;
         this.persist();
@@ -595,7 +584,7 @@ export class ConfigStore {
 
 /** Apply only this store mutation's changed fields to a freshly locked snapshot. */
 const REMOVED_AGENT_FIELDS = [
-  "maxNestingDepth", "max_nesting_depth", "delegate_to", "delegateTo", "max_child_agents", "maxChildAgents",
+  "defaultMaxTurns", "maxNestingDepth", "max_nesting_depth", "delegate_to", "delegateTo", "max_child_agents", "maxChildAgents",
 ] as const;
 
 function stripRemovedAgentFields(config: SubagentsConfig): SubagentsConfig {
