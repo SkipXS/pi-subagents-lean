@@ -118,6 +118,8 @@ describe("AgentManager.continueAgent", () => {
 
     expect(result).toBe("follow-up result");
     expect(record).toBe(manager.getRecord(id));
+    expect(manager.listAgents()).toContain(record);
+    expect(manager.refreshActiveSessions()).toBe(false);
     expect(mockModules.mockExecuteAgentTurn).toHaveBeenCalledTimes(1);
     const [turnSession, turnPrompt, turnOptions] = mockModules.mockExecuteAgentTurn.mock.calls[0]!;
     expect(turnSession).toBe(session); // same-session continuation
@@ -311,6 +313,7 @@ describe("AgentManager.continueAgent", () => {
     const continuationRun = makeResolvablePromise();
     mockModules.mockExecuteAgentTurn.mockReturnValueOnce(continuationRun.promise);
     const { executionId, record, promise } = manager.continueAgent(firstId, "continue", {});
+    const acceptedSession = record.execution.session;
     expect(record.lifecycle.status).toBe("queued");
     expect(record.lifecycle.settled).toBe(false);
     expect(record.stats.executions![1]!.status).toBe("queued");
@@ -327,6 +330,7 @@ describe("AgentManager.continueAgent", () => {
     expect(record.lifecycle.status).toBe("running");
     expect(record.lifecycle.settled).toBe(false);
     expect(record.stats.executions![1]!.status).toBe("running");
+    expect(mockModules.mockExecuteAgentTurn.mock.calls[0]![0]).toBe(acceptedSession);
     // A second continuation while the first is running is rejected too.
     expect(() => manager.continueAgent(firstId, "again", {}))
       .toThrow("is running and cannot be continued");
@@ -487,7 +491,15 @@ describe("AgentManager.continueAgent", () => {
     expect(record.lifecycle.status).toBe("error");
     expect(record.error).toBe("start boom");
     expect(record.lifecycle.settled).toBe(true);
-    expect(record.stats.executions![1]).toMatchObject({ status: "error", error: "start boom" });
+    expect(record.stats.executions![1]).toMatchObject({
+      status: "error",
+      error: "start boom",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+      turnCount: 0,
+      toolUses: 0,
+      compactionCount: 0,
+    });
+    expect(record.execution.outputLog).toBeUndefined();
     expect(mockModules.mockExecuteAgentTurn).not.toHaveBeenCalled();
 
     // The claimed slot was released: the next spawn starts immediately.
@@ -697,6 +709,28 @@ describe("AgentManager.continueAgent", () => {
     expect(mockModules.fsMock.appendFileSync).toHaveBeenCalled();
     const record = manager.getRecord(id)!;
     expect(record.display.outputFile).toBeTruthy();
+  });
+
+  it("appends to an already attached output log only when the continuation starts", async () => {
+    manager = new AgentManager(onComplete);
+    const { id } = await spawnCompletedAgent("initial task");
+    const record = manager.getRecord(id)!;
+    const outputLog = {
+      append: vi.fn(),
+      attach: vi.fn(),
+      finalize: vi.fn(),
+      path: "/tmp/accepted-continuation.log",
+    };
+    record.execution.outputLog = outputLog as any;
+
+    mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
+      responseText: "continued", aborted: false, turnLimited: false,
+    });
+    const { promise } = manager.continueAgent(id, "second task", {});
+    expect(outputLog.append).toHaveBeenCalledWith("second task");
+    expect(outputLog.attach).toHaveBeenCalledWith(expect.anything(), expect.any(Number));
+    await promise;
+    expect(outputLog.finalize).toHaveBeenCalledOnce();
   });
 
   it("finalizes the output log at each terminal boundary and reopens it in append mode", async () => {
@@ -1045,6 +1079,19 @@ describe("AgentManager.continueAgent", () => {
     expect(record.result).toBe("");
     expect(record.result).not.toBe("done"); // never reuses the prior assistant text
     expect(record.stats.executions![1]!.responseText).toBe("");
+  });
+
+  it("does not notify twice when an unstarted terminal path is reconciled", async () => {
+    manager = new AgentManager(onComplete);
+    const { id } = await spawnCompletedAgent("initial task");
+    const aborted = new AbortController();
+    aborted.abort();
+
+    const { promise, record } = manager.continueAgent(id, "cancelled", { signal: aborted.signal });
+    await expect(promise).rejects.toThrow("was stopped");
+    const execution = record.stats.executions![1]!;
+    expect((manager as any).finishUnstartedExecution(record, execution, "stopped")).toBe(false);
+    expect(onComplete).toHaveBeenCalledTimes(2); // initial + one continuation terminal callback
   });
 
   it("keeps manager configuration and cleanup failure-safe around retained records", async () => {

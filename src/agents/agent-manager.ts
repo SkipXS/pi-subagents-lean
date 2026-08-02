@@ -56,7 +56,7 @@ export interface ConcurrencyConfig {
   default: number;
 }
 
-export type OnAgentComplete = (record: AgentRecord, execution?: AgentExecutionSummary) => void;
+export type OnAgentComplete = (record: AgentRecord, execution: AgentExecutionSummary) => void;
 export type OnAgentEvicted = (record: AgentRecord) => void;
 type OnAgentStart = (record: AgentRecord) => void;
 
@@ -90,7 +90,12 @@ interface SpawnArgs {
 }
 
 interface ContinueRequest {
+  /** The accepted root record and retained session used by this task. */
+  record: AgentRecord;
+  session: AgentSession;
+  /** Stable execution identity and telemetry baseline captured at acceptance. */
   executionId: string;
+  baseline: ExecutionBaseline;
   prompt: string;
   isBackground: boolean;
   maxTurns?: number;
@@ -287,14 +292,7 @@ export class AgentManager {
 
     this.bindParentAbortSignal(id, options.signal);
     if (record.lifecycle.status !== "running") {
-      this.setSettled(record);
-      const execution = record.stats.executions?.[0];
-      if (execution) {
-        execution.status = "stopped";
-        execution.completedAt = Date.now();
-        this.executionBases.delete(execution.id);
-      }
-      this.safeNotifyComplete(record, execution);
+      this.finishUnstartedExecution(record, record.stats.executions![0]!, "stopped");
       this.totalAgentCount++;
       return id;
     }
@@ -410,11 +408,16 @@ export class AgentManager {
     if (record.lifecycle.status !== "completed" || !record.lifecycle.settled) {
       throw new Error(`Agent ${resolved.id.slice(0, SHORT_ID_LENGTH)} is ${record.lifecycle.status} and cannot be continued`);
     }
-    if (!record.execution.session) {
+    const session = record.execution.session;
+    if (!session) {
       throw new Error(`Agent ${resolved.id.slice(0, SHORT_ID_LENGTH)} session is no longer available`);
     }
 
+    // Acceptance captures every value that may otherwise change while the
+    // task waits for a slot. The queue therefore starts this exact retained
+    // session and computes deltas from this exact baseline.
     const executionId = randomUUID().slice(0, AGENT_ID_PREFIX_LENGTH);
+    const baseline = this.snapshotExecutionBaseline(record);
     let resolveRequest: (result: string) => void = () => {};
     let rejectRequest: (error: Error) => void = () => {};
     const promise = new Promise<string>((resolve, reject) => {
@@ -423,7 +426,10 @@ export class AgentManager {
     });
     const startedAt = Date.now();
     const request: ContinueRequest = {
+      record,
+      session,
       executionId,
+      baseline,
       prompt,
       isBackground: options.isBackground === true,
       maxTurns: options.maxTurns,
@@ -446,11 +452,9 @@ export class AgentManager {
       startedAt,
     };
     (record.stats.executions ??= []).push(execution);
-    this.executionBases.set(execution.id, this.snapshotExecutionBaseline(record));
     this.setStatus(record, queued ? "queued" : "running");
     record.lifecycle.settled = false;
     record.lifecycle.completedAt = undefined;
-
     if (queued) {
       this.queue.push({ kind: "continue", id: resolved.id, request });
       this.bindParentAbortSignal(resolved.id, options.signal);
@@ -460,14 +464,9 @@ export class AgentManager {
     this.bindParentAbortSignal(resolved.id, options.signal);
     const statusAfterAbort = record.lifecycle.status as AgentStatus;
     if (statusAfterAbort !== "running") {
-      execution.status = "stopped";
-      execution.completedAt = Date.now();
-      this.finalizeUnstartedExecution(execution);
-      this.executionBases.delete(execution.id);
-      record.result = undefined;
-      request.reject(new Error(`Agent ${resolved.id.slice(0, SHORT_ID_LENGTH)} was stopped`));
-      this.setSettled(record);
-      this.safeNotifyComplete(record, execution);
+      const stopError = new Error(`Agent ${resolved.id.slice(0, SHORT_ID_LENGTH)} was stopped`);
+      this.finishUnstartedExecution(record, execution, "stopped");
+      request.reject(stopError);
       return { executionId, record, promise };
     }
 
@@ -475,18 +474,9 @@ export class AgentManager {
       this.startContinueExecution(record, request, this.concurrencySlot);
     } catch (err) {
       this.concurrencySlot.running--;
-      this.setStatus(record, "error");
-      record.error = errorMessage(err);
-      record.result = undefined;
-      record.lifecycle.completedAt = Date.now();
-      this.setSettled(record);
-      execution.status = "error";
-      execution.completedAt = Date.now();
-      execution.error = errorMessage(err);
-      this.executionBases.delete(execution.id);
-      request.reject(err instanceof Error ? err : new Error(errorMessage(err)));
-      this.clearParentAbortSignal(resolved.id);
-      this.safeNotifyComplete(record, execution);
+      const failure = errorMessage(err);
+      this.finishUnstartedExecution(record, execution, "error", failure);
+      request.reject(err instanceof Error ? err : new Error(failure));
       this.drainQueue();
     }
     return { executionId, record, promise };
@@ -512,8 +502,11 @@ export class AgentManager {
   ): void {
     concurrencySlot.running++;
     const execution = record.stats.executions?.find((e) => e.id === request.executionId);
-    const session = record.execution.session;
-    if (!execution || !session) {
+    const session = request.session;
+    // The accepted task owns the session identity. A record released while the
+    // task was queued must fail rather than silently switching to another
+    // session or attempting to use a disposed handle.
+    if (!execution || !session || record.execution.session !== session) {
       throw new Error(`Agent ${record.id.slice(0, SHORT_ID_LENGTH)} session is no longer available`);
     }
 
@@ -552,7 +545,7 @@ export class AgentManager {
       },
     })
       .then(({ responseText, aborted, turnLimited }) => {
-        this.finishTurnExecution(record, execution, { responseText, aborted, turnLimited }, concurrencySlot);
+        this.finishTurnExecution(record, execution, { responseText, aborted, turnLimited }, concurrencySlot, request.baseline);
         if (!request.isBackground) execution.deliveredText = responseText;
         request.resolve(responseText);
         return responseText;
@@ -563,6 +556,7 @@ export class AgentManager {
           execution,
           { responseText: "", aborted: false, turnLimited: false, error: errorMessage(err) },
           concurrencySlot,
+          request.baseline,
         );
         request.resolve("");
         return "";
@@ -575,6 +569,7 @@ export class AgentManager {
     execution: AgentExecutionSummary,
     outcome: { responseText: string; aborted: boolean; turnLimited: boolean; error?: string },
     concurrencySlot: ConcurrencySlot,
+    baseline?: ExecutionBaseline,
   ): void {
     if (record.stats.executions?.at(-1) !== execution) {
       this.executionBases.delete(execution.id);
@@ -592,7 +587,7 @@ export class AgentManager {
     execution.completedAt = completedAt;
     execution.responseText = outcome.responseText;
     execution.error = outcome.error;
-    const delta = this.executionDelta(record, execution.id);
+    const delta = this.executionDelta(record, execution.id, baseline);
     execution.usage = delta?.usage;
     execution.toolUses = delta?.toolUses;
     execution.compactionCount = delta?.compactionCount;
@@ -645,8 +640,12 @@ export class AgentManager {
     };
   }
 
-  private executionDelta(record: AgentRecord, executionId: string): ExecutionBaseline | undefined {
-    const base = this.executionBases.get(executionId);
+  private executionDelta(
+    record: AgentRecord,
+    executionId: string,
+    baseline?: ExecutionBaseline,
+  ): ExecutionBaseline | undefined {
+    const base = baseline ?? this.executionBases.get(executionId);
     if (!base) return undefined;
     return {
       usage: {
@@ -668,10 +667,51 @@ export class AgentManager {
     execution.compactionCount = 0;
   }
 
-  private safeNotifyComplete(record: AgentRecord, execution?: AgentExecutionSummary): void {
+  /**
+   * Finish an accepted task that never reached the turn executor. This path is
+   * deliberately idempotent: parent abort, queue cancellation, and a
+   * synchronous startup failure can observe the same terminal boundary.
+   */
+  private finishUnstartedExecution(
+    record: AgentRecord,
+    execution: AgentExecutionSummary,
+    status: "stopped" | "error",
+    error?: string,
+  ): boolean {
+    if (record.lifecycle.settled && execution.completedAt !== undefined) return false;
+
+    const completedAt = Date.now();
+    execution.status = status;
+    execution.completedAt = completedAt;
+    if (error !== undefined) execution.error = error;
+    else delete execution.error;
+    this.finalizeUnstartedExecution(execution);
+    this.executionBases.delete(execution.id);
+
+    this.setStatus(record, status);
+    record.result = undefined;
+    record.error = error;
+    record.lifecycle.completedAt = completedAt;
+    if (record.execution.outputLog) {
+      try {
+        record.execution.outputLog.finalize({
+          turnCount: record.stats.turnCount ?? 0,
+          toolUseCount: record.stats.toolUses,
+          totalTokens: getLifetimeTotal(record.stats.lifetimeUsage),
+          cost: record.stats.lifetimeUsage.cost,
+        });
+      } catch { /* ignore output-log finalization failures */ }
+      record.execution.outputLog = undefined;
+    }
+    this.setSettled(record);
+    this.clearParentAbortSignal(record.id);
+    this.safeNotifyComplete(record, execution);
+    return true;
+  }
+
+  private safeNotifyComplete(record: AgentRecord, execution: AgentExecutionSummary): void {
     try {
-      if (execution) this.onComplete?.(record, execution);
-      else this.onComplete?.(record);
+      this.onComplete?.(record, execution);
     } catch { /* completion observers must not affect lifecycle */ }
   }
 
@@ -915,22 +955,13 @@ export class AgentManager {
         started.add(entry.id);
       } catch (err) {
         this.concurrencySlot.running--;
-        this.setStatus(record, "error");
-        record.error = errorMessage(err);
-        record.result = undefined;
-        record.lifecycle.completedAt = Date.now();
-        this.setSettled(record);
-        if (entry.kind === "continue") entry.request.reject(new Error(errorMessage(err)));
+        const failure = errorMessage(err);
+        const failedExecution = entry.kind === "continue"
+          ? record.stats.executions?.find((execution) => execution.id === entry.request.executionId)
+          : record.stats.executions?.find((execution) => execution.status === "running" || execution.status === "queued");
+        this.finishUnstartedExecution(record, failedExecution!, "error", failure);
+        if (entry.kind === "continue") entry.request.reject(new Error(failure));
         else entry.resolve("");
-        const failedExecution = record.stats.executions?.find((e) => e.status === "running" || e.status === "queued");
-        if (failedExecution) {
-          failedExecution.status = "error";
-          failedExecution.completedAt = Date.now();
-          failedExecution.error = errorMessage(err);
-          this.executionBases.delete(failedExecution.id);
-        }
-        this.clearParentAbortSignal(entry.id);
-        this.safeNotifyComplete(record, failedExecution);
         started.add(entry.id);
       }
     }
@@ -969,33 +1000,36 @@ export class AgentManager {
   /** Stop one running or queued root execution. */
   private stopAgent(record: AgentRecord, stoppedBy?: StopInitiator): boolean {
     const wasQueued = record.lifecycle.status === "queued";
+    if (!wasQueued && record.lifecycle.status !== "running") return false;
+
+    const queuedEntry = wasQueued ? this.queue.find((entry) => entry.id === record.id) : undefined;
     if (wasQueued) {
-      const queuedEntry = this.queue.find((entry) => entry.id === record.id);
-      if (queuedEntry?.kind === "continue") queuedEntry.request.reject(new Error(`Agent ${record.id.slice(0, SHORT_ID_LENGTH)} was stopped`));
-      else if (queuedEntry?.kind === "spawn") queuedEntry.resolve("");
       this.queue = this.queue.filter((entry) => entry.id !== record.id);
-    } else if (record.lifecycle.status !== "running") {
-      return false;
-    } else {
-      record.execution.abortController?.abort();
+      record.lifecycle.stoppedBy = stoppedBy;
+      const activeExecution = record.stats.executions?.find(
+        (execution) => execution.status === "running" || execution.status === "queued",
+      );
+      this.finishUnstartedExecution(record, activeExecution!, "stopped");
+      if (queuedEntry?.kind === "continue") {
+        queuedEntry.request.reject(new Error(`Agent ${record.id.slice(0, SHORT_ID_LENGTH)} was stopped`));
+      } else if (queuedEntry?.kind === "spawn") {
+        queuedEntry.resolve("");
+      }
+      return true;
     }
 
+    // A running task owns a live runner. Mark it stopped immediately for
+    // status/retention, but let the runner's completion release the slot and
+    // compute its real (possibly partial) execution delta.
+    record.execution.abortController?.abort();
     this.setStatus(record, "stopped");
     record.lifecycle.stoppedBy = stoppedBy;
     record.lifecycle.completedAt = Date.now();
     record.result = undefined;
-    const activeExecution = record.stats.executions?.find((execution) => execution.status === "running" || execution.status === "queued");
+    const activeExecution = record.stats.executions?.find((execution) => execution.status === "running");
     if (activeExecution) {
       activeExecution.status = "stopped";
       activeExecution.completedAt ??= Date.now();
-      if (wasQueued) {
-        this.finalizeUnstartedExecution(activeExecution);
-        this.executionBases.delete(activeExecution.id);
-      }
-    }
-    if (wasQueued) {
-      this.setSettled(record);
-      this.safeNotifyComplete(record, activeExecution);
     }
     this.clearParentAbortSignal(record.id);
     return true;
