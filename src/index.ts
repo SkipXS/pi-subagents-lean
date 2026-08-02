@@ -26,11 +26,9 @@ import { registerTools } from "./registration.js";
 import { setupEventListeners } from "./events.js";
 
 export default function (pi: ExtensionAPI) {
-  // Child sessions receive their local Agent proxy through createAgentSession's
-  // customTools API. Stay inert if this root extension is encountered while
-  // binding child extensions so it cannot register root control tools.
-  // The deprecated marker only preserves old inert-registration behavior.
-  // ALS remains the sole authority for child shell isolation and root guards.
+  // Stay inert when Pi binds this extension while loading an agent session.
+  // The ALS marker is the authority for child-session isolation, so no root
+  // control tool or listener can leak into a subagent.
   if (getSubagentRuntimeContext() || isInsideSubagentSpawn()) return;
   setPiInstance(pi);
   registerTools(pi);

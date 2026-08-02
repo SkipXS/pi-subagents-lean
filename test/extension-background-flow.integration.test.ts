@@ -26,11 +26,14 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 import extension from "../src/index.js";
 import { runAgent } from "../src/agents/agent-runner.js";
 import {
+  createSubagentRuntimeContext,
   getCoordinator,
   getManager,
   getPiInstance,
   getSessionCtx,
+  getStore,
   getSubagentRuntimeContext,
+  runWithSubagentRuntime,
   setCoordinator,
   setManager,
 } from "../src/shell.js";
@@ -495,6 +498,14 @@ describe("offline extension headless lifecycle", () => {
     }
   });
 
+  it("rejects direct nested execution even when a caller supplies detached settings", async () => {
+    const settings = getStore().createSubagentRuntimeSettings();
+    await expect(runWithSubagentRuntime(
+      createSubagentRuntimeContext(),
+      () => runAgent({} as any, "implementer", "nested", { pi: {} as any, runtimeSettings: settings }),
+    )).rejects.toThrow("Nested agent execution is unavailable from a child runtime");
+  });
+
   it("isolates a direct executor-less run before extension loading", async () => {
     const api = createOfflinePi();
     const childApi = createOfflinePi();
@@ -559,41 +570,19 @@ describe("offline extension headless lifecycle", () => {
     }
   });
 
-  it("keeps root lifecycle intact while nested proxy sessions load extensions in isolated contexts", async () => {
+  it("keeps concurrent root sessions isolated and never supplies an Agent proxy", async () => {
     const api = createOfflinePi();
     const sessions: OfflineSession[] = [];
-    const setups: Array<{
-      options: any;
-      session: OfflineSession;
-      extensionApi: ReturnType<typeof createOfflinePi>;
-      runtime: ReturnType<typeof getSubagentRuntimeContext>;
-    }> = [];
-    const firstSetupEntered = createDeferred();
-    const secondSetupEntered = createDeferred();
-    const reviewerSetupEntered = createDeferred();
-    const releaseFirstSetup = createDeferred();
-    let creationCount = 0;
+    const runtimes: Array<{ options: any; runtime: ReturnType<typeof getSubagentRuntimeContext>; extensionApi: ReturnType<typeof createOfflinePi> }> = [];
 
     boundary.createAgentSession.mockImplementation(async (options: any) => {
       const session = createOfflineSession();
       const extensionApi = createOfflinePi();
-      const runtime = getSubagentRuntimeContext();
-      setups.push({ options, session, extensionApi, runtime });
+      runtimes.push({ options, runtime: getSubagentRuntimeContext(), extensionApi });
       sessions.push(session);
-
-      // This is how Pi loads an extension while binding a child session. The
-      // real AsyncLocalStorage context must make the root extension inert.
+      // Pi binds the extension while the session is initialized. ALS must make
+      // that registration inert without sharing root state between runs.
       extension(extensionApi.api as any);
-
-      creationCount++;
-      if (creationCount === 1) {
-        firstSetupEntered.resolve();
-        await releaseFirstSetup.promise;
-      } else if (creationCount === 2) {
-        secondSetupEntered.resolve();
-      } else if (creationCount === 3) {
-        reviewerSetupEntered.resolve();
-      }
       return { session };
     });
 
@@ -617,108 +606,31 @@ describe("offline extension headless lifecycle", () => {
       await listener(api, "session_start")({}, ctx);
       started = true;
       const rootAgent = api.tools.find((tool) => tool.name === "Agent")!;
+      const first = rootAgent.execute("root-1", { agent: "implementer", prompt: "first root" }, undefined, undefined, ctx);
+      await vi.waitFor(() => expect(runtimes).toHaveLength(1));
+      const second = rootAgent.execute("root-2", { agent: "scout", prompt: "second root" }, undefined, undefined, ctx);
+      await vi.waitFor(() => expect(runtimes).toHaveLength(2));
 
-      // Keep the first session setup suspended while a second root agent starts.
-      // The two actual AsyncLocalStorage contexts must retain separate parents.
-      const firstRootResult = rootAgent.execute("root-1", {
-        agent: "implementer",
-        prompt: "Implement the change",
-      }, undefined, undefined, ctx);
-      await firstSetupEntered.promise;
-      const secondRootResult = rootAgent.execute("root-2", {
-        agent: "implementer",
-        prompt: "Implement another change",
-      }, undefined, undefined, ctx);
-      await secondSetupEntered.promise;
-
-      expect(setups).toHaveLength(2);
-      for (const setup of setups) {
-        expect(setup.runtime).toMatchObject({
-          isChildRuntime: true,
-          executeNestedAgent: expect.any(Function),
-        });
-        expect(Object.keys(setup.runtime!).sort()).toEqual(["executeNestedAgent", "isChildRuntime", "settings"]);
-        expect(setup.runtime!.settings).toMatchObject({
-          agent: expect.any(Object),
-          modelFor: expect.any(Function),
-          thinkingSettingFor: expect.any(Function),
-        });
-        expect(setup.runtime!.settings).not.toHaveProperty("mutate");
-        expect(setup.runtime!.settings).not.toHaveProperty("store");
-        expect(setup.runtime).not.toHaveProperty("manager");
-        expect(setup.runtime).not.toHaveProperty("coordinator");
-        expect(setup.runtime).not.toHaveProperty("pi");
-        expect(setup.runtime).not.toHaveProperty("parentId");
-        expect(setup.runtime).not.toHaveProperty("catalog");
+      expect(api.tools.map((tool) => tool.name)).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
+      for (const setup of runtimes) {
+        expect(setup.runtime).toMatchObject({ isChildRuntime: true });
+        expect(Object.keys(setup.runtime!)).toEqual(["isChildRuntime"]);
+        expect(setup.options.customTools).toBeUndefined();
+        expect(setup.options.tools).not.toContain("Agent");
         expect(setup.extensionApi.tools).toHaveLength(0);
         expect(setup.extensionApi.listeners).toHaveLength(0);
         expect(setup.options.resourceLoader.options.noExtensions).toBe(true);
-        expect(setup.options.customTools.map((tool: any) => tool.name)).toEqual(["Agent"]);
       }
       expect(getPiInstance()).toBe(api.api);
       expect(getSessionCtx()).toBe(ctx);
       expect(getManager()).not.toBeNull();
       expect(getCoordinator()).not.toBeNull();
-      expect(api.tools.map((tool) => tool.name)).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
 
-      releaseFirstSetup.resolve();
-      await Promise.all([setups[0].session.promptStarted, setups[1].session.promptStarted]);
-
-      const implementerProxy = setups[0].options.customTools[0];
-      const reviewerResult = implementerProxy.execute("nested-1", {
-        agent: "reviewer",
-        prompt: "Review the implementation",
-      }, undefined, undefined, ctx);
-      await reviewerSetupEntered.promise;
-
-      const reviewer = setups[2];
-      // The nested record remains attached to the implementer that invoked
-      // the local proxy, although child runtime context exposes no parent ID.
-      const manager = getManager()!;
-      const reviewerRecord = manager.listAgents().find((record) => record.display.type === "reviewer")!;
-      expect(reviewerRecord.hierarchy?.parentId).toEqual(expect.any(String));
-      expect(manager.getRecord(reviewerRecord.hierarchy!.parentId!)!.display.type).toBe("implementer");
-      expect(reviewer.runtime).toMatchObject({ isChildRuntime: true, executeNestedAgent: expect.any(Function) });
-      expect(reviewer.runtime!.settings).toBe(setups[0].runtime!.settings);
-      expect(reviewer.runtime).not.toHaveProperty("parentId");
-      expect(reviewer.options.resourceLoader.options.noExtensions).toBe(true);
-      expect(reviewer.options.customTools).toBeUndefined();
-      expect(reviewer.options.tools).not.toContain("Agent");
-      expect(reviewer.options.tools).not.toContain("StopAgent");
-      expect(reviewer.options.tools).not.toContain("AgentStatus");
-      expect(reviewer.options.tools).not.toContain("AgentContinue");
-      expect(reviewer.extensionApi.tools).toHaveLength(0);
-      expect(reviewer.extensionApi.listeners).toHaveLength(0);
-
-      await reviewer.session.promptStarted;
-      expect(reviewer.session.setActiveToolsByName).toHaveBeenLastCalledWith(["read", "grep"]);
-      reviewer.session.finish("Reviewer result");
-      const nestedResult = await reviewerResult;
-      expect(nestedResult).toMatchObject({
-        content: [expect.objectContaining({ text: expect.stringContaining("Reviewer result") })],
-      });
-      expect(nestedResult).not.toHaveProperty("isError");
-      // The proxy re-enters its child ALS only for its bound call; neither the
-      // foreground result nor its completion can leak into root delivery.
-      expect(getSubagentRuntimeContext()).toBeUndefined();
+      sessions[0]!.finish("First result");
+      sessions[1]!.finish("Second result");
+      await expect(first).resolves.toMatchObject({ content: [expect.objectContaining({ text: expect.stringContaining("First result") })] });
+      await expect(second).resolves.toMatchObject({ content: [expect.objectContaining({ text: expect.stringContaining("Second result") })] });
       expect(api.api.sendMessage).not.toHaveBeenCalled();
-
-      setups[0].session.finish("Implementer result");
-      setups[1].session.finish("Second implementer result");
-      await expect(firstRootResult).resolves.toMatchObject({
-        content: [expect.objectContaining({ text: expect.stringContaining("Implementer result") })],
-      });
-      await expect(secondRootResult).resolves.toMatchObject({
-        content: [expect.objectContaining({ text: expect.stringContaining("Second implementer result") })],
-      });
-      expect(api.api.sendMessage).not.toHaveBeenCalled();
-
-      await listener(api, "session_shutdown")({}, ctx);
-      started = false;
-      expect(sessions).toHaveLength(3);
-      expect(sessions.every((session) => session.dispose.mock.calls.length === 1)).toBe(true);
-      expect(getManager()).toBeNull();
-      expect(getCoordinator()).toBeNull();
     } finally {
       if (started) await listener(api, "session_shutdown")({}, ctx);
     }

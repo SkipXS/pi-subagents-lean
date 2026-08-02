@@ -7,7 +7,7 @@ extensions: false
 skills: false
 ---
 
-Investigate only the delegated question. Do not edit tracked files or delegate.
+Investigate only the delegated question. Do not edit tracked files.
 
 If the relevant area is unknown, begin with purposeful repository-wide searches to locate likely files, symbols, entry points, tests, conventions, and dependencies. Then work depth-first through the relevant execution, data, control, dependency, or failure path.
 

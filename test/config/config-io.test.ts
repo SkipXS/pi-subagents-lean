@@ -44,19 +44,6 @@ afterEach(() => {
 });
 
 describe("config I/O paths", () => {
-  it("normalizes nesting depth to 1 or 2", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    vi.resetModules();
-    const { normalizeMaxNestingDepth } = await import("../../src/config/config-io.ts");
-    expect(normalizeMaxNestingDepth(undefined)).toBe(2);
-    expect(normalizeMaxNestingDepth("invalid")).toBe(2);
-    expect(normalizeMaxNestingDepth("")).toBe(2);
-    expect(normalizeMaxNestingDepth(0)).toBe(1);
-    expect(normalizeMaxNestingDepth(1.9)).toBe(1);
-    expect(normalizeMaxNestingDepth(2)).toBe(2);
-    expect(normalizeMaxNestingDepth(3)).toBe(2);
-    expect(normalizeMaxNestingDepth(4)).toBe(2);
-  });
   it.each([
     ["is absent", {}, "legacy/model"],
     ["is explicitly null", { scout: null }, null],
@@ -162,6 +149,9 @@ describe("config I/O paths", () => {
         widgetShowStartTime: false,
         showCost: true,
         defaultMaxTurns: 40,
+        delegate_to: ["scout"],
+        max_child_agents: 2,
+        maxNestingDepth: 2,
         orchestrationPrompt: false,
       },
       concurrency: { default: 4 },
@@ -173,6 +163,9 @@ describe("config I/O paths", () => {
     expect(config.agent).not.toHaveProperty("widgetShowStartTime");
     expect(config.agent).not.toHaveProperty("showCost");
     expect(config.agent).not.toHaveProperty("defaultMaxTurns");
+    expect(config.agent).not.toHaveProperty("delegate_to");
+    expect(config.agent).not.toHaveProperty("max_child_agents");
+    expect(config.agent).not.toHaveProperty("maxNestingDepth");
     expect(config.agent.orchestrationPrompt).toBe(false);
   });
 
@@ -188,14 +181,23 @@ describe("config I/O paths", () => {
     const result = updateConfigAtomic((config) => {
       (config.agent as Record<string, unknown>).widgetCompact = true;
       (config.agent as Record<string, unknown>).defaultMaxTurns = 40;
+      (config.agent as Record<string, unknown>).delegate_to = ["scout"];
+      (config.agent as Record<string, unknown>).max_child_agents = 2;
+      (config.agent as Record<string, unknown>).maxNestingDepth = 2;
       config.agent.forceBackground = true;
     });
     expect(result.config.agent.forceBackground).toBe(true);
     expect(result.config.agent).not.toHaveProperty("widgetCompact");
     expect(result.config.agent).not.toHaveProperty("defaultMaxTurns");
+    expect(result.config.agent).not.toHaveProperty("delegate_to");
+    expect(result.config.agent).not.toHaveProperty("max_child_agents");
+    expect(result.config.agent).not.toHaveProperty("maxNestingDepth");
     const configWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
     expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("widgetCompact");
     expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("defaultMaxTurns");
+    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("delegate_to");
+    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("max_child_agents");
+    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("maxNestingDepth");
   });
 
   it("rejects repair when neither a primary nor backup config exists", async () => {

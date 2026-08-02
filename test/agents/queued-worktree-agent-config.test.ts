@@ -17,7 +17,7 @@ vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
   getStore: () => ({
     createSubagentRuntimeSettings: () => ({
-      agent: { graceTurns: 6, forceBackground: false, maxNestingDepth: 2 },
+      agent: { graceTurns: 6, forceBackground: false },
       modelFor: (_type: string, parent: string, config?: { model?: string }) => config?.model ?? parent,
       thinkingSettingFor: () => ({ value: undefined }),
     }),

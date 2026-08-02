@@ -144,19 +144,6 @@ describe("AgentStatus tool execute behavior", () => {
     expect(result.content[0].text).toContain("delivery:failed");
   });
 
-  it("includes both parent and waiting-child hierarchy for a nested parent", async () => {
-    mockListAgents.mockReturnValue([
-      {
-        id: "nested-parent-123", display: { type: "implementer" }, lifecycle: { status: "running" },
-        hierarchy: { depth: 2, parentId: "root-parent-456", waitingOnChildId: "nested-child-789" },
-      },
-    ]);
-
-    const { executeAgentStatusTool } = await import("../../src/agents/agent-status.js");
-    const result = await executeAgentStatusTool("call_hierarchy", {}, undefined, undefined, {} as any);
-
-    expect(result.content[0].text).toContain("parent:root-par depth:2 waiting:nested-c");
-  });
 
   it("always includes nudge message", async () => {
     mockListAgents.mockReturnValue([]);

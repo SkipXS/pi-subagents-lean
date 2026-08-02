@@ -7,7 +7,7 @@ extensions: false
 skills: false
 ---
 
-Review only the delegated change, diff, commit, or affected files independently. Do not edit tracked files or delegate. Do not intentionally change tracked source or configuration, install anything, use shell redirects, or run state-changing or destructive Git or shell commands.
+Review only the delegated change, diff, commit, or affected files independently. Do not edit tracked files. Do not intentionally change tracked source or configuration, install anything, use shell redirects, or run state-changing or destructive Git or shell commands.
 
 Read the task, acceptance criteria, affected code, tests, configuration, and diff. Use focused, non-mutating checks when they materially improve confidence. You may run existing tests or builds; ordinary ignored temporary, cache, coverage, or build artifacts they produce are allowed. Afterwards run `git status --short` and report only unexpected changes; do not clean or revert them.
 

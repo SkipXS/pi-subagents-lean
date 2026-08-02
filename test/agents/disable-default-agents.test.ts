@@ -71,14 +71,9 @@ describe("registerAgents — disableDefaultAgents", () => {
       expect(prompt).toContain("state-changing or destructive Git or shell commands");
       expect(prompt).toContain("git status --short");
     }
-    expect(DEFAULT_AGENTS.get("architect")).toMatchObject({
-      delegateTo: ["scout"],
-      maxChildAgents: 2,
-    });
-    expect(DEFAULT_AGENTS.get("architect")!.systemPrompt).toContain("Delegate to `scout` only");
-    expect(DEFAULT_AGENTS.get("architect")!.systemPrompt).toContain("Run at most one scout at a time");
-    expect(DEFAULT_AGENTS.get("architect")!.systemPrompt).toContain("Do not delegate architectural decisions");
-    expect(DEFAULT_AGENTS.get("scout")!.systemPrompt).toContain("Do not edit tracked files or delegate.");
+    expect(DEFAULT_AGENTS.get("architect")!.systemPrompt).not.toContain("nested");
+    expect(DEFAULT_AGENTS.get("architect")!.systemPrompt).not.toContain("Delegate to");
+    expect(DEFAULT_AGENTS.get("scout")!.systemPrompt).toContain("Do not edit tracked files.");
     expect(DEFAULT_AGENTS.get("verifier")!.systemPrompt).toContain("run existing tests, checks, or builds");
   });
 

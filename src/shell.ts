@@ -14,7 +14,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "./agents/agent-manager.js";
 import type { SpawnCoordinator } from "./spawn/spawn-coordinator.js";
-import { ConfigStore, type SubagentRuntimeSettings } from "./config/config-store.js";
+import { ConfigStore } from "./config/config-store.js";
 
 // ============================================================================
 // Shell type
@@ -104,39 +104,16 @@ export function setCoordinator(c: SpawnCoordinator | null): void {
 // Subagent runtime context
 // ============================================================================
 
-/** The sole scoped operation available to code executing in a child runtime. */
-export type NestedAgentExecutor = (
-  params: Record<string, unknown>,
-  signal: AbortSignal | undefined,
-  ctx: ExtensionContext,
-) => Promise<unknown>;
-
 /**
- * Async context visible to a child session. Root collaborators and parent
- * metadata intentionally remain inside the bound executor's closure.
+ * Opaque marker for a session created by an agent run. It is used solely to
+ * keep this extension's root tools and shell state out of that session.
  */
 const subagentRuntimeContextBrand = Symbol("subagent runtime context");
 
-/**
- * Opaque child context. The unexported symbol prevents structural construction
- * in TypeScript; runtime membership is enforced by the private WeakSet below.
- */
 export interface SubagentRuntimeContext {
   readonly isChildRuntime: true;
-  /**
-   * Present only for a manager-accepted parent with a bound nested executor.
-   * Executor-less child runs are deliberately inert leaves.
-   */
-  readonly executeNestedAgent?: NestedAgentExecutor;
-  /** Detached immutable values and resolvers captured before entering ALS. */
-  readonly settings: SubagentRuntimeSettings;
   readonly [subagentRuntimeContextBrand]: true;
 }
-
-/** A child runtime that was given the manager-bound nested Agent capability. */
-export type NestedAgentRuntimeContext = SubagentRuntimeContext & {
-  readonly executeNestedAgent: NestedAgentExecutor;
-};
 
 const subagentRuntime = new AsyncLocalStorage<SubagentRuntimeContext>();
 const registeredSubagentRuntimes = new WeakSet<object>();
@@ -150,17 +127,17 @@ const registeredSubagentRuntimes = new WeakSet<object>();
 let legacySubagentSpawnDepth = 0;
 
 /**
- * @deprecated Use a manager-created child runtime instead. This only marks
- * extension registration as inert for compatibility; it cannot isolate async
- * work or grant access to root shell controls. Pair with exit in finally.
+ * @deprecated Use the AsyncLocalStorage session marker instead. This only
+ * marks extension registration as inert for compatibility; it cannot isolate
+ * async work or grant access to root shell controls. Pair with exit in finally.
  */
 export function enterSubagentSpawn(): void {
   legacySubagentSpawnDepth++;
 }
 
 /**
- * @deprecated Use AsyncLocalStorage child runtimes instead. This cannot clear
- * or bypass an active child runtime's root shell guards.
+ * @deprecated This cannot clear or bypass an active isolated session's root
+ * shell guards.
  */
 export function exitSubagentSpawn(): void {
   legacySubagentSpawnDepth = Math.max(0, legacySubagentSpawnDepth - 1);
@@ -175,21 +152,9 @@ export function isInsideSubagentSpawn(): boolean {
 }
 
 /** Create the only kind of context permitted in child AsyncLocalStorage. */
-export function createSubagentRuntimeContext(
-  executeNestedAgent: NestedAgentExecutor | undefined,
-  settings: SubagentRuntimeSettings,
-): SubagentRuntimeContext {
-  if (executeNestedAgent !== undefined && typeof executeNestedAgent !== "function") {
-    throw new TypeError("Child subagent runtime executor must be a function");
-  }
-  if (settings === null || typeof settings !== "object") {
-    throw new TypeError("Child subagent runtime settings must be an object");
-  }
-
+export function createSubagentRuntimeContext(): SubagentRuntimeContext {
   const context: SubagentRuntimeContext = Object.freeze({
     isChildRuntime: true,
-    ...(executeNestedAgent ? { executeNestedAgent } : {}),
-    settings,
     [subagentRuntimeContextBrand]: true as const,
   });
   registeredSubagentRuntimes.add(context);

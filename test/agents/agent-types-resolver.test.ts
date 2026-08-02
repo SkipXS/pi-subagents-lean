@@ -24,39 +24,10 @@ import type { AgentConfig } from "../../src/types.ts";
 /* ------------------------------------------------------------------ */
 
 describe("EXCLUDED_TOOL_NAMES", () => {
-  it("contains 'Agent' to prevent sub-subagent spawning", () => {
+  it("contains Agent and keeps it out of every session tool policy", () => {
     expect(EXCLUDED_TOOL_NAMES).toContain("Agent");
-  });
-});
-
-describe("nested Agent proxy visibility", () => {
-  it("keeps the locally registered Agent proxy visible for an eligible child even with a tools whitelist", () => {
-    expect(resolveVisibleTools({
-      activeTools: ["read", "Agent"], tools: ["read"], allowNestedAgent: true,
-    })).toEqual(["read", "Agent"]);
-    expect(resolveSessionAllowedTools({
-      registeredTools: ["read"], tools: ["read"], allowNestedAgent: true,
-    })).toEqual(["read", "Agent"]);
-  });
-
-  it("keeps the proxy through unrestricted and blacklist policies", () => {
-    for (const tools of [undefined, true] as const) {
-      expect(resolveSessionAllowedTools({
-        registeredTools: ["read"], tools, allowNestedAgent: true,
-      })).toEqual(["read", "Agent"]);
-    }
-    expect(resolveVisibleTools({
-      activeTools: ["read", "Agent"], excludeTools: ["read"], allowNestedAgent: true,
-    })).toEqual(["Agent"]);
-  });
-
-  it("retains Agent as the sole control tool when an eligible delegator has tools disabled", () => {
-    expect(resolveVisibleTools({
-      activeTools: ["read", "Agent"], tools: false, allowNestedAgent: true,
-    })).toEqual(["Agent"]);
-    expect(resolveSessionAllowedTools({
-      registeredTools: ["read"], tools: false, allowNestedAgent: true,
-    })).toEqual(["Agent"]);
+    expect(resolveVisibleTools({ activeTools: ["read", "Agent"], tools: ["read", "Agent"] })).toEqual(["read"]);
+    expect(resolveSessionAllowedTools({ registeredTools: ["read", "Agent"], tools: undefined })).toEqual(["read"]);
   });
 });
 

@@ -24,8 +24,6 @@ import {
   getAgentConfig,
   getConfig,
   resolveAgentConfig,
-  resolveTypeInCatalog,
-  snapshotRegisteredAgentCatalog,
   resolveSessionAllowedTools,
   resolveVisibleTools,
 } from "./agent-types.js";
@@ -35,11 +33,9 @@ import { GIT_EXEC_TIMEOUT_MS } from "../utils.js";
 import { buildAgentPrompt, type PromptExtras } from "../prompt/prompts.js";
 import { preloadSkills, loadSkillMeta, type SkillMeta } from "../prompt/skill-loader.js";
 import { type CompactionInfo, type EnvInfo, type RunCallbacks, type RunTunables, SHORT_ID_LENGTH } from "../types.js";
-import { getEffectiveMaxChildAgents, type AgentConfig, type SubagentType, type SystemPromptMode } from "./types.js";
-import { createSubagentRuntimeContext, getCoordinator, getManager, getStore, getSubagentRuntimeContext, runWithSubagentRuntime, type NestedAgentExecutor, type NestedAgentRuntimeContext, type SubagentRuntimeContext } from "../shell.js";
+import { type AgentConfig, type SubagentType, type SystemPromptMode } from "./types.js";
+import { createSubagentRuntimeContext, getStore, getSubagentRuntimeContext, runWithSubagentRuntime } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
-import { createNestedAgentProxy } from "./nested-agent-proxy.js";
-import { createNestedAgentExecutor } from "./tool-execution.js";
 import { DEFAULT_GRACE_TURNS, CUSTOM_PROMPT_PATH } from "../config/config-io.js";
 import { revalidateWorktreePath } from "../spawn/worktree-validator.js";
 
@@ -127,8 +123,6 @@ export interface RunOptions extends RunTunables, RunCallbacks, SupplementalUsage
   pi: ExtensionAPI;
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `explorer#a1b2c3d4`). */
   agentId?: string;
-  /** Hierarchy depth of this record; first-level children are depth 1. */
-  nestingDepth?: number;
   /** Override working directory (resolved worktree path). */
   cwd?: string;
   /** Parent repo cwd retained for execution-boundary worktree revalidation. */
@@ -137,10 +131,6 @@ export interface RunOptions extends RunTunables, RunCallbacks, SupplementalUsage
   worktreeSelectionPath?: string;
   /** Parent abort signal — when aborted, the subagent is also stopped. */
   signal?: AbortSignal;
-  /** Immutable full catalog inherited from the root spawn boundary. */
-  agentCatalog?: ReadonlyMap<string, AgentConfig>;
-  /** Bound by the trusted coordinator before this runner enters child ALS. */
-  nestedExecutor?: NestedAgentExecutor;
   /** Detached at the accepted spawn boundary; never read from the root in ALS. */
   runtimeSettings?: SubagentRuntimeSettings;
 }
@@ -357,9 +347,9 @@ function resolveSystemPromptSources(
   cwd: string,
   notify: (msg: string) => void,
   settings: SubagentRuntimeSettings,
-): { mode: SystemPromptMode; extras: Pick<PromptExtras, "parentSystemPrompt" | "customSystemPrompt" | "contextFiles" | "nestedDelegation"> } {
+): { mode: SystemPromptMode; extras: Pick<PromptExtras, "parentSystemPrompt" | "customSystemPrompt" | "contextFiles"> } {
   const mode = settings.agent.systemPromptMode;
-  const extras: Pick<PromptExtras, "parentSystemPrompt" | "customSystemPrompt" | "contextFiles" | "nestedDelegation"> = {};
+  const extras: Pick<PromptExtras, "parentSystemPrompt" | "customSystemPrompt" | "contextFiles"> = {};
 
   // Fetch parent system prompt for inherit mode
   if (mode === "inherit") {
@@ -400,24 +390,6 @@ function resolveSystemPromptSources(
   return { mode, extras };
 }
 
-/**
- * Phase 1: Resolve system prompt from agent config, skills, and env info.
- *
- * @param resolverExtras  Partial extras from resolveSystemPromptSources (mode-specific prompts + context files).
- */
-function resolvePermittedChildRoles(
-  config: AgentConfig,
-  catalog: ReadonlyMap<string, AgentConfig>,
-): Array<{ name: string; description: string; hidden?: boolean }> {
-  const result = new Map<string, { name: string; description: string; hidden?: boolean }>();
-  for (const requested of config.delegateTo ?? []) {
-    const name = resolveTypeInCatalog(catalog, requested);
-    const child = name ? catalog.get(name) : undefined;
-    if (name && child) result.set(name, { name, description: child.description, hidden: child.hidden });
-  }
-  return [...result.values()];
-}
-
 function buildPrompt(
   type: SubagentType,
   agentConfig: AgentConfig | undefined,
@@ -425,7 +397,7 @@ function buildPrompt(
   cwd: string,
   env: EnvInfo,
   systemPromptMode: SystemPromptMode = "replace",
-  resolverExtras: Pick<PromptExtras, "parentSystemPrompt" | "customSystemPrompt" | "contextFiles" | "nestedDelegation"> = {},
+  resolverExtras: Pick<PromptExtras, "parentSystemPrompt" | "customSystemPrompt" | "contextFiles"> = {},
 ): string {
   const extras: PromptExtras = { ...resolverExtras };
   if (Array.isArray(agentConfig?.preloadSkills)) {
@@ -560,8 +532,6 @@ async function initSession(
   cwd: string,
   loader: DefaultResourceLoader,
   extToolMap: Map<string, string[]>,
-  allowNestedAgent: boolean,
-  nestedRuntime?: NestedAgentRuntimeContext,
 ) {
   // Model and thinking precedence is resolved at the spawn boundary. The
   // runner consumes those resolved values and only inherits from its parent
@@ -578,9 +548,7 @@ async function initSession(
       registeredTools: agentConfig?.registeredTools?.length ? agentConfig.registeredTools : BUILTIN_TOOL_NAMES,
       tools: agentConfig?.tools,
       extToolMap,
-      allowNestedAgent,
     }),
-    customTools: allowNestedAgent && nestedRuntime ? [createNestedAgentProxy(nestedRuntime)] : undefined,
     resourceLoader: loader,
   };
   if (thinkingLevel) sessionOpts.thinkingLevel = thinkingLevel;
@@ -614,10 +582,8 @@ async function createAndConfigureSession(
   loader: DefaultResourceLoader,
   extToolMap: Map<string, string[]>,
   notify: (msg: string) => void,
-  allowNestedAgent: boolean,
-  nestedRuntime?: NestedAgentRuntimeContext,
 ): Promise<AgentSession> {
-  const { session } = await initSession(ctx, options, agentConfig, type, cwd, loader, extToolMap, allowNestedAgent, nestedRuntime);
+  const { session } = await initSession(ctx, options, agentConfig, type, cwd, loader, extToolMap);
   try {
     const baseName = agentConfig?.name ?? type;
     session.setSessionName(
@@ -635,7 +601,6 @@ async function createAndConfigureSession(
       excludeTools: agentConfig?.excludeTools,
       extToolMap,
       notify,
-      allowNestedAgent,
     });
     if (filteredTools) session.setActiveToolsByName(filteredTools);
     return session;
@@ -746,32 +711,17 @@ export async function runAgent(
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
-  // Extension setup inherits this async-local context. A child runtime can
-  // therefore register only its local Agent proxy without ever replacing the
-  // root shell or racing parallel session setup. Descendants inherit the
-  // detached settings captured at their root spawn boundary.
-  const inheritedRuntime = getSubagentRuntimeContext();
-  let settings = options.runtimeSettings ?? inheritedRuntime?.settings;
-  if (!settings) {
-    // A well-formed child context always carries settings. Keep this branch
-    // explicit so no root getter can be evaluated from child ALS.
-    if (inheritedRuntime) throw new Error("Child runtime is missing detached settings");
-    settings = getStore().createSubagentRuntimeSettings();
+  // Every agent session is entered through a fresh ALS context before resource
+  // and extension loading. The marker makes this extension's root tools inert
+  // in the child session; it carries no delegation capability.
+  if (getSubagentRuntimeContext()) {
+    throw new Error("Nested agent execution is unavailable from a child runtime");
   }
-  const manager = inheritedRuntime ? null : getManager();
-  const coordinator = inheritedRuntime ? null : getCoordinator();
-  const nestedExecutor = options.nestedExecutor
-    ?? (options.agentId && manager && coordinator
-      ? createNestedAgentExecutor(options.agentId, options.pi, manager, coordinator, settings)
-      : undefined);
-  // Every agent session, including legacy/direct runs without a manager, is
-  // isolated before resource or extension loading. Only a manager-bound
-  // executor grants the local Agent proxy; executor-less runtimes are inert
-  // leaves that still prevent an extension's index.ts from touching the root.
-  const nestedRuntime = createSubagentRuntimeContext(nestedExecutor, settings);
+  const settings = options.runtimeSettings ?? getStore().createSubagentRuntimeSettings();
+  const childContext = createSubagentRuntimeContext();
   return runWithSubagentRuntime(
-    nestedRuntime,
-    () => runAgentImpl(ctx, type, prompt, options, settings, nestedRuntime),
+    childContext,
+    () => runAgentImpl(ctx, type, prompt, options, settings),
   );
 }
 
@@ -781,7 +731,6 @@ async function runAgentImpl(
   prompt: string,
   options: RunOptions,
   settings: SubagentRuntimeSettings,
-  nestedRuntime?: SubagentRuntimeContext,
 ): Promise<RunResult> {
   if (options.signal?.aborted) {
     const error = new Error("Agent run aborted before setup");
@@ -789,11 +738,8 @@ async function runAgentImpl(
     throw error;
   }
 
-  // A queued run uses the definition selected at enqueue time. Registry
-  // lookup remains only for legacy direct callers that did not provide a snapshot.
-  // Every run resolves children against the catalog captured with its root
-  // invocation, never against the mutable global registry.
-  const agentCatalog = options.agentCatalog ?? snapshotRegisteredAgentCatalog();
+  // A queued run uses the definition selected at enqueue time. Registry lookup
+  // remains only for legacy direct callers that did not provide a snapshot.
   const agentConfig = options.agentConfig ?? getAgentConfig(type);
   if (!agentConfig) throw new Error(`Unknown agent type: ${type}`);
   const config = options.agentConfig
@@ -833,26 +779,6 @@ async function runAgentImpl(
   // Resolve system prompt mode + source prompts + context files
   const { mode, extras: promptExtras } = resolveSystemPromptSources(ctx, effectiveCwd, bufferNotify, settings);
 
-  const maxChildAgents = getEffectiveMaxChildAgents(agentConfig);
-  const nestedExecutorRuntime = typeof nestedRuntime?.executeNestedAgent === "function"
-    ? nestedRuntime as NestedAgentRuntimeContext
-    : undefined;
-  const canNest = nestedExecutorRuntime !== undefined
-    && (options.nestingDepth ?? 0) < settings.agent.maxNestingDepth;
-  const permittedChildRoles = canNest
-    ? resolvePermittedChildRoles(agentConfig, agentCatalog)
-    : [];
-  const allowNestedAgent = canNest
-    && maxChildAgents > 0
-    && permittedChildRoles.length > 0;
-  // A stale/unresolvable permitted role is an effective leaf: neither prompt
-  // guidance nor the local Agent proxy is exposed for it.
-  if (allowNestedAgent && permittedChildRoles.length > 0) {
-    promptExtras.nestedDelegation = {
-      agents: permittedChildRoles,
-      maxChildren: maxChildAgents,
-    };
-  }
   const systemPrompt = buildPrompt(
     type, agentConfig, config, effectiveCwd, env,
     mode, promptExtras,
@@ -860,7 +786,7 @@ async function runAgentImpl(
   const { loader, reloadAndMap } = createResourceLoader(config, agentConfig, effectiveCwd, systemPrompt, bufferNotify);
   const { extToolMap } = await reloadAndMap();
   const session = await createAndConfigureSession(
-    ctx, options, agentConfig, type, effectiveCwd, loader, extToolMap, bufferNotify, allowNestedAgent, nestedExecutorRuntime,
+    ctx, options, agentConfig, type, effectiveCwd, loader, extToolMap, bufferNotify,
   );
   // Session setup is asynchronous, so shutdown may have aborted the run while
   // the session was being created. Never publish or prompt a late session.

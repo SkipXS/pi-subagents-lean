@@ -19,7 +19,7 @@ import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-
 import { parseModelKey, findModelInRegistry, parseThinkingLevel } from "../utils.js";
 import { normalizeThinkingLevel } from "../models/thinking.js";
 import { requireAvailableModel } from "../models/model-availability.js";
-import { runWithSubagentRuntime, type NestedAgentExecutor, type SubagentRuntimeContext, getSubagentRuntimeContext } from "../shell.js";
+import { getSubagentRuntimeContext } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import type { AgentManager } from "./agent-manager.js";
 import type { SpawnCoordinator } from "../spawn/spawn-coordinator.js";
@@ -94,16 +94,10 @@ export function buildAgentDetails(
   record: AgentRecord,
   opts?: { includeStats?: boolean; includeStatus?: boolean },
 ): Record<string, unknown> {
-  const hierarchy = record.hierarchy;
   const details: Record<string, unknown> = {
     type: record.display.type,
     description: record.display.description,
   };
-  if (opts?.includeStats || opts?.includeStatus) {
-    details.depth = hierarchy?.depth ?? 1;
-    if (hierarchy?.parentId) details.parentId = hierarchy.parentId;
-    if (hierarchy?.waitingOnChildId) details.waitingOnChildId = hierarchy.waitingOnChildId;
-  }
 
   if (record.display.worktreePath) {
     details.worktreePath = record.display.worktreePath;
@@ -275,7 +269,6 @@ export async function executeAgentTool(
   // registry for a worktree name: it may be an override of a parent type.
   let resolvedType: string | undefined;
   let agentConfig: AgentConfig | undefined;
-  let agentCatalog: ReadonlyMap<string, AgentConfig> | undefined;
   if (trustedWorktreeDir) {
     // Repeat validation directly before reading project-controlled overlays.
     // A deleted or swapped path must not contribute an agent definition.
@@ -290,9 +283,6 @@ export async function executeAgentTool(
     if (signal?.aborted) return cancelledResult();
     resolvedType = resolveTypeInCatalog(catalog, type);
     agentConfig = resolvedType ? catalog.get(resolvedType) : undefined;
-    // Retain this invocation-local overlay with the parent record. Nested
-    // children must resolve roles against the same worktree definitions.
-    agentCatalog = new Map(catalog);
   } else {
     resolvedType = resolveType(type);
     if (!resolvedType) {
@@ -387,7 +377,6 @@ export async function executeAgentTool(
       worktreeLabel,
       worktreeParentCwd: validatedWorktreePath ? parentCwd : undefined,
       worktreeSelectionPath: validatedWorktreePath ? rawWorktreePath : undefined,
-      agentCatalog,
       invocation: { modelName, thinkingLevel, maxTurns },
       runtimeSettingsSnapshot,
       runInBackground: shouldRunInBackground,
@@ -422,7 +411,7 @@ export async function executeAgentTool(
   // Foreground: record.execution.promise is already awaited by coordinator.spawn()
   const details = buildAgentDetails(record, { includeStats: true });
 
-  // The manager bridges the parent signal to its own child controller. Once
+  // The manager bridges the parent signal to its own execution controller. Once
   // the foreground tool call is cancelled, never turn its partial response
   // into a misleading successful Agent result.
   if (signal?.aborted || record.lifecycle.status === "aborted" || record.lifecycle.status === "stopped") {
@@ -434,117 +423,6 @@ export async function executeAgentTool(
   }
 
   return successResult(formatResultContent(record), details);
-}
-
-// ============================================================================
-// Nested Agent proxy
-// ============================================================================
-
-/**
- * Bind root-owned collaborators to the only operation exposed to a child
- * runtime. The returned closure always acts for this parent and cannot become
- * a general root-spawn capability.
- */
-export function createNestedAgentExecutor(
-  parentId: string,
-  pi: Parameters<AgentManager["spawn"]>[0],
-  manager: Pick<AgentManager, "preflightNested">,
-  coordinator: Pick<SpawnCoordinator, "spawnNested">,
-  settings = getStore().createSubagentRuntimeSettings(),
-): NestedAgentExecutor {
-  return (params, signal, ctx) => executeBoundNestedAgent(parentId, pi, manager, coordinator, settings, params, signal, ctx);
-}
-
-/** Invoke the child runtime's scoped nested-Agent capability. */
-export async function executeNestedAgentTool(
-  runtime: SubagentRuntimeContext,
-  _toolCallId: string,
-  params: Record<string, unknown>,
-  signal: AbortSignal | undefined,
-  _onUpdate: ((update: any) => void) | undefined,
-  ctx: ExtensionContext,
-): Promise<any> {
-  const executeNestedAgent = runtime.executeNestedAgent;
-  if (!executeNestedAgent) return errorResult("Nested agent execution is unavailable");
-  // Tool callbacks can be invoked after session setup has returned, so enter
-  // the captured child context again before using the bound capability.
-  return runWithSubagentRuntime(runtime, () => executeNestedAgent(params, signal, ctx));
-}
-
-async function executeBoundNestedAgent(
-  parentId: string,
-  pi: Parameters<AgentManager["spawn"]>[0],
-  manager: Pick<AgentManager, "preflightNested">,
-  coordinator: Pick<SpawnCoordinator, "spawnNested">,
-  settings: SubagentRuntimeSettings,
-  params: Record<string, unknown>,
-  signal: AbortSignal | undefined,
-  ctx: ExtensionContext,
-): Promise<any> {
-  if (signal?.aborted) return cancelledResult();
-  if (params.run_in_background === true) return errorResult("Nested agents must run in the foreground");
-  if (typeof params.worktree_path === "string" && params.worktree_path.trim() !== "") {
-    return errorResult("Nested agents cannot select a worktree");
-  }
-
-  const requestedType = typeof params.agent === "string" ? params.agent.trim() : "";
-  const preflight = manager.preflightNested(parentId, requestedType);
-  if (!preflight.ok) return errorResult(preflight.error);
-  const { type: resolvedType, agentConfig } = preflight;
-
-  const prompt = typeof params.prompt === "string" ? params.prompt : "";
-  if (!prompt.trim()) return errorResult("Agent prompt is required");
-  const description = (typeof params.description === "string" && params.description.trim())
-    || prompt.split("\n")[0]!.slice(0, 80) || prompt.slice(0, 80);
-  const parentModelId = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-  const modelSetting = typeof settings.modelSettingForMode === "function"
-    ? settings.modelSettingForMode(resolvedType, parentModelId, agentConfig)
-    : { value: settings.modelFor(resolvedType, parentModelId, agentConfig), source: "parent" as const, ecoConfigured: false };
-  let model: ReturnType<typeof findModelInRegistry>;
-  if (modelSetting.ecoConfigured) {
-    try {
-      model = await requireAvailableModel(modelSetting.value, ctx.modelRegistry, "Eco model");
-    } catch (error) {
-      if (signal?.aborted) return cancelledResult();
-      return errorResult(error instanceof Error ? error.message : String(error));
-    }
-  } else {
-    model = findModelInRegistry(modelSetting.value, ctx.modelRegistry, ctx.model);
-  }
-  const nestedThinking = typeof settings.thinkingSettingForMode === "function"
-    ? settings.thinkingSettingForMode(resolvedType, ctx.thinkingLevel, agentConfig)
-    : { ...settings.thinkingSettingFor(resolvedType, ctx.thinkingLevel, agentConfig), ecoConfigured: false };
-  const thinkingLevel = normalizeThinkingLevel(model, nestedThinking.value);
-
-  // Model authentication/availability is asynchronous. Do not accept a
-  // nested spawn after its public tool call has already been cancelled.
-  if (signal?.aborted) return cancelledResult();
-
-  try {
-    const { record } = await coordinator.spawnNested(parentId, pi, ctx, {
-      type: resolvedType,
-      agentConfig,
-      prompt,
-      description,
-      model,
-      modelKey: model ? `${model.provider}/${model.id}` : undefined,
-      maxTurns: agentConfig.maxTurns,
-      thinkingLevel,
-      graceTurns: settings.agent.graceTurns,
-      // AgentManager unconditionally inherits the private parent worktree and
-      // catalog at the nested boundary; nested callers cannot choose either.
-      invocation: { modelName: model?.id, thinkingLevel, maxTurns: agentConfig.maxTurns },
-      runInBackground: false,
-      signal,
-    });
-    const details = buildAgentDetails(record, { includeStats: true });
-    if (signal?.aborted || record.lifecycle.status === "aborted" || record.lifecycle.status === "stopped") return cancelledResult(details);
-    if (record.lifecycle.status === "error") return errorResult(`Agent failed: ${record.error || "unknown error"}`, details);
-    return successResult(formatResultContent(record), details);
-  } catch (err) {
-    if (signal?.aborted) return cancelledResult();
-    return errorResult(err instanceof Error ? err.message : String(err));
-  }
 }
 
 // ============================================================================
@@ -623,8 +501,8 @@ export async function executeStopAgentTool(
  * Execute the AgentContinue tool: continue an existing agent's session.
  *
  * Root-only by registration; this handler additionally rejects any call that
- * reaches it from a child runtime so nested sessions can never continue an
- * ancestor's session through a forwarded or legacy tool definition.
+ * reaches it from an isolated session so it can never continue another
+ * root session through a forwarded or legacy tool definition.
  */
 export async function executeContinueAgentTool(
   _toolCallId: string,

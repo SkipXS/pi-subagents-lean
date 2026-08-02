@@ -20,9 +20,13 @@ const { mockAgentConfig, mockRunAgent, mockExecuteAgentTurn } = vi.hoisted(() =>
 
 vi.mock("../../src/agents/agent-types.js", () => ({
   resolveType: vi.fn((name: string) => name),
-  resolveTypeInCatalog: vi.fn((catalog: Map<string, unknown>, name: string) => catalog.has(name) ? name : undefined),
-  snapshotAgentConfig: vi.fn((config: any) => ({ ...config, delegateTo: config.delegateTo && [...config.delegateTo] })),
-  snapshotRegisteredAgentCatalog: vi.fn(() => new Map()),
+  snapshotAgentConfig: vi.fn((config: any) => ({
+    ...config,
+    registeredTools: config.registeredTools && [...config.registeredTools],
+    tools: Array.isArray(config.tools) ? [...config.tools] : config.tools,
+    extensions: Array.isArray(config.extensions) ? [...config.extensions] : config.extensions,
+    skills: Array.isArray(config.skills) ? [...config.skills] : config.skills,
+  })),
   getAgentConfig: mockAgentConfig,
   discoverNewAgents: vi.fn(async () => 0),
 }));
@@ -63,7 +67,7 @@ vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
   getStore: () => ({
     createSubagentRuntimeSettings: () => ({
-      agent: { graceTurns: 6, forceBackground: false, showCost: false, maxNestingDepth: 2 },
+      agent: { graceTurns: 6, forceBackground: false, showCost: false },
       mode: "eco",
       modelFor: (_type: string, parent: string, config?: { model?: string }) => config?.model ?? parent,
       thinkingSettingFor: () => ({ value: undefined }),
@@ -95,25 +99,6 @@ function makeMockManager() {
         result: "done",
       };
       records.set(id, record);
-      return id;
-    }),
-    preflightNested: vi.fn((_parentId: string, type: string) => ({
-      ok: true,
-      parent: { hierarchy: { agentCatalog: new Map([[type, { name: type, description: "", systemPrompt: "" }]]) } },
-      type,
-      agentConfig: { name: type, description: "", systemPrompt: "" },
-    })),
-    spawnNested: vi.fn((parentId: string, pi: any, ctx: any, type: string, prompt: string, options: any) => {
-      const id = `nested-${records.size}`;
-      records.set(id, {
-        id,
-        display: { type, description: options.description },
-        lifecycle: { status: "running", startedAt: Date.now() },
-        execution: { promise: Promise.resolve("done") },
-        hierarchy: { parentId, depth: 2, childIds: [], delegateTo: [], maxChildAgents: 0 },
-        stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, turnCount: 1, compactionCount: 0 },
-        result: "done",
-      });
       return id;
     }),
     getRecord: vi.fn((id: string) => records.get(id)),
@@ -225,28 +210,6 @@ describe("SpawnCoordinator", () => {
     }
   });
 
-  it("keeps the accepted root snapshot for queued execution and its nested executor", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const acceptedSnapshot = Object.freeze({
-      agent: Object.freeze({ graceTurns: 3, forceBackground: false, showCost: false, maxNestingDepth: 2 }),
-      mode: "eco" as const,
-      modelFor: vi.fn(() => "accepted/eco"),
-      thinkingSettingFor: vi.fn(() => ({ value: "low" as const, source: "config-agent" as const })),
-      modelSettingForMode: vi.fn(() => ({ value: "accepted/eco", source: "config-agent" as const, ecoConfigured: true })),
-      thinkingSettingForMode: vi.fn(() => ({ value: "low" as const, source: "config-agent" as const, ecoConfigured: true })),
-    });
-
-    await coordinator.spawn(mockPi, ctx, {
-      type: "builder", prompt: "queued work", description: "Queued snapshot",
-      graceTurns: 6, runInBackground: true,
-      runtimeSettingsSnapshot: acceptedSnapshot as unknown as import("../../src/config/config-store.js").SubagentRuntimeSettings,
-    });
-
-    const options = manager.spawn.mock.calls[0][4];
-    expect(options.runtimeSettings).toBe(acceptedSnapshot);
-    expect(options.invocation.mode).toBe("eco");
-    expect(typeof options.nestedExecutorFactory("queued-parent")).toBe("function");
-  });
 
   it("snapshots an explicitly resolved agent config before handing it to the manager", async () => {
     const coordinator = new SpawnCoordinator(manager as any);
@@ -301,84 +264,6 @@ describe("SpawnCoordinator", () => {
     expect(manager.spawn.mock.calls[0][4].isBackground).toBe(false);
   });
 
-  it("awaits a nested foreground child without registering a background nudge", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    let resolveChild!: (value: string) => void;
-    const record: any = {
-      id: "nested-child",
-      display: { type: "scout", description: "Inspect" },
-      lifecycle: { status: "running", startedAt: Date.now() },
-      execution: { promise: new Promise<string>((resolve) => { resolveChild = resolve; }) },
-      hierarchy: { parentId: "parent", depth: 2, childIds: [], delegateTo: [], maxChildAgents: 0 },
-      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
-    };
-    manager.spawnNested.mockReturnValueOnce(record.id);
-    manager.getRecord.mockImplementation((id: string) => id === record.id ? record : undefined);
-
-    let settled = false;
-    const spawned = coordinator.spawnNested("parent", mockPi, ctx, {
-      type: "scout", prompt: "Inspect", description: "Inspect", graceTurns: 6, runInBackground: false,
-    }).then((result) => { settled = true; return result; });
-    await Promise.resolve();
-    expect(settled).toBe(false);
-    expect(manager.spawnNested).toHaveBeenCalledWith(
-      "parent", mockPi, ctx, "scout", "Inspect", expect.objectContaining({ isBackground: false }),
-    );
-
-    record.lifecycle.status = "completed";
-    resolveChild("done");
-    const result = await spawned;
-    expect(result.record.lifecycle.resultConsumed).toBe(true);
-    expect(coordinator.isBackground(result.agentId)).toBe(false);
-    vi.advanceTimersByTime(500);
-    expect(mockPi.sendMessage).not.toHaveBeenCalled();
-  });
-
-  it("inherits the parent worktree through the coordinator nested path", async () => {
-    const realManager = new AgentManager(undefined, { default: 1 });
-    const coordinator = new SpawnCoordinator(realManager);
-    const parentRun = new Promise<any>(() => {});
-    mockRunAgent.mockReturnValueOnce(parentRun).mockResolvedValueOnce({
-      responseText: "done", session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() }, aborted: false, turnLimited: false,
-    });
-    try {
-      const parentId = realManager.spawn(mockPi, ctx, "implementer", "parent", {
-        description: "parent",
-        worktreePath: "/parent-worktree",
-        worktreeLabel: "parent-label",
-        agentConfig: { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"] },
-        agentCatalog: new Map([["scout", { name: "scout", description: "", systemPrompt: "" }]]),
-      });
-      const result = await coordinator.spawnNested(parentId, mockPi, ctx, {
-        type: "scout", prompt: "child", description: "child", graceTurns: 6, runInBackground: false,
-        worktreePath: "/caller-worktree", worktreeLabel: "caller-label",
-      });
-
-      expect(mockRunAgent.mock.calls[1][3].cwd).toBe("/parent-worktree");
-      expect(result.record.display).toMatchObject({ worktreePath: "/parent-worktree", worktreeLabel: "parent-label" });
-    } finally {
-      realManager.dispose();
-    }
-  });
-
-  it("uses manager preflight before preparing a nested spawn", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    (manager.preflightNested as any).mockReturnValueOnce({ ok: false, error: "Child-agent budget exhausted" });
-
-    await expect(coordinator.spawnNested("parent", mockPi, ctx, {
-      type: "scout", prompt: "Inspect", description: "Inspect", graceTurns: 6, runInBackground: false,
-    })).rejects.toThrow("Child-agent budget exhausted");
-    expect(manager.spawnNested).not.toHaveBeenCalled();
-  });
-
-  it("rejects nested background requests before calling the manager", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-
-    await expect(coordinator.spawnNested("parent", mockPi, ctx, {
-      type: "scout", prompt: "Inspect", description: "Inspect", graceTurns: 6, runInBackground: true,
-    })).rejects.toThrow("Nested agents must run in the foreground");
-    expect(manager.spawnNested).not.toHaveBeenCalled();
-  });
 
   it("normalizes thinking before passing options and invocation to the manager", async () => {
     const coordinator = new SpawnCoordinator(manager as any);

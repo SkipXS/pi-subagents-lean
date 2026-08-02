@@ -47,8 +47,6 @@ export interface SubagentsConfig {
     orchestrationPrompt?: boolean;
     outputThinkingBufferSize?: number;
     finishedRetentionMinutes?: number;
-    /** Maximum subagent depth, including the initial child of the root session. */
-    maxNestingDepth?: number;
     [agentType: string]: string | null | undefined | boolean | number;
   };
   /** Persisted per-agent thinking overrides. */

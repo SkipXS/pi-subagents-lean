@@ -2,7 +2,8 @@
 
 ## Status
 
-Vorschlag zur schrittweisen Vereinfachung von `pi-subagents-lean`.
+Phase 3 ist auf diesem Branch umgesetzt. Dieses Dokument bleibt als Zielbild,
+Begründung und Akzeptanz-Checkliste erhalten.
 
 ## Entscheidung
 
@@ -180,9 +181,10 @@ Vor strukturellen Änderungen werden bestehende Integrationstests auf den gewün
 5. TUI-Abhängigkeiten erst entfernen, wenn keine verbleibenden Runtime-Imports existieren.
 6. Dokumentation auf toolbasierte Bedienung umstellen.
 
-Nach dieser Phase muss das Verhalten der vier Tools noch unverändert sein, einschließlich der vorübergehend noch vorhandenen Nested Delegation.
+Nach dieser Phase muss das Verhalten der vier Tools unverändert sein; die
+Ausführung bleibt auf direkte Root-Agents beschränkt.
 
-### Phase 3: Nested Delegation entfernen
+### Phase 3: Nested Delegation entfernen (umgesetzt)
 
 1. Das `Agent`-Proxy-Tool aus Subagent-Sessions entfernen.
 2. Child-Promptblöcke und Child-Kataloge entfernen.

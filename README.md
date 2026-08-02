@@ -21,7 +21,7 @@ the parent tool interface small.
   - [Dynamic catalog, discovery, and trust](#dynamic-catalog-discovery-and-trust)
   - [Frontmatter reference](#frontmatter-reference)
   - [Parent orchestration guidance](#parent-orchestration-guidance)
-  - [Nested delegation and concurrency](#nested-delegation-and-concurrency)
+  - [Root concurrency and queue](#root-concurrency-and-queue)
 - [Models, prompts, extensions, and skills](#models-prompts-extensions-and-skills)
 - [Headless operation and logs](#headless-operation-and-logs)
 - [Configuration reference](#configuration-reference)
@@ -62,14 +62,14 @@ orchestration guidance supplies the changing catalog and operating advice.
 
 | Parameter | Required | Meaning |
 |---|:---:|---|
-| `prompt` | yes | Task and relevant constraints for the child. |
+| `prompt` | yes | Task and relevant constraints for the root agent. |
 | `agent` | yes | Role to resolve from the current catalog. Names and `display_name` values resolve case-insensitively; use the canonical name shown by the catalog when practical. |
 | `description` | no | Short caller-facing label. If omitted, the first prompt line (up to 80 characters) is used. |
-| `run_in_background` | no | Return immediately and deliver a result notification later. Ignored in favor of `forceBackground: true`; unsupported for nested children. |
+| `run_in_background` | no | Return immediately and deliver one result notification later. `forceBackground: true` can make all root launches background. |
 | `worktree_path` | no | Root-only absolute path or parent-CWD-relative path inside a worktree of the parent repository. It is validated with Git. A trusted selected worktree may add a spawn-local `.pi/agents/` overlay. |
 
 The tool deliberately has no model, thinking, turn, or token parameters.
-Configure those through an agent definition or persistent/session settings. `worktree_path` is rejected for nested children.
+Configure those through an agent definition or persistent/session settings. Every `Agent` call is a root launch owned by the parent session.
 
 ### `AgentContinue`
 
@@ -78,10 +78,10 @@ finished agent on its existing session, reusing its model, working directory,
 output log, and stored `max_turns`/`grace_turns` limits. `run_in_background`
 is a mandatory boolean (strict-mode tool schemas cannot declare optional
 parameters): pass `true` to acknowledge immediately with a completion
-notification, or `false` to await the new execution's result. Only retained depth-1
-agents that completed successfully can be continued; running, queued,
-unsettled, stopped, aborted, turn-limited, or failed agents are rejected, as
-are nested children. A short `agent_id` prefix is accepted only when it matches
+notification, or `false` to await the new execution's result. Only retained root
+agents that completed successfully can be continued; running, queued, unsettled,
+stopped, aborted, turn-limited, or failed agents are rejected. A short `agent_id`
+prefix is accepted only when it matches
 exactly one retained agent; ambiguous prefixes are rejected. Each execution is
 retained as its own entry (`id`, `mode`, `status`, `usage`, `turnCount`) in the
 record's `executions` history and the accumulated usage, cost, tool, turn, and
@@ -96,11 +96,9 @@ displays IDs as `short_id (type)`.
 
 ### `AgentStatus`
 
-Lists retained agents as `short_id (type) status`, with applicable
-`parent:<short_id>`, `depth:<n>`, `waiting:<short_id>`, and `delivery:<state>`
-fields. It is useful for discovery or recovery, not for waiting: background
-completion is delivered automatically. Nested child sessions do not receive
-`StopAgent` or `AgentStatus`.
+Lists retained agents as `short_id (type) status`, with an optional
+`delivery:<state>` field. It is useful for discovery or recovery, not for
+waiting: background completion is delivered automatically.
 
 ## Agent definitions
 
@@ -131,8 +129,6 @@ thinking: high
 eco_model: openai/gpt-4o-mini
 eco_thinking: low
 max_turns: 80
-delegate_to: [scout, reviewer]
-max_child_agents: 2
 ---
 
 Review only the delegated change. Focus on injection, authorization, and
@@ -170,28 +166,25 @@ it also performs on-demand discovery. A trusted `worktree_path` instead resolves
 a fresh private overlay for that invocation.
 
 Once a root spawn is accepted—whether it starts now or waits in the global
-queue—it keeps an immutable copy of its effective definition and full catalog.
-Later file edits do not change that run, its queued work, or the roles a nested
-child may use. This avoids a live refresh changing authorization mid-run.
+queue—it keeps an immutable copy of its effective definition. Later file edits
+do not change that run or its queued work.
 
 **Resolution and visibility.** `Agent` resolves a canonical role by name or
 `display_name`, case-insensitively. `hidden: true` omits a role from the parent
 orchestration catalog, but does not remove it from the registry: it is still
 inspectable and callable with its name or display name.
-A delegating child can receive a hidden role only when its parent's
-`delegate_to` explicitly resolves to that role. Names that cannot be represented
-safely in generated prompt guidance are also omitted from that guidance, but
-remain resolvable through the catalog/tool path.
+Names that cannot be represented safely in generated prompt guidance are
+omitted from that guidance, but remain resolvable through the explicit tool path.
 
 Bundled roles are enabled unless `disableDefaultAgents` is set:
 
-| Role | Purpose | Built-in delegation policy |
-|---|---|---|
-| `architect` | Read-only design, interfaces, migrations, and trade-offs | May foreground-delegate to `scout`; 2 total direct children. |
-| `scout` | Read-only discovery, tracing, and root-cause investigation | Leaf. |
-| `implementer` | Bounded code, test, configuration, or documentation work | May foreground-delegate to `scout`, `verifier`, or `reviewer`; 4 total direct children. |
-| `reviewer` | Independent correctness, regression, and security review | Leaf. |
-| `verifier` | Reproduction, checks, tests, and failure analysis | Leaf. |
+| Role | Purpose |
+|---|---|
+| `architect` | Read-only design, interfaces, migrations, and trade-offs |
+| `scout` | Read-only discovery, tracing, and root-cause investigation |
+| `implementer` | Bounded code, test, configuration, or documentation work |
+| `reviewer` | Independent correctness, regression, and security review |
+| `verifier` | Reproduction, checks, tests, and failure analysis |
 
 Bundled read-only roles expose `read`, `grep`, and `bash`. Shell access still
 follows that role's instructions and project policy.
@@ -251,15 +244,8 @@ exclude_tools: [tavily/*]
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | resolved precedence | Role-level reasoning candidate; invalid values are ignored. Provider capability normalization may adjust the selected level. |
 | `eco_model` | `provider/model-id` | resolved Default model | Optional Eco-only model candidate. A configured but missing/unauthenticated model fails the spawn instead of falling back. |
 | `eco_thinking` | thinking level | resolved Default thinking | Optional Eco-only reasoning candidate, normalized against the final Eco model independently of `eco_model`. |
-| `max_turns` | number | unlimited for `Agent` tool/nested calls | Soft limit. At the limit the agent is instructed to wrap up; it is hard-aborted after `graceTurns` more turns (`0` aborts on the next turn). |
+| `max_turns` | number | unlimited | Soft limit. At the limit the agent is instructed to wrap up; it is hard-aborted after `graceTurns` more turns (`0` aborts on the next turn). |
 | `max_tokens` | number | unlimited | Maximum output tokens per model response, passed through as the provider's completion-token limit. |
-
-#### Delegation
-
-| Field | Accepted value | Default | Behavior |
-|---|---|---|---|
-| `delegate_to` | list of role names/aliases | none | Opts this role into nested delegation and lists the only child roles it may resolve from its accepted catalog. |
-| `max_child_agents` | number | 1 when `delegate_to` is nonempty; otherwise 0 | Total direct foreground children allowed over the parent run. Values are floored; negative or non-finite values become 0. Only one can be active at a time. |
 
 ### Parent orchestration guidance
 
@@ -277,8 +263,8 @@ before each parent turn
           └─ true ───────────────────────► replace it with bounded guidance
                                              + visible role catalog
 
-spawn accepted ──────────────────────────► capture a stable catalog snapshot
-child session ───────────────────────────► never inherits parent guidance
+spawn accepted ──────────────────────────► capture the stable role definition
+agent session ───────────────────────────► receives isolated prompt and tools
 ```
 
 The exact wording is generated implementation detail, so it is intentionally
@@ -291,38 +277,23 @@ and routing guidance. Omitted entries are reported with an
 `… +N omitted` marker. Disable it when you want no automatic catalog or routing
 guidance.
 
-### Nested delegation and concurrency
+### Root concurrency and queue
 
-Nested delegation is opt-in and bounded. The root session creates depth-1
-agents. With the default and hard maximum `maxNestingDepth: 2`, an eligible
-depth-1 agent may create depth-2 children; no depth-3 child can exist.
+Every `Agent` call creates one root record. `concurrency.default` limits the
+number of simultaneous foreground and background root executions; excess work
+waits in one FIFO queue. Queue admission is atomic, and a queued worktree run
+keeps the accepted role definition and validated path until it starts.
 
 ```text
-Root session (not counted as an agent slot)
-└─ depth 1: Implementer [one global slot]
-   ├─ direct child budget: 4 total; one active at a time
-   └─ depth 2: Scout [foreground; borrows Implementer's slot]
-      └─ no depth 3
-
-Independent root agents
-├─ Scout       [one global slot]
-└─ Reviewer    [one global slot]
+Parent session
+├─ Agent A ── foreground or background ──► one root slot
+├─ Agent B ── foreground or background ──► one root slot
+└─ AgentContinue ───────────────────────► one root slot
 ```
 
-A child receives the same `Agent` schema but a reduced, sanitized catalog of
-only its permitted roles (including an explicitly permitted hidden role). It
-must run in the foreground, inherits the parent CWD/worktree, cannot choose a
-worktree, and has neither `StopAgent` nor `AgentStatus`. Before every nested
-spawn, the manager rechecks the accepted parent snapshot, permissions, child
-budget, active-child state, and depth. Cancelling a parent cascades to all its
-descendants.
-
-`concurrency.default` limits simultaneous **root** agents across foreground and
-background launches; excess root launches queue. A nested foreground child
-borrows its root ancestor's existing slot during the parent handoff, so it does
-not consume another global slot. Thus nested work does not exceed global
-concurrency, but it can temporarily occupy the parent’s one slot while the
-parent waits.
+Agent sessions are isolated with AsyncLocalStorage. They receive only their
+configured work tools; the root control tools and any custom `Agent` proxy are
+never registered in a subagent session.
 
 ## Models, prompts, extensions, and skills
 
@@ -345,7 +316,7 @@ configuration writer; there is no custom UI. Each Eco field resolves
 independently as an explicit value > Eco session role override > saved Eco role
 override > Agent Markdown `eco_*` > the fully resolved Default-mode field. Mode
 and resolved settings are captured when a root spawn is accepted, so queued work
-is unaffected by later changes; nested agents inherit that root snapshot.
+is unaffected by later changes.
 
 ### System prompt and context
 
@@ -400,9 +371,8 @@ use `mode`, `ecoModelOverrides`, and `ecoThinkingOverrides`.
 | `ecoModelOverrides.<role>` | absent | Persisted Eco model override for that role. |
 | `ecoThinkingOverrides.<role>` | absent | Persisted Eco thinking override for that role. |
 | `agent.graceTurns` | `6` | Extra turns after a soft limit before hard abort. |
-| `agent.forceBackground` | `false` | Make every root spawn background, even when its call requests foreground. Nested children stay foreground. |
+| `agent.forceBackground` | `false` | Make every root spawn background, even when its call requests foreground. |
 | `concurrency.default` | `4` | Global simultaneous-root-agent limit; excess root spawns queue. |
-| `agent.maxNestingDepth` | `2` | `1` permits root children only; `2` permits their children. Values normalize to 1 or 2; 2 is the runtime maximum. |
 | `agent.disableDefaultAgents` | `false` | Exclude bundled roles from the next parent refresh and on-demand discovery. |
 | `agent.orchestrationPrompt` | `true` | Add the generated parent-only routing guidance and visible catalog, or remove the extension's existing block when false. |
 | `agent.systemPromptMode` | `replace` | `replace`, `inherit`, or `custom`; custom reads `~/.pi/agent/subagents-lean-prompt.md`. |
@@ -418,10 +388,12 @@ use `mode`, `ecoModelOverrides`, and `ecoThinkingOverrides`.
 | `agent.outputThinkingBufferSize` | `0` | Thinking-log buffer in characters: `0` writes at turn end; positive values flush during streaming near sentence boundaries. |
 
 Older UI-only keys such as `widgetMaxLines`, `widgetCompact`, `showCost`, and
-`showTools` are accepted and ignored when loading existing files. The former
-manual-UI field `agent.defaultMaxTurns` is likewise retained only for tolerant
-reads; root tools do not use it as a turn-limit fallback. These fields are
-omitted from new configuration examples. `finishedRetentionMinutes` and
+`showTools` are accepted and ignored when loading existing files. Deprecated
+nested-delegation fields (`delegate_to`, `max_child_agents`, and
+`maxNestingDepth`) are also accepted for migration compatibility, but have no
+effect and are removed from newly written configuration. The former manual-UI
+field `agent.defaultMaxTurns` is retained only for tolerant reads; root tools do
+not use it as a turn-limit fallback. `finishedRetentionMinutes` and
 `outputThinkingBufferSize` remain functional because they govern retention and
 output logs, not presentation.
 Example configuration:
@@ -433,7 +405,6 @@ Example configuration:
     "defaultThinking": "medium",
     "forceBackground": false,
     "graceTurns": 6,
-    "maxNestingDepth": 2,
     "orchestrationPrompt": true,
     "includeContextFiles": true,
     "loadSkillsImplicitly": false,
@@ -503,9 +474,9 @@ should follow the [release checklist](docs/releasing.md) before creating a tag.
 
 Published `src/shell` paths still export `enterSubagentSpawn`,
 `exitSubagentSpawn`, and `isInsideSubagentSpawn` for older integrations. They
-are deprecated inert-extension-registration markers: migrate child setup to the
-manager-created AsyncLocalStorage runtime. The legacy pair cannot provide async
-isolation, root shell controls, or override an active child runtime's guards.
+are deprecated inert-extension-registration markers. AsyncLocalStorage is the
+runtime authority for isolated agent sessions; the legacy pair cannot provide
+async isolation, root shell controls, or override an active session's guards.
 
 This fork preserves the project's MIT license and Alexander Paramonov's
 copyright notice. See [LICENSE](LICENSE).

@@ -356,12 +356,11 @@ describe("subagent runtime context", () => {
     expect(api.listeners.some((l) => l.event === "session_shutdown")).toBe(true);
   });
 
-  it("stays inert in a child runtime because Agent is a session custom tool", async () => {
+  it("stays inert in a child runtime because root tools never enter agent sessions", async () => {
     const api = createMockExtensionAPI();
-    await shell.runWithSubagentRuntime(shell.createSubagentRuntimeContext(
-      vi.fn(),
-      shell.getStore().createSubagentRuntimeSettings(),
-    ), async () => { await loadExtension(api.api); });
+    await shell.runWithSubagentRuntime(shell.createSubagentRuntimeContext(), async () => {
+      await loadExtension(api.api);
+    });
     expect(api.tools).toHaveLength(0);
     expect(api.listeners).toHaveLength(0);
   });
