@@ -710,6 +710,8 @@ describe("subscribeToSessionEvents — cost extraction", () => {
       reason: "threshold",
       aborted: false,
       result: {
+        summary: "summary",
+        firstKeptEntryId: "kept-1",
         tokensBefore: 1000,
         usage: { input: 400, output: 50, cacheRead: 300, cacheWrite: 25, cost: { total: 0.12 } },
       },
@@ -723,7 +725,12 @@ describe("subscribeToSessionEvents — cost extraction", () => {
       cost: 0.12,
     });
     expect(onAssistantUsage).not.toHaveBeenCalled();
-    expect(onCompaction).toHaveBeenCalledWith({ reason: "threshold", tokensBefore: 1000 });
+    expect(onCompaction).toHaveBeenCalledWith({
+      reason: "threshold",
+      tokensBefore: 1000,
+      summary: "summary",
+      firstKeptEntryId: "kept-1",
+    });
 
     unsub();
   });

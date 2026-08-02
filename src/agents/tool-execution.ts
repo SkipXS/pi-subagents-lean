@@ -120,29 +120,53 @@ export function buildAgentDetails(
     details.turnCount = record.stats.turnCount;
     details.maxTurns = record.stats.maxTurns;
     details.toolUses = record.stats.toolUses;
-    const liveSnapshot = getSessionUsageSnapshot(record.execution.session);
+    const terminal = record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
+    // Terminal records retain manager-populated telemetry; their session may
+    // already be disposed, so never perform a live branch read here.
+    const liveSnapshot = terminal ? undefined : getSessionUsageSnapshot(record.execution.session);
     const terminalSnapshot = {
       contextPercent: record.stats.contextPercent,
       contextWindow: record.stats.contextWindow,
       autoCompactionEnabled: record.stats.autoCompactionEnabled,
       usingSubscription: record.stats.usingSubscription,
     };
-    const usageSnapshot = record.lifecycle.completedAt != null
-      && (terminalSnapshot.contextPercent != null || terminalSnapshot.contextWindow != null)
+    const hasLiveSample = liveSnapshot != null
+      && (liveSnapshot.contextWindow !== undefined || liveSnapshot.contextPercent !== null);
+    const usageSnapshot = terminal
       ? terminalSnapshot
-      : (liveSnapshot ?? terminalSnapshot);
+      : {
+        contextPercent: hasLiveSample
+          ? liveSnapshot!.contextPercent
+          : (terminalSnapshot.contextPercent ?? liveSnapshot?.contextPercent ?? null),
+        contextWindow: liveSnapshot?.contextWindow ?? terminalSnapshot.contextWindow,
+        autoCompactionEnabled: liveSnapshot?.autoCompactionEnabled ?? terminalSnapshot.autoCompactionEnabled,
+        usingSubscription: liveSnapshot?.usingSubscription ?? terminalSnapshot.usingSubscription,
+      };
 
     details.input = record.stats.lifetimeUsage.input;
     details.output = record.stats.lifetimeUsage.output;
     details.cacheRead = record.stats.cacheRead;
     details.cacheWrite = record.stats.lifetimeUsage.cacheWrite;
     details.latestCacheHitRate = record.stats.latestCacheHitRate;
+    const contextStats = record.stats.contextStats?.count ? record.stats.contextStats : undefined;
+    // Keep the explicit live/terminal snapshot so shared formatting can prefer
+    // a newly measured response without losing context history telemetry.
     details.contextPercent = usageSnapshot.contextPercent ?? null;
-    details.contextWindow = usageSnapshot.contextWindow;
+    // The explicit current/live window wins over historical telemetry from
+    // an earlier model or branch.
+    details.contextWindow = usageSnapshot.contextWindow ?? contextStats?.window;
     details.autoCompactionEnabled = usageSnapshot.autoCompactionEnabled;
     details.usingSubscription = usageSnapshot.usingSubscription;
+    if (contextStats) {
+      details.contextStats = { ...contextStats };
+      details.contextCurrent = contextStats.current;
+      details.contextLastKnown = contextStats.lastKnown;
+      details.contextPeak = contextStats.peak;
+      details.contextCount = contextStats.count;
+    }
     details.durationMs = elapsedMs;
     details.compactions = record.stats.compactionCount;
+    details.compactionCount = record.stats.compactionCount;
     details.modelName = record.display.invocation?.modelName;
     // The session is the source of truth: Pi may normalize the requested
     // invocation level for the selected model when it creates the session.

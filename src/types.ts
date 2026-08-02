@@ -5,7 +5,7 @@
 import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentOutputLog } from "./agents/output-file.js";
-import type { LifetimeUsage, AgentUsage } from "./agents/usage.js";
+import type { ContextStats, LifetimeUsage, AgentUsage } from "./agents/usage.js";
 import type { SubagentType, AgentInvocation, AgentConfig } from "./agents/types.js";
 export type { AgentConfig } from "./agents/types.js";
 
@@ -121,6 +121,20 @@ export type CompactionReason = "manual" | "threshold" | "overflow";
 export interface CompactionInfo {
   reason: CompactionReason;
   tokensBefore: number;
+  /** Persisted summary identity, when supplied by the session event. */
+  summary?: string;
+  /** Persisted branch boundary identity, when supplied by the session event. */
+  firstKeptEntryId?: string;
+}
+
+/** Reason metadata retained with an AgentRecord for conversation viewers. */
+export interface CompactionReasonMetadata {
+  reason: CompactionReason;
+  tokensBefore: number;
+  summary?: string;
+  firstKeptEntryId?: string;
+  /** The active-branch CompactionEntry id, when it could be read after compaction. */
+  entryId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +243,10 @@ export interface AgentAccumulatedStats {
   contextWindow?: number;
   autoCompactionEnabled?: boolean;
   usingSubscription?: boolean;
+  /** Context telemetry kept separate from cumulative billing usage. */
+  contextStats?: ContextStats;
+  /** Compaction reasons retained for viewers opened after the event. */
+  compactionReasons?: CompactionReasonMetadata[];
 }
 
 

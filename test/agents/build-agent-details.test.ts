@@ -142,6 +142,24 @@ describe("buildAgentDetails", () => {
     expect(details.modelName).toBeUndefined(); // no invocation set
   });
 
+  it("prefers the explicit current window over historical context telemetry", () => {
+    const getContextUsage = vi.fn(() => {
+      throw new Error("terminal session should not be read");
+    });
+    const record = makeRecord({
+      execution: { session: { getContextUsage } as any },
+      stats: {
+        ...makeRecord().stats,
+        contextWindow: 272_000,
+        contextStats: { current: 40, lastKnown: 40, peak: 40, window: 128_000, count: 1 },
+      },
+    });
+
+    const details = buildAgentDetails(record, { includeStats: true });
+    expect(details.contextWindow).toBe(272_000);
+    expect(getContextUsage).not.toHaveBeenCalled();
+  });
+
   it("computes input and output from lifetimeUsage", () => {
     const record = makeRecord({
       stats: { lifetimeUsage: { input: 1000, output: 2000, cacheWrite: 500, cost: 0.05 }, toolUses: 5, compactionCount: 1, cacheRead: 0, turnCount: 10, maxTurns: 25 },

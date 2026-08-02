@@ -34,7 +34,7 @@ import type { AgentUsage } from "./usage.js";
 import { GIT_EXEC_TIMEOUT_MS } from "../utils.js";
 import { buildAgentPrompt, type PromptExtras } from "../prompt/prompts.js";
 import { preloadSkills, loadSkillMeta, type SkillMeta } from "../prompt/skill-loader.js";
-import { type EnvInfo, type RunCallbacks, type RunTunables, SHORT_ID_LENGTH } from "../types.js";
+import { type CompactionInfo, type EnvInfo, type RunCallbacks, type RunTunables, SHORT_ID_LENGTH } from "../types.js";
 import { getEffectiveMaxChildAgents, type AgentConfig, type SubagentType, type SystemPromptMode } from "./types.js";
 import { createSubagentRuntimeContext, getCoordinator, getManager, getStore, getSubagentRuntimeContext, runWithSubagentRuntime, type NestedAgentExecutor, type NestedAgentRuntimeContext, type SubagentRuntimeContext } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
@@ -263,7 +263,10 @@ export function subscribeToSessionEvents(
       if (event.result.usage) {
         options.onSupplementalUsage?.(usageFromTypedUsage(event.result.usage));
       }
-      options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+      const info: CompactionInfo = { reason: event.reason, tokensBefore: event.result.tokensBefore };
+      if (event.result.summary !== undefined) info.summary = event.result.summary;
+      if (event.result.firstKeptEntryId !== undefined) info.firstKeptEntryId = event.result.firstKeptEntryId;
+      options.onCompaction?.(info);
     }
   });
 }

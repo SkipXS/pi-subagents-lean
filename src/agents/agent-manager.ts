@@ -11,6 +11,7 @@ import {
   type AgentHierarchy,
   type AgentStatus,
   type CompactionInfo,
+  type CompactionReasonMetadata,
   type RunCallbacks,
   type StopInitiator,
   SHORT_ID_LENGTH,
@@ -19,7 +20,16 @@ import {
 } from "../types.js";
 import { resolveTypeInCatalog, snapshotAgentConfig, snapshotRegisteredAgentCatalog } from "./agent-types.js";
 import { getEffectiveMaxChildAgents, type AgentConfig, type SubagentType } from "./types.js";
-import { addUsage, getLifetimeTotal, getSessionUsageSnapshot, type AgentUsage } from "./usage.js";
+import {
+  addUsage,
+  createContextStats,
+  getLifetimeTotal,
+  getSessionUsageSnapshot,
+  observeContextStats,
+  readSessionContextUsage,
+  type AgentUsage,
+  type SessionStatsContextUsage,
+} from "./usage.js";
 import { errorMessage } from "../utils.js";
 import { getSubagentRuntimeContext, type NestedAgentExecutor } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
@@ -69,6 +79,17 @@ type OnAgentStart = (record: AgentRecord) => void;
 interface ConcurrencySlot {
   limit: number;
   running: number;
+}
+
+/** Cheap identity of the live session state last used for record telemetry. */
+interface SessionRevision {
+  session: AgentSession;
+  sessionManager: unknown;
+  leafId: string | null | undefined;
+  model: unknown;
+  modelKey: string;
+  thinkingLevel: unknown;
+  autoCompactionEnabled: boolean | undefined;
 }
 
 /**
@@ -164,6 +185,12 @@ export class AgentManager {
 
   /** Parent-signal listeners, retained so they can be removed at terminal states. */
   private parentAbortListeners = new Map<string, { signal: AbortSignal; listener: () => void }>();
+
+  /** One post-persistence context read may be queued per live session boundary. */
+  private deferredContextSamples = new WeakMap<ManagedAgentRecord, AgentSession>();
+
+  /** Last cheap session identity observed for each retained record. */
+  private sessionRevisions = new Map<string, SessionRevision>();
 
   /** Root records whose slot is retained until their borrowed descendants settle. */
   private heldBorrowedSlots = new Set<string>();
@@ -397,6 +424,8 @@ export class AgentManager {
         compactionCount: 0,
         cacheRead: 0,
         maxTurns: options.maxTurns,
+        contextStats: createContextStats(),
+        compactionReasons: [],
       },
     };
     this.agents.set(id, record);
@@ -535,7 +564,17 @@ export class AgentManager {
       },
       onTextDelta: options.onTextDelta,
       onSessionCreated: (session) => {
+        // Shutdown can win the race with asynchronous session setup. Do not
+        // retain or observe a late session for an evicted record.
+        if (this.agents.get(record.id) !== record) {
+          try { session.dispose(); } catch { /* stale setup cleanup is best-effort */ }
+          return;
+        }
         record.execution.session = session;
+        // Capture one bounded initial sample so the widget and result details
+        // never need to read a live session during their render paths. Later
+        // samples are taken only at event boundaries.
+        this.observeContext(record);
         // Flush any steers that arrived before the session was ready
         if (record.execution.pendingSteers?.length) {
           for (const msg of record.execution.pendingSteers) {
@@ -559,7 +598,9 @@ export class AgentManager {
           this.setStatus(record, control, aborted ? "aborted" : turnLimited ? "turn_limited" : "completed");
         }
         record.result = responseText;
-        record.execution.session = session;
+        // A shutdown may evict the record before a late runner resolution.
+        // Do not restore execution handles for a record no longer owned here.
+        if (this.agents.get(record.id) === record) record.execution.session = session;
         record.lifecycle.completedAt ??= Date.now();
         return responseText;
       })
@@ -580,13 +621,10 @@ export class AgentManager {
       .finally(() => {
         // Session handles are not guaranteed to remain usable after completion,
         // so retain the footer values that terminal cards need before cleanup.
-        const snapshot = getSessionUsageSnapshot(record.execution.session);
-        if (snapshot) {
-          record.stats.contextPercent = snapshot.contextPercent;
-          record.stats.contextWindow = snapshot.contextWindow;
-          record.stats.autoCompactionEnabled = snapshot.autoCompactionEnabled;
-          record.stats.usingSubscription = snapshot.usingSubscription;
-        }
+        // The shared observer always performs one final context/auth snapshot,
+        // preserves a valid null-after-compaction sample, and synchronizes the
+        // cheap revision tracker without walking history a second time.
+        this.observeContext(record, true);
 
         // Finalize output log with final stats
         if (record.execution.outputLog) {
@@ -648,6 +686,254 @@ export class AgentManager {
   }
 
   /**
+   * Refresh telemetry for running sessions whose cheap identity changed.
+   *
+   * SessionManager.getLeafId() is an O(1) leaf-pointer read. Comparing it
+   * (plus model/session metadata) lets the widget notice idle branch/model
+   * switches without making an unchanged 80ms tick walk session history.
+   * Returns whether a context/auth snapshot was taken.
+   */
+  refreshActiveSessions(): boolean {
+    let refreshed = false;
+    for (const [id, record] of this.agents) {
+      const control = this.nestedControls.get(id);
+      if (!control || control.status !== "running" || control.settled) continue;
+
+      const session = record.execution.session;
+      if (!session) {
+        this.sessionRevisions.delete(id);
+        continue;
+      }
+
+      const revision = this.readSessionRevision(session);
+      const previous = this.sessionRevisions.get(id);
+      if (!previous) {
+        // onSessionCreated normally establishes this baseline after its
+        // initial observation. Be defensive for lightweight session doubles
+        // without repeating a full read on the first widget tick.
+        this.sessionRevisions.set(id, revision);
+        continue;
+      }
+      if (!this.sessionRevisionChanged(previous, revision)) continue;
+
+      // Mark the revision before observing so a re-entrant widget update cannot
+      // schedule a second read for the same switch.
+      this.sessionRevisions.set(id, revision);
+      // A normal assistant message queues its post-persistence sample. Let
+      // that one coalesced read observe this newer leaf instead of sampling it
+      // again from the widget cadence.
+      if (this.deferredContextSamples.get(record) === session) continue;
+
+      this.observeContext(record);
+      refreshed = true;
+    }
+    return refreshed;
+  }
+
+  /** Read only cheap leaf/model identity; never walk the active branch. */
+  private readSessionRevision(session: AgentSession): SessionRevision {
+    let sessionManager: unknown;
+    let leafId: string | null | undefined;
+    try {
+      const candidate = (session as unknown as {
+        sessionManager?: { getLeafId?: () => string | null };
+      }).sessionManager;
+      sessionManager = candidate;
+      const getLeafId = candidate?.getLeafId;
+      if (typeof getLeafId === "function") leafId = getLeafId.call(candidate);
+    } catch {
+      // A disposed/legacy session may not expose a usable manager. Keep an
+      // undefined leaf stable rather than falling back to a history read.
+    }
+
+    let model: unknown;
+    try {
+      const candidate = session as unknown as {
+        model?: unknown;
+        state?: { model?: unknown };
+      };
+      model = candidate.model ?? candidate.state?.model;
+    } catch {
+      model = undefined;
+    }
+
+    let provider: unknown;
+    let modelId: unknown;
+    let contextWindow: unknown;
+    try {
+      const candidate = model as { provider?: unknown; id?: unknown; contextWindow?: unknown } | undefined;
+      provider = candidate?.provider;
+      modelId = candidate?.id;
+      contextWindow = candidate?.contextWindow;
+    } catch {
+      // Keep the object identity as the only model signal when a legacy model
+      // getter is unavailable.
+    }
+
+    let thinkingLevel: unknown;
+    let autoCompactionEnabled: boolean | undefined;
+    try {
+      thinkingLevel = (session as unknown as { thinkingLevel?: unknown }).thinkingLevel;
+      const enabled = (session as unknown as { autoCompactionEnabled?: unknown }).autoCompactionEnabled;
+      if (typeof enabled === "boolean") autoCompactionEnabled = enabled;
+    } catch {
+      // Optional compatibility fields are not required for leaf tracking.
+    }
+
+    const revisionPart = (value: unknown): string => {
+      if (value === undefined) return "<undefined>";
+      if (value === null) return "<null>";
+      return String(value);
+    };
+    return {
+      session,
+      sessionManager,
+      leafId,
+      model,
+      modelKey: [provider, modelId, contextWindow].map(revisionPart).join("\u0000"),
+      thinkingLevel,
+      autoCompactionEnabled,
+    };
+  }
+
+  private sessionRevisionChanged(previous: SessionRevision, next: SessionRevision): boolean {
+    return previous.session !== next.session
+      || previous.sessionManager !== next.sessionManager
+      || previous.leafId !== next.leafId
+      || previous.model !== next.model
+      || previous.modelKey !== next.modelKey
+      || previous.thinkingLevel !== next.thinkingLevel
+      || previous.autoCompactionEnabled !== next.autoCompactionEnabled;
+  }
+
+  /** Record one upstream context sample without touching billing totals. */
+  private recordContextSample(
+    record: ManagedAgentRecord,
+    usage: SessionStatsContextUsage | undefined,
+    skipUnchanged = false,
+  ): void {
+    if (!usage) return;
+    const stats = record.stats.contextStats ??= createContextStats();
+    if (skipUnchanged && stats.count > 0 && stats.current === usage.percent && stats.window === usage.contextWindow) {
+      record.stats.contextPercent = stats.current;
+      record.stats.contextWindow = stats.window;
+      return;
+    }
+    observeContextStats(stats, usage);
+    record.stats.contextPercent = stats.current;
+    record.stats.contextWindow = stats.window;
+  }
+
+  /**
+   * Persist non-billing context/auth fields alongside a sampled record.
+   * `contextSampled` distinguishes a valid null-after-compaction sample from
+   * a failed or unavailable context read, so an unavailable read cannot erase
+   * the last known current value.
+   */
+  private persistContextSnapshot(
+    record: ManagedAgentRecord,
+    snapshot: ReturnType<typeof getSessionUsageSnapshot>,
+    contextSampled: boolean,
+  ): void {
+    if (!snapshot) return;
+    if (contextSampled) record.stats.contextPercent = snapshot.contextPercent;
+    if (typeof snapshot.contextWindow === "number") {
+      record.stats.contextWindow = snapshot.contextWindow;
+    } else if (record.stats.contextStats?.window !== undefined) {
+      record.stats.contextWindow = record.stats.contextStats.window;
+    }
+    if (typeof snapshot.autoCompactionEnabled === "boolean") {
+      record.stats.autoCompactionEnabled = snapshot.autoCompactionEnabled;
+    }
+    if (typeof snapshot.usingSubscription === "boolean") {
+      record.stats.usingSubscription = snapshot.usingSubscription;
+    }
+  }
+
+  /** Capture the latest context/auth snapshot at a meaningful boundary. */
+  private observeContext(record: ManagedAgentRecord, skipUnchanged = false): void {
+    const session = record.execution.session;
+    if (!session || this.agents.get(record.id) !== record) return;
+
+    // A direct lifecycle observation supersedes a queued post-persistence
+    // observation for this same session. The queued microtask will see the
+    // missing marker and return without a duplicate history walk.
+    if (this.deferredContextSamples.get(record) === session) {
+      this.deferredContextSamples.delete(record);
+    }
+
+    try {
+      const contextRead = readSessionContextUsage(session);
+      if (!contextRead.failed) this.recordContextSample(record, contextRead.usage, skipUnchanged);
+      // Pass the already-attempted value explicitly so this second helper call
+      // cannot perform another branch walk. It still supplies model/auth
+      // metadata when the context reader is unavailable or throws.
+      const snapshot = getSessionUsageSnapshot(session, contextRead.usage);
+      this.persistContextSnapshot(record, snapshot, !contextRead.failed && contextRead.usage !== undefined);
+    } finally {
+      // Keep the cheap baseline aligned with every initial, deferred,
+      // compaction, idle-switch, and final observation.
+      if (record.execution.session === session && this.agents.get(record.id) === record) {
+        this.sessionRevisions.set(record.id, this.readSessionRevision(session));
+      }
+    }
+  }
+
+  /**
+   * Re-read context after the upstream message_end handler has persisted the
+   * assistant entry. The record/session guards make this safe across disposal,
+   * eviction, and session replacement. Multiple callbacks in one synchronous
+   * boundary share one queued read.
+   */
+  private deferContextSample(record: ManagedAgentRecord): void {
+    const session = record.execution.session;
+    if (!session) return;
+    const pending = this.deferredContextSamples.get(record);
+    if (pending === session) return;
+    if (pending) this.deferredContextSamples.delete(record);
+    this.deferredContextSamples.set(record, session);
+    queueMicrotask(() => {
+      if (this.deferredContextSamples.get(record) !== session) return;
+      this.deferredContextSamples.delete(record);
+      const current = this.agents.get(record.id);
+      const control = this.nestedControls.get(record.id);
+      if (current !== record || !control || control.settled || control.status !== "running") return;
+      if (record.execution.session !== session) return;
+      this.observeContext(record);
+    });
+  }
+
+  /** Retain the reason and, when possible, the exact persisted compaction entry id. */
+  private persistCompactionReason(record: ManagedAgentRecord, info: CompactionInfo): void {
+    const metadata: CompactionReasonMetadata = {
+      reason: info.reason,
+      tokensBefore: info.tokensBefore,
+      ...(info.summary !== undefined ? { summary: info.summary } : {}),
+      ...(info.firstKeptEntryId !== undefined ? { firstKeptEntryId: info.firstKeptEntryId } : {}),
+    };
+
+    try {
+      // SessionManager appends the CompactionEntry before emitting compaction_end,
+      // so the leaf is the exact entry without scanning the full active branch.
+      const leaf = record.execution.session?.sessionManager?.getLeafEntry();
+      if (
+        leaf?.type === "compaction"
+        && typeof leaf.id === "string"
+        && leaf.tokensBefore === info.tokensBefore
+        && (info.summary === undefined || leaf.summary === info.summary)
+        && (info.firstKeptEntryId === undefined || leaf.firstKeptEntryId === info.firstKeptEntryId)
+      ) {
+        metadata.entryId = leaf.id;
+      }
+    } catch {
+      // Older/lightweight session doubles may not expose a usable leaf entry.
+      // Keep the identifying fields as a conservative fallback.
+    }
+
+    (record.stats.compactionReasons ??= []).push(metadata);
+  }
+
+  /**
    * Build common record-tracking callbacks shared by startAgent.
    * Updates the record's toolUses, lifetimeUsage, and compactionCount.
    * When options are provided, also forwards events to the caller.
@@ -671,6 +957,10 @@ export class AgentManager {
         record.stats.cacheRead += usage.cacheRead;
         updateCumulativeCacheHitRate(record);
         options?.onAssistantUsage?.(usage);
+        // AgentSession emits message_end before SessionManager persistence.
+        // Keep accounting and consumer callbacks synchronous, then take one
+        // context-only sample once the event's persistence has run.
+        this.deferContextSample(record);
       },
       // Compaction and tool-result usage contributes to the same session-level
       // usage totals displayed by the UI, including its cache hit rate.
@@ -681,6 +971,8 @@ export class AgentManager {
       },
       onCompaction: (info) => {
         record.stats.compactionCount++;
+        this.persistCompactionReason(record, info);
+        this.observeContext(record);
         options?.onCompaction?.(info);
       },
     };
@@ -866,6 +1158,8 @@ export class AgentManager {
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: ManagedAgentRecord): void {
     try { this.onRecordEvicted?.(record); } catch { /* coordinator cleanup is best-effort */ }
+    this.deferredContextSamples.delete(record);
+    this.sessionRevisions.delete(id);
     this.releaseExecution(record);
     this.agents.delete(id);
     this.nestedControls.delete(id);
@@ -902,6 +1196,7 @@ export class AgentManager {
     }
     this.agents.clear();
     this.nestedControls.clear();
+    this.sessionRevisions.clear();
     this.heldBorrowedSlots.clear();
   }
 }
