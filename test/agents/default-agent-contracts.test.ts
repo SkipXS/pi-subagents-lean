@@ -23,6 +23,13 @@ describe("bundled agent and config contracts", () => {
     expect(CONFIG_AGENT_NON_MODEL_KEYS).not.toContain("defaultAgent");
   });
 
+  it("limits the implementer to one correction before parent escalation", () => {
+    const prompt = DEFAULT_AGENTS.get("implementer")!.systemPrompt;
+    expect(prompt).toContain("After one focused correction round");
+    expect(prompt).toContain("if any material issue remains in that subsystem");
+    expect(prompt).toContain("let the parent decide takeover or a new owner");
+  });
+
   it("parses every bundled Markdown file to its canonical unique name and a usable prompt", () => {
     expect([...DEFAULT_AGENTS.keys()]).toEqual([...DEFAULT_AGENT_NAMES]);
     expect(new Set(DEFAULT_AGENT_NAMES).size).toBe(DEFAULT_AGENT_NAMES.length);

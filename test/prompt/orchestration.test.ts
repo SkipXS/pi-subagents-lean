@@ -12,6 +12,7 @@ import {
   getOrchestrationPromptUpdate,
 } from "../../src/prompt/orchestration.ts";
 import type { AgentConfig } from "../../src/agents/types.ts";
+import { DEFAULT_AGENTS } from "../../src/agents/default-agents.ts";
 
 function agent(name: string, description: string, hidden = false): AgentConfig {
   return { name, description, hidden, systemPrompt: "" };
@@ -44,6 +45,12 @@ Estimate scope and context cost before implementation. Split broad or cross-cutt
 
 Do not duplicate work already delegated. Inspect or modify the same area yourself only when an agent result is incomplete, conflicting, or leaves a clearly bounded follow-up.
 
+Treat writer delegation as a bounded trial. Allow the same writer at most one focused correction in a subsystem. If a material issue remains, needs redesign, or you understand the fix better, take over directly or re-plan with a new owner.
+
+For external APIs, lifecycle or concurrency ordering, and integration behavior, require installed or upstream evidence plus a representative real sequence; critical paths cannot rely only on synthetic mocks.
+
+Before repeated reviews, set acceptance criteria and the blocker bar. Validate findings without automatic scope expansion. After two independent no-blocker reviews and no material code change, stop broad re-review unless checks fail or new evidence appears.
+
 Use only the roles required for the task. Do not force an unnecessary full agent pipeline.
 
 Run dependent work in the foreground. Independent read-only work may run in the background. Never run concurrent writers or allow overlapping repository changes.
@@ -56,6 +63,14 @@ ${ORCHESTRATION_PROMPT_END_MARKER}`);
 
     registerAgents(new Map([["reviewer", agent("reviewer", "Review changes carefully.")]]), { disableDefaultAgents: true });
     expect(buildOrchestrationPrompt(getAvailableAgents())).not.toContain("shipper");
+  });
+
+  it("keeps every bundled role visible within the parent prompt budget", () => {
+    const prompt = buildOrchestrationPrompt(DEFAULT_AGENTS.values())!;
+
+    for (const name of DEFAULT_AGENTS.keys()) expect(prompt).toContain(`\`${name}\` —`);
+    expect(prompt).not.toContain("omitted");
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(MAX_ORCHESTRATION_PROMPT_LENGTH);
   });
 
   it("bounds names, descriptions, catalog, agents, and total prompt with deterministic overflow", () => {
