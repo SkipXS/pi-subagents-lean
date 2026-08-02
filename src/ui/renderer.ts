@@ -8,6 +8,7 @@ import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import type { Theme } from "./types.js";
 import { buildStatsCells, formatStatsRow, formatThinkingTag, getAgentStatusDisplay, getDisplayName } from "./format.js";
 import type { AgentStatus } from "../types.js";
+import type { ContextStats } from "../agents/usage.js";
 
 // ============================================================================
 // Stats rendering helpers
@@ -25,6 +26,32 @@ function stringValue(value: unknown): string | undefined {
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function nullableFinite(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  return finiteNumber(value);
+}
+
+function contextStatsFromDetails(d: Record<string, unknown>): ContextStats | undefined {
+  const nested = asRecord(d.contextStats);
+  const hasFlattenedTelemetry = ["contextCurrent", "contextLastKnown", "contextPeak", "contextCount"]
+    .some((key) => Object.prototype.hasOwnProperty.call(d, key));
+  if (!nested && !hasFlattenedTelemetry) return undefined;
+  const source = nested ?? d;
+  const current = nullableFinite(source.current !== undefined ? source.current : d.contextCurrent);
+  const lastKnown = nullableFinite(source.lastKnown !== undefined ? source.lastKnown : d.contextLastKnown);
+  const peak = nullableFinite(source.peak !== undefined ? source.peak : d.contextPeak);
+  const window = finiteNumber(source.window !== undefined ? source.window : d.contextWindow);
+  const count = finiteNumber(source.count !== undefined ? source.count : d.contextCount);
+  if (current === undefined && lastKnown === undefined && peak === undefined && window === undefined && count === undefined) return undefined;
+  return {
+    current: current ?? null,
+    lastKnown: lastKnown ?? null,
+    peak: peak ?? null,
+    ...(window !== undefined ? { window } : {}),
+    count: count ?? 0,
+  };
 }
 
 function agentStatus(value: unknown): AgentStatus {
@@ -62,8 +89,10 @@ export function buildStatsLine(d: Record<string, unknown>, theme: Theme, showCos
     cacheRead: finiteNumber(d.cacheRead),
     cacheWrite: finiteNumber(d.cacheWrite),
     latestCacheHitRate: finiteNumber(d.latestCacheHitRate),
-    contextPercent: finiteNumber(d.contextPercent),
+    contextPercent: nullableFinite(d.contextPercent),
     contextWindow: finiteNumber(d.contextWindow),
+    compactionCount: finiteNumber(d.compactionCount ?? d.compactions),
+    contextStats: contextStatsFromDetails(d),
     autoCompactionEnabled: typeof d.autoCompactionEnabled === "boolean" ? d.autoCompactionEnabled : undefined,
     cost: showCost ? finiteNumber(d.cost) : undefined,
     usingSubscription: showCost && typeof d.usingSubscription === "boolean" ? d.usingSubscription : undefined,

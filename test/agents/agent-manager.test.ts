@@ -1044,6 +1044,364 @@ describe("usage accounting", () => {
       usingSubscription: true,
     });
   });
+
+  it("refreshes active telemetry once for a leaf/model switch and ignores terminal records", async () => {
+    manager = new AgentManager(onComplete);
+    let leafId = "leaf-1";
+    let contextWindow = 100;
+    const getLeafId = vi.fn(() => leafId);
+    const getBranch = vi.fn(() => []);
+    const getContextUsage = vi.fn(() => {
+      getBranch();
+      return { percent: 12, contextWindow };
+    });
+    const session = {
+      ...mockAgentSession(),
+      getContextUsage,
+      sessionManager: { getLeafId, getBranch },
+      model: { provider: "test", id: "model-1", contextWindow },
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    mockModules.mockRunAgent.mock.calls[0]![3].onSessionCreated(session);
+
+    expect(getContextUsage).toHaveBeenCalledOnce();
+    getContextUsage.mockClear();
+    getBranch.mockClear();
+
+    // Repeated widget cadence checks only the O(1) leaf/model identity.
+    for (let tick = 0; tick < 8; tick++) manager.refreshActiveSessions();
+    expect(getContextUsage).not.toHaveBeenCalled();
+    expect(getBranch).not.toHaveBeenCalled();
+
+    // An idle branch/model switch takes one coalesced context/auth snapshot.
+    leafId = "leaf-2";
+    contextWindow = 200;
+    session.model = { provider: "test", id: "model-2", contextWindow };
+    expect(manager.refreshActiveSessions()).toBe(true);
+    expect(getContextUsage).toHaveBeenCalledOnce();
+    expect(getBranch).toHaveBeenCalledOnce();
+    expect(record.stats.contextWindow).toBe(200);
+
+    getContextUsage.mockClear();
+    getBranch.mockClear();
+    for (let tick = 0; tick < 8; tick++) manager.refreshActiveSessions();
+    expect(getContextUsage).not.toHaveBeenCalled();
+    expect(getBranch).not.toHaveBeenCalled();
+
+    deferred.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+    getContextUsage.mockClear();
+    getBranch.mockClear();
+
+    // Terminal records remain persisted projections and are never sampled by
+    // the active-session cadence.
+    expect(manager.refreshActiveSessions()).toBe(false);
+    expect(getContextUsage).not.toHaveBeenCalled();
+    expect(getBranch).not.toHaveBeenCalled();
+    expect((manager as any).sessionRevisions.size).toBe(1);
+
+    manager.dispose();
+    expect((manager as any).sessionRevisions.size).toBe(0);
+  });
+
+  it("does not resample a session after dispose races a late runner settlement", async () => {
+    manager = new AgentManager(onComplete);
+    const getContextUsage = vi.fn(() => ({ percent: 20, contextWindow: 100 }));
+    const session = {
+      ...mockAgentSession(),
+      getContextUsage,
+      sessionManager: { getLeafId: () => "leaf-1" },
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    mockModules.mockRunAgent.mock.calls[0]![3].onSessionCreated(session);
+    const runnerPromise = record.execution.promise!;
+
+    manager.dispose();
+    getContextUsage.mockClear();
+    deferred.resolve(mockRunResult({ session }));
+    await runnerPromise;
+
+    expect(getContextUsage).not.toHaveBeenCalled();
+    expect((manager as any).sessionRevisions.size).toBe(0);
+  });
+
+  it("coalesces an idle tick with the deferred assistant persistence sample", async () => {
+    manager = new AgentManager(onComplete);
+    let leafId = "leaf-1";
+    let persisted = false;
+    const getLeafId = vi.fn(() => leafId);
+    const getBranch = vi.fn(() => []);
+    const getContextUsage = vi.fn(() => {
+      getBranch();
+      return persisted
+        ? { percent: 40, contextWindow: 200 }
+        : { percent: null, contextWindow: 100 };
+    });
+    const session = {
+      ...mockAgentSession(),
+      getContextUsage,
+      sessionManager: { getLeafId, getBranch },
+      model: { provider: "test", id: "model-1", contextWindow: 100 },
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    const callbacks = mockModules.mockRunAgent.mock.calls[0]![3];
+    callbacks.onSessionCreated(session);
+    getContextUsage.mockClear();
+    getBranch.mockClear();
+
+    callbacks.onAssistantUsage({ input: 1, output: 1, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    persisted = true;
+    leafId = "leaf-2";
+
+    // The pending post-persistence observation owns this boundary; an idle
+    // widget tick must not race it with a second full read.
+    expect(manager.refreshActiveSessions()).toBe(false);
+    expect(getContextUsage).not.toHaveBeenCalled();
+    await Promise.resolve();
+
+    expect(getContextUsage).toHaveBeenCalledOnce();
+    expect(getBranch).toHaveBeenCalledOnce();
+    expect(record.stats.contextWindow).toBe(200);
+    getContextUsage.mockClear();
+    getBranch.mockClear();
+    expect(manager.refreshActiveSessions()).toBe(false);
+    expect(getContextUsage).not.toHaveBeenCalled();
+    expect(getBranch).not.toHaveBeenCalled();
+
+    deferred.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+  });
+
+  it("resamples context after message_end persistence while keeping accounting immediate", async () => {
+    manager = new AgentManager(onComplete);
+    let persisted = false;
+    const contextReads: boolean[] = [];
+    const session = {
+      ...mockAgentSession(),
+      getContextUsage: () => {
+        contextReads.push(persisted);
+        return persisted
+          ? { tokens: 40, percent: 40, contextWindow: 100 }
+          : { tokens: null, percent: null, contextWindow: 100 };
+      },
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    record.execution.session = session;
+    const onUsage = mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage;
+
+    // AgentSession notifies subscribers before SessionManager.appendMessage().
+    onUsage({ input: 7, output: 3, cacheWrite: 0, cacheRead: 0, cost: 0.2 });
+    expect(record.stats.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 0, cost: 0.2 });
+    expect(record.stats.contextStats).toMatchObject({ current: null });
+
+    // This represents the upstream appendMessage() that runs after all event listeners.
+    persisted = true;
+    await Promise.resolve();
+
+    expect(contextReads).toEqual([true]);
+    expect(record.stats.contextStats).toMatchObject({ current: 40, lastKnown: 40, peak: 40, count: 1 });
+    expect(record.stats.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 0, cost: 0.2 });
+
+    deferred.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+  });
+
+  it("coalesces post-persistence context reads and retains estimated peaks", async () => {
+    manager = new AgentManager(onComplete);
+    let percent = 125;
+    const contextReads: number[] = [];
+    const session = {
+      ...mockAgentSession(),
+      getContextUsage: () => {
+        contextReads.push(percent);
+        return { tokens: percent, percent, contextWindow: 100 };
+      },
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    record.execution.session = session;
+    const onUsage = mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage;
+
+    onUsage({ input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    await Promise.resolve();
+    expect(contextReads).toEqual([125]);
+    expect(record.stats.contextStats).toMatchObject({ current: 125, lastKnown: 125, peak: 125, count: 1 });
+
+    percent = 40;
+    // Two synchronous reports share one assistant-event boundary read.
+    onUsage({ input: 3, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    onUsage({ input: 4, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    await Promise.resolve();
+
+    expect(contextReads).toEqual([125, 40]);
+    expect(record.stats.contextStats).toMatchObject({ current: 40, lastKnown: 40, peak: 125, count: 2 });
+    expect(record.stats.lifetimeUsage.input).toBe(8);
+
+    deferred.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+  });
+
+  it("always samples the final lower context and keeps the earlier peak", async () => {
+    manager = new AgentManager(onComplete);
+    let percent: number | null = 80;
+    const session = {
+      ...mockAgentSession(),
+      getContextUsage: () => ({ tokens: percent == null ? null : percent, percent, contextWindow: 100 }),
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    record.execution.session = session;
+    mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage({ input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    await Promise.resolve();
+
+    percent = 40;
+    deferred.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+
+    expect(record.stats.contextStats).toMatchObject({ current: 40, lastKnown: 40, peak: 80, window: 100, count: 2 });
+  });
+
+  it("retains lastKnown and peak when the final persisted context is null", async () => {
+    manager = new AgentManager(onComplete);
+    let percent: number | null = 80;
+    const session = {
+      ...mockAgentSession(),
+      getContextUsage: () => ({ tokens: percent == null ? null : percent, percent, contextWindow: 100 }),
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    record.execution.session = session;
+    mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage({ input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    await Promise.resolve();
+
+    percent = null;
+    deferred.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+
+    expect(record.stats.contextStats).toMatchObject({ current: null, lastKnown: 80, peak: 80, window: 100, count: 2 });
+  });
+
+  it("preserves the last valid context when the final read fails", async () => {
+    manager = new AgentManager(onComplete);
+    let fail = false;
+    let reads = 0;
+    const session = {
+      ...mockAgentSession(),
+      getContextUsage: () => {
+        reads++;
+        if (fail) throw new Error("session disposed");
+        return { percent: 80, contextWindow: 100 };
+      },
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    record.execution.session = session;
+    mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage({ input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    await Promise.resolve();
+
+    fail = true;
+    deferred.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+
+    expect(reads).toBe(2);
+    expect(record.stats).toMatchObject({ contextPercent: 80, contextWindow: 100 });
+    expect(record.stats.contextStats).toMatchObject({ current: 80, lastKnown: 80, peak: 80, count: 1 });
+  });
+
+  it("keeps a known context window when a legacy final stats sample omits it", async () => {
+    manager = new AgentManager(onComplete);
+    let contextUsage: { percent: number | null; contextWindow?: number } = { percent: 80, contextWindow: 100 };
+    const session = {
+      ...mockAgentSession(),
+      getSessionStats: () => ({ contextUsage }),
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    record.execution.session = session;
+    mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage({ input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    await Promise.resolve();
+
+    contextUsage = { percent: null };
+    deferred.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+
+    expect(record.stats).toMatchObject({ contextPercent: null, contextWindow: 100 });
+  });
+
+  it("persists compaction metadata from the leaf without scanning the branch", async () => {
+    manager = new AgentManager(onComplete);
+    const compactionEntry = {
+      type: "compaction",
+      id: "compact-1",
+      parentId: "before",
+      timestamp: "2024-01-01T10:00:00.000Z",
+      summary: "summary",
+      firstKeptEntryId: "kept-1",
+      tokensBefore: 1_200,
+    };
+    const getBranch = vi.fn(() => [compactionEntry]);
+    const getLeafEntry = vi.fn(() => compactionEntry);
+    const getContextUsage = vi.fn(() => {
+      // The real context reader walks the branch; metadata lookup must not add
+      // another walk while handling the same compaction event.
+      getBranch();
+      return { tokens: null, percent: null, contextWindow: 100 };
+    });
+    const session = {
+      ...mockAgentSession(),
+      getContextUsage,
+      sessionManager: { getBranch, getLeafEntry },
+    };
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const record = manager.getRecord(id)!;
+    record.execution.session = session;
+
+    mockModules.mockRunAgent.mock.calls[0]![3].onCompaction({
+      reason: "threshold",
+      tokensBefore: 1_200,
+      summary: "summary",
+      firstKeptEntryId: "kept-1",
+    });
+
+    expect(record.stats.compactionReasons).toEqual([{
+      reason: "threshold",
+      tokensBefore: 1_200,
+      summary: "summary",
+      firstKeptEntryId: "kept-1",
+      entryId: "compact-1",
+    }]);
+    expect(getLeafEntry).toHaveBeenCalledOnce();
+    expect(getContextUsage).toHaveBeenCalledOnce();
+    // The sole branch walk is the context sample above, not metadata lookup.
+    expect(getBranch).toHaveBeenCalledOnce();
+
+    deferred.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+  });
 });
 }); // end describe AgentManager
 

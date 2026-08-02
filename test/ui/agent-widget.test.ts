@@ -966,6 +966,7 @@ describe("Pi usage display", () => {
     const live = makeRunningAgent("live");
     live.stats = {
       ...live.stats, lifetimeUsage: usage, cacheRead: 1300000, latestCacheHitRate: 93.2,
+      contextPercent: 23.4, contextWindow: 272000, autoCompactionEnabled: true, usingSubscription: true,
     };
     live.execution.session = {
       getContextUsage: () => ({ percent: 23.4, contextWindow: 272000 }),
@@ -984,6 +985,57 @@ describe("Pi usage display", () => {
     // CH is the cumulative value for the displayed R/input/W totals.
     const expected = "↑83k ↓7.1k R1.3M W12k CH93.2% $1.262 (sub) 23.4%/272k (auto)";
     expect(lines.split(expected)).toHaveLength(3);
+  });
+
+  it("runs the manager's active-session refresh on each widget cadence tick", () => {
+    const refreshActiveSessions = vi.fn();
+    (manager as any).refreshActiveSessions = refreshActiveSessions;
+    const running = makeRunningAgent("running");
+    (manager as any).listAgents = () => [running];
+    widget.setUICtx({
+      setStatus: vi.fn(),
+      setWidget: vi.fn(),
+    } as any);
+
+    for (let tick = 0; tick < 3; tick++) widget.update();
+
+    expect(refreshActiveSessions).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not live-read running or terminal sessions during repeated renders", () => {
+    const runningContext = vi.fn(() => ({ percent: 12, contextWindow: 128_000 }));
+    const runningBranch = vi.fn(() => []);
+    const running = makeRunningAgent("running");
+    running.stats.contextPercent = 12;
+    running.stats.contextWindow = 128_000;
+    running.stats.contextStats = { current: 12, lastKnown: 12, peak: 12, window: 64_000, count: 1 };
+    running.execution.session = {
+      getContextUsage: runningContext,
+      sessionManager: { getBranch: runningBranch },
+    };
+
+    const terminalContext = vi.fn(() => ({ percent: 91, contextWindow: 272_000 }));
+    const terminalBranch = vi.fn(() => []);
+    const terminal = makeFinishedAgent("terminal");
+    terminal.stats.contextPercent = 91;
+    terminal.stats.contextWindow = 272_000;
+    terminal.execution.session = {
+      getContextUsage: terminalContext,
+      sessionManager: { getBranch: terminalBranch },
+    };
+
+    (manager as any).listAgents = () => [running, terminal];
+    const tui = makeMockTUI();
+    const theme = makePlainTheme();
+    let lines = "";
+    for (let i = 0; i < 8; i++) lines = (widget as any).renderWidget(tui, theme).join("\\n");
+
+    expect(lines).toContain("12.0%/128k");
+    expect(lines).not.toContain("12.0%/64k");
+    expect(runningContext).not.toHaveBeenCalled();
+    expect(runningBranch).not.toHaveBeenCalled();
+    expect(terminalContext).not.toHaveBeenCalled();
+    expect(terminalBranch).not.toHaveBeenCalled();
   });
 });
 

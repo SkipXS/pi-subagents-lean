@@ -12,7 +12,7 @@ import { getConfig } from "../agents/agent-types.js";
 import type { SubagentType, AgentInvocation } from "../agents/types.js";
 import type { AgentStatus } from "../types.js";
 import type { Theme } from "./types.js";
-import { formatTokens, formatCost } from "../agents/usage.js";
+import { formatTokens, formatCost, type ContextStats } from "../agents/usage.js";
 import { parseThinkingLevel } from "../utils.js";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -41,6 +41,10 @@ export interface UsageDisplay {
   contextPercent?: number | null;
   contextWindow?: number;
   autoCompactionEnabled?: boolean;
+  /** Number of successful compactions; separate from ContextStats.count samples. */
+  compactionCount?: number;
+  /** Current/last-known/peak context telemetry; never used for billing. */
+  contextStats?: ContextStats;
 }
 
 /** Individually addressable fields in the shared agent statistics display. */
@@ -95,16 +99,52 @@ export function buildStatsCells(
   if (visible?.showCost !== false && args.cost != null && (args.cost > 0 || args.usingSubscription)) {
     cells.cost = `${formatCost(args.cost)}${args.usingSubscription ? " (sub)" : ""}`;
   }
-  if (visible?.showContext !== false && (args.contextPercent != null || args.contextWindow != null)) {
-    const context = args.contextPercent == null ? "?" : `${args.contextPercent.toFixed(1)}%`;
-    const display = `${context}/${formatTokens(args.contextWindow ?? 0)}${args.autoCompactionEnabled ? " (auto)" : ""}`;
-    const color = args.contextPercent != null && args.contextPercent > 90
+  const contextStats = args.contextStats;
+  // An explicit live/terminal value wins over telemetry captured before the
+  // current response. Null remains explicit so terminal unknown values do not
+  // become a stale numeric current value; the formatter still shows lastKnown
+  // and peak through the context history below.
+  const contextPercent = args.contextPercent !== undefined ? args.contextPercent : contextStats?.current;
+  // `contextStats.window` is historical telemetry. An explicit current/live
+  // window must win when a session has switched models or branches.
+  const contextWindow = args.contextWindow ?? contextStats?.window;
+  if (visible?.showContext !== false && (contextPercent != null || contextWindow != null || contextStats != null)) {
+    const contextParts = [`${formatContextPercent(contextStats, contextPercent)}/${formatTokens(contextWindow ?? 0)}${args.autoCompactionEnabled ? " (auto)" : ""}`];
+    const peak = formatContextPeak(contextStats, contextPercent);
+    if (peak) contextParts.push(peak);
+    if (args.compactionCount != null && args.compactionCount > 0) contextParts.push(`↻${args.compactionCount}`);
+    const display = contextParts.join(" · ");
+    const colorPercent = contextPercent ?? contextStats?.peak;
+    const color = colorPercent != null && colorPercent > 90
       ? "error"
-      : args.contextPercent != null && args.contextPercent > 70 ? "warning" : undefined;
+      : colorPercent != null && colorPercent > 70 ? "warning" : undefined;
     cells.context = color ? theme.fg(color, display) : display;
   }
   if (visible?.showTime !== false && args.durationMs != null) cells.duration = formatMs(args.durationMs);
   return cells;
+}
+
+/** Clamp only a context progress-bar value; textual percentages remain unbounded. */
+export function clampContextPercentForBar(percent: number | null | undefined): number | undefined {
+  return percent == null ? undefined : Math.min(100, Math.max(0, percent));
+}
+
+/** Render context text without hiding an unmeasured post-compaction state. */
+function formatContextPercent(stats: ContextStats | undefined, current: number | null | undefined): string {
+  if (!stats) return current == null ? "?" : current > 100 ? `${current.toFixed(1)}% (estimated peak)` : `${current.toFixed(1)}%`;
+  if (current != null) return current > 100 ? `${current.toFixed(1)}% (estimated peak)` : `${current.toFixed(1)}%`;
+  if (stats.lastKnown != null) return `${stats.lastKnown.toFixed(1)}% last known (pending compaction)`;
+  return "? (pending compaction)";
+}
+
+/** Show a peak separately only when it conveys information beyond current/last-known. */
+function formatContextPeak(stats: ContextStats | undefined, current: number | null | undefined): string | undefined {
+  const peak = stats?.peak;
+  if (peak == null) return undefined;
+  const baseline = current ?? stats?.lastKnown;
+  if (baseline != null && peak <= baseline) return undefined;
+  const value = peak > 100 ? `~${peak.toFixed(1)}% estimated peak` : `${peak.toFixed(1)}%`;
+  return `peak ${value}`;
 }
 
 /** Format the exact contiguous Pi footer usage sequence. */

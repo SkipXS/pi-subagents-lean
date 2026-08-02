@@ -7,7 +7,7 @@ import { getSessionCtx } from "../shell.js";
 import type { AgentManager } from "../agents/agent-manager.js";
 import type { AgentRecord, AgentStatus } from "../types.js";
 import type { Theme } from "./types.js";
-import { formatCost, getSessionUsageSnapshot } from "../agents/usage.js";
+import { formatCost } from "../agents/usage.js";
 import { buildStatsCells, buildStatsLayout, formatStatsRow, formatThinkingTag, getAgentStatusDisplay, getDisplayName, truncateDesc, describeActivity, fgPreservingNestedStyles, type StatsCells, type StatsLayout, type StatsVisibility } from "./format.js";
 import type { LiveView } from "../spawn/spawn-coordinator.js";
 import { agentContinuationPrefix, agentHierarchyPrefix, agentHierarchyRolePrefix, orderAgentsByHierarchy, visibleNestedAgentIds } from "./agent-hierarchy.js";
@@ -520,19 +520,21 @@ export class AgentWidget {
       : "";
   }
 
-  /** Return live context/auth values, or the terminal snapshot when appropriate. */
+  /**
+   * Return manager-populated context/auth telemetry for this record.
+   *
+   * Rendering runs on an 80ms timer, while getContextUsage() may traverse the
+   * whole session branch. Context samples are captured by AgentManager at
+   * session/event boundaries, so the widget must stay a pure record projection
+   * for both running and terminal agents.
+   */
   private usageSnapshot(agent: AgentRecord) {
-    const live = getSessionUsageSnapshot(agent.execution.session);
-    const persisted = {
+    return {
       contextPercent: agent.stats.contextPercent,
       contextWindow: agent.stats.contextWindow,
       autoCompactionEnabled: agent.stats.autoCompactionEnabled,
       usingSubscription: agent.stats.usingSubscription,
     };
-    const terminal = agent.lifecycle.completedAt != null;
-    return terminal
-      ? (persisted.contextPercent != null || persisted.contextWindow != null ? persisted : live)
-      : (live ?? persisted);
   }
 
   /** Build structured stats for a running or finished agent. */
@@ -548,6 +550,8 @@ export class AgentWidget {
       latestCacheHitRate: agent.stats.latestCacheHitRate,
       cost: agent.stats.lifetimeUsage.cost,
       ...this.usageSnapshot(agent),
+      compactionCount: agent.stats.compactionCount,
+      contextStats: agent.stats.contextStats?.count ? agent.stats.contextStats : undefined,
       durationMs: (agent.lifecycle.completedAt ?? Date.now()) - agent.lifecycle.startedAt,
     }, theme, this.statsVisibility);
   }
@@ -928,6 +932,10 @@ export class AgentWidget {
       return;
     }
     if (!this.uiCtx) return;
+
+    // Keep live session telemetry current without making the widget renderer
+    // traverse session history on every 80ms cadence tick.
+    this.manager.refreshActiveSessions?.();
 
     // Sync compact mode with tool expansion state (ctrl+o)
     // Tools expanded → widget full, tools collapsed → widget compact

@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { buildInvocationTags, buildStatsCells, buildStatsLayout, buildStatsParts, formatStatsRow, formatThinkingTag, formatUsageBlock, getAgentStatusDisplay } from "../../src/ui/format.js";
+import { buildInvocationTags, buildStatsCells, buildStatsLayout, buildStatsParts, clampContextPercentForBar, formatStatsRow, formatThinkingTag, formatUsageBlock, getAgentStatusDisplay } from "../../src/ui/format.js";
 
 const mockTheme = {
   fg: (_color: string, text: string) => text,
@@ -96,6 +96,56 @@ describe("buildStatsParts — visible flag: showContext", () => {
   it("includes Pi context/window/auto but keeps compaction tracking out of usage", () => {
     expect(buildStatsParts(allStats, mockTheme).join(" · "))
       .toBe("5⚙︎ · 3⟳ · ↑1.0k ↓500 R1.3M W12k CH99.1% $1.230 50.0%/272k (auto) · 1m 5s");
+  });
+});
+
+describe("context telemetry display", () => {
+  it("prefers the explicit current window while labeling an unbounded estimated peak", () => {
+    const contextStats = { current: null, lastKnown: 95, peak: 125, window: 100, count: 2 };
+    const text = buildStatsParts({
+      ...allStats,
+      contextPercent: null,
+      compactionCount: 1,
+      contextStats,
+    }, mockTheme).join(" · ");
+
+    expect(text).toContain("95.0% last known (pending compaction)/272k (auto) · peak ~125.0% estimated peak · ↻1");
+    expect(text).not.toContain("/100 (auto)");
+    expect(clampContextPercentForBar(125)).toBe(100);
+    expect(clampContextPercentForBar(-5)).toBe(0);
+    expect(text).not.toContain("100.0% estimated");
+    expect(text).toContain("↻1");
+    expect(text).not.toContain("count 2");
+  });
+
+  it("prefers a newly known live percentage over a stale null current while retaining history", () => {
+    const text = buildStatsParts({
+      ...allStats,
+      contextPercent: 23.4,
+      contextStats: { current: null, lastKnown: 80, peak: 120, window: 272_000, count: 3 },
+    }, mockTheme).join(" · ");
+
+    expect(text).toContain("23.4%/272k (auto) · peak ~120.0% estimated peak");
+    expect(text).not.toContain("pending compaction");
+  });
+
+  it("keeps an explicit terminal null from becoming a stale current value", () => {
+    const text = buildStatsParts({
+      ...allStats,
+      contextPercent: null,
+      contextStats: { current: 80, lastKnown: 70, peak: 90, window: 272_000, count: 3 },
+    }, mockTheme).join(" · ");
+
+    expect(text).toContain("70.0% last known (pending compaction)/272k (auto)");
+    expect(text).not.toContain("80.0%/272k");
+  });
+
+  it("keeps a known textual percentage above 100", () => {
+    const text = buildStatsParts({
+      ...allStats,
+      contextPercent: 125,
+    }, mockTheme).join(" · ");
+    expect(text).toContain("125.0% (estimated peak)/272k");
   });
 });
 
