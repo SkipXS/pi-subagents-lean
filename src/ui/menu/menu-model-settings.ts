@@ -34,16 +34,267 @@ export async function showModelSettingsMenu(
   ctx: ExtensionCommandContext,
   modelOptions: string[],
 ): Promise<void> {
-  const buildItems = (store: ReturnType<typeof getStore>, theme: Theme): SettingItem[] => {
+  type Store = ReturnType<typeof getStore>;
+
+  const ecoModelFor = (store: Store, type: string, parent: string, cfg: ReturnType<typeof getAgentConfig>) =>
+    typeof store.ecoModelSettingFor === "function"
+      ? store.ecoModelSettingFor(type, parent, cfg)
+      : { ...store.modelSettingFor(type, parent, cfg), ecoConfigured: false };
+  const ecoThinkingFor = (store: Store, type: string, parent: ThinkingLevel | undefined, cfg: ReturnType<typeof getAgentConfig>) =>
+    typeof store.ecoThinkingSettingFor === "function"
+      ? store.ecoThinkingSettingFor(type, parent, cfg)
+      : { ...store.thinkingSettingFor(type, parent, cfg), ecoConfigured: false };
+
+  /** Resolve both Default and Eco fields so the overview and editor share one source of truth. */
+  const resolveRoleSettings = (store: Store, typeName: string) => {
+    const cfg = getAgentConfig(typeName);
+    const model = store.modelSettingFor(typeName, "inherit", cfg);
+    const thinking = store.thinkingSettingFor(typeName, undefined, cfg);
+
+    // Some command contexts do not expose a lookup-capable registry (for
+    // example during startup). In that case retain the full level list.
+    const registry = ctx.modelRegistry as typeof ctx.modelRegistry & { find?: unknown };
+    const effectiveModel = typeof registry.find === "function"
+      ? findModelInRegistry(model.value, registry as Parameters<typeof findModelInRegistry>[1], ctx.model)
+      : ctx.model;
+    const effectiveThinking = normalizeThinkingLevel(effectiveModel, thinking.value);
+    const incompatibleThinking = thinking.value !== undefined && effectiveThinking !== thinking.value;
+
+    const configModel = store.agentConfigSnapshot()[typeName];
+    const ecoModel = ecoModelFor(store, typeName, "inherit", cfg);
+    const ecoKey = parseModelKey(ecoModel.value);
+    const effectiveEcoModel = typeof registry.find === "function"
+      ? ecoModel.ecoConfigured
+        ? ecoKey ? registry.find(ecoKey.provider, ecoKey.modelId) : undefined
+        : findModelInRegistry(ecoModel.value, registry as Parameters<typeof findModelInRegistry>[1], ctx.model)
+      : ctx.model;
+    const ecoThinking = ecoThinkingFor(store, typeName, undefined, cfg);
+    const effectiveEcoThinking = normalizeThinkingLevel(effectiveEcoModel, ecoThinking.value);
+
+    return {
+      cfg,
+      model,
+      thinking,
+      effectiveModel,
+      effectiveThinking,
+      incompatibleThinking,
+      configModel,
+      ecoModel,
+      ecoThinking,
+      effectiveEcoModel,
+      effectiveEcoThinking,
+    };
+  };
+
+  // The overview keeps the provider/model identity but omits source suffixes;
+  // the editor retains those full source details in each field's currentValue.
+  const compactModel = (value: string | undefined): string => value?.trim() || "inherit";
+
+  const formatRoleSummary = (settings: ReturnType<typeof resolveRoleSettings>): string => {
+    const defaultThinking = settings.effectiveThinking ?? "inherit";
+    const ecoModel = settings.ecoModel.ecoConfigured ? compactModel(settings.ecoModel.value) : "Default";
+    const ecoThinking = settings.ecoThinking.ecoConfigured
+      ? settings.effectiveEcoThinking ?? "inherit"
+      : "Default";
+    return `Default: ${compactModel(settings.model.value)} / ${defaultThinking} · Eco: ${ecoModel} / ${ecoThinking}`;
+  };
+
+  const modelOverride = (store: Store, key: string, label: string) =>
+    (mode: "session" | "permanent" | "clear", model: string | null): boolean | void => {
+      if (mode === "clear") {
+        if (!applyPersistedSetting(ctx, () => {
+          if (key === "default") store.mutate.agent.setDefaultModel(null);
+          else store.mutate.agent.clearModelOverride(key);
+        }, `${label} model updated`)) return false;
+        store.mutate.session.clearOverride(key);
+        return true;
+      } else {
+        const value = model === "(inherits parent)" ? null : model;
+        if (mode === "session") {
+          if (value === null) store.mutate.session.clearOverride(key);
+          else store.mutate.session.setOverride(key, value);
+          ctx.ui.notify(`${label} model updated`, "info");
+          return true;
+        } else {
+          return applyPersistedSetting(ctx, () => {
+            if (key === "default") store.mutate.agent.setDefaultModel(value);
+            else if (value === null) store.mutate.agent.clearModelOverride(key);
+            else store.mutate.agent.setModelOverride(key, value);
+          }, `${label} model updated`);
+        }
+      }
+    };
+
+  const ecoModelOverride = (store: Store, key: string, label: string) =>
+    (mode: "session" | "permanent" | "clear", model: string | null): boolean | void => {
+      const value = model === "(inherits parent)" ? null : model;
+      if (mode === "session") {
+        if (value === null) store.mutate.session.clearEcoModelOverride(key);
+        else store.mutate.session.setEcoModelOverride(key, value);
+        ctx.ui.notify(`${label} Eco model updated`, "info");
+        return true;
+      }
+      if (mode === "permanent") {
+        return applyPersistedSetting(ctx, () => {
+          if (value === null) store.mutate.agent.clearEcoModelOverride(key);
+          else store.mutate.agent.setEcoModelOverride(key, value);
+        }, `${label} Eco model updated`);
+      }
+      return false;
+    };
+
+  const thinkingOverride = (store: Store, key: string, label: string) =>
+    (mode: "session" | "permanent" | "clear", level: ThinkingLevel | undefined): boolean | void => {
+      if (mode === "clear") {
+        if (!applyPersistedSetting(ctx, () => {
+          if (key === "default") store.mutate.agent.setDefaultThinking(undefined);
+          else store.mutate.agent.clearThinkingOverride(key);
+        }, `${label} thinking updated`)) return false;
+        store.mutate.session.clearThinkingOverride(key);
+        return true;
+      } else if (mode === "session") {
+        if (level === undefined) store.mutate.session.clearThinkingOverride(key);
+        else store.mutate.session.setThinkingOverride(key, level);
+        ctx.ui.notify(`${label} thinking updated`, "info");
+        return true;
+      } else {
+        return applyPersistedSetting(ctx, () => {
+          if (key === "default") store.mutate.agent.setDefaultThinking(level);
+          else if (level === undefined) store.mutate.agent.clearThinkingOverride(key);
+          else store.mutate.agent.setThinkingOverride(key, level);
+        }, `${label} thinking updated`);
+      }
+    };
+
+  const ecoThinkingOverride = (store: Store, key: string, label: string) =>
+    (mode: "session" | "permanent" | "clear", level: ThinkingLevel | undefined): boolean | void => {
+      if (mode === "session") {
+        if (level === undefined) store.mutate.session.clearEcoThinkingOverride(key);
+        else store.mutate.session.setEcoThinkingOverride(key, level);
+        ctx.ui.notify(`${label} Eco thinking updated`, "info");
+        return true;
+      }
+      if (mode === "permanent") {
+        return applyPersistedSetting(ctx, () => {
+          if (level === undefined) store.mutate.agent.clearEcoThinkingOverride(key);
+          else store.mutate.agent.setEcoThinkingOverride(key, level);
+        }, `${label} Eco thinking updated`);
+      }
+      return false;
+    };
+
+  /** Build the four field rows shown after entering one role. */
+  const buildRoleItems = (store: Store, theme: Theme, typeName: string): SettingItem[] => {
+    const settings = resolveRoleSettings(store, typeName);
+    const { model, thinking, effectiveModel, effectiveThinking, incompatibleThinking, configModel, ecoModel, ecoThinking, effectiveEcoModel, effectiveEcoThinking } = settings;
+
+    return [
+      {
+        id: `model:${typeName}`,
+        label: "Standard Model",
+        currentValue: withSource(model.value, model.source),
+        description: `Model setting for ${typeName}. Agent-specific overrides take priority over its MD.`,
+        submenu: createModelSelectSubmenu({
+          modelOptions,
+          showClear: store.sessionModelOverride(typeName) !== null || typeof configModel === "string",
+          theme,
+          onSelect: modelOverride(store, typeName, typeName),
+        }),
+      },
+      {
+        id: `thinking:${typeName}`,
+        label: "Standard Thinking",
+        currentValue: withSource(effectiveThinking, thinking.source),
+        description: incompatibleThinking
+          ? `Using ${effectiveThinking}; requested ${thinking.value} from ${SOURCE_LABELS[thinking.source]} is unsupported by the effective model.`
+          : `Thinking setting for ${typeName}. Agent-specific overrides take priority over its MD.`,
+        submenu: createThinkingSelectSubmenu({
+          showClear: store.sessionThinkingOverride(typeName) !== undefined
+            || store.persistedThinkingOverride(typeName) !== undefined,
+          levels: supportedThinkingLevels(effectiveModel),
+          theme,
+          onSelect: thinkingOverride(store, typeName, typeName),
+        }),
+      },
+      {
+        id: `eco-model:${typeName}`,
+        label: "Eco Model",
+        currentValue: withSource(ecoModel.value, ecoModel.source),
+        description: ecoModel.ecoConfigured
+          ? `Eco model for ${typeName}.`
+          : `No Eco model configured; using the fully resolved Default model.`,
+        submenu: createModelSelectSubmenu({
+          modelOptions,
+          // Scope-aware inheritance replaces the ambiguous cross-scope Clear action.
+          showClear: false,
+          inheritLabel: "Inherit Default",
+          theme,
+          onSelect: ecoModelOverride(store, typeName, typeName),
+        }),
+      },
+      {
+        id: `eco-thinking:${typeName}`,
+        label: "Eco Thinking",
+        currentValue: withSource(effectiveEcoThinking, ecoThinking.source),
+        description: ecoThinking.ecoConfigured
+          ? `Eco thinking for ${typeName}; normalized against its effective Eco model.`
+          : `No Eco thinking configured; using the fully resolved Default thinking.`,
+        submenu: createThinkingSelectSubmenu({
+          // Scope-aware inheritance replaces the ambiguous cross-scope Clear action.
+          showClear: false,
+          inheritLabel: "Inherit Default",
+          levels: supportedThinkingLevels(effectiveEcoModel),
+          theme,
+          onSelect: ecoThinkingOverride(store, typeName, typeName),
+        }),
+      },
+    ];
+  };
+
+  let overviewList: SettingsList | undefined;
+  let rebuildOverview: ((items: SettingItem[]) => void) | undefined;
+
+  /** Update a role's compact row without closing the editor currently in use. */
+  const refreshRoleSummary = (typeName: string): void => {
+    overviewList?.updateValue(
+      `role:${typeName}`,
+      formatRoleSummary(resolveRoleSettings(getStore(), typeName)),
+    );
+  };
+
+  /** Build a role editor as a SettingsList submenu of the compact overview. */
+  const createRoleEditor = (typeName: string, theme: Theme) =>
+    (_currentValue: string, done: (selectedValue?: string) => void) => {
+      let rebuildRole: ((items: SettingItem[]) => void) | undefined;
+      const currentItems = () => buildRoleItems(getStore(), theme, typeName);
+      const leaveEditor = (): void => {
+        refreshRoleSummary(typeName);
+        // Rebuild the overview on exit so newly-created session actions and
+        // reset predicates reflect edits made inside this role editor.
+        rebuildOverview?.(buildItems(getStore(), theme));
+        done();
+      };
+
+      const roleList = new SettingsList(
+        currentItems(),
+        8,
+        buildSettingsListTheme(theme),
+        () => {
+          rebuildRole?.(currentItems());
+          refreshRoleSummary(typeName);
+        },
+        leaveEditor,
+      );
+
+      return new SettingsListWrapper(roleList, {
+        title: `${typeName} Settings`,
+        theme,
+        onRebuild: (callback) => { rebuildRole = callback; },
+      });
+    };
+
+  function buildItems(store: Store, theme: Theme): SettingItem[] {
     const items: SettingItem[] = [];
-    const ecoModelFor = (type: string, parent: string, cfg: ReturnType<typeof getAgentConfig>) =>
-      typeof store.ecoModelSettingFor === "function"
-        ? store.ecoModelSettingFor(type, parent, cfg)
-        : { ...store.modelSettingFor(type, parent, cfg), ecoConfigured: false };
-    const ecoThinkingFor = (type: string, parent: ThinkingLevel | undefined, cfg: ReturnType<typeof getAgentConfig>) =>
-      typeof store.ecoThinkingSettingFor === "function"
-        ? store.ecoThinkingSettingFor(type, parent, cfg)
-        : { ...store.thinkingSettingFor(type, parent, cfg), ecoConfigured: false };
     const sessionEcoModel = (type: string) => store.sessionEcoModelOverride?.(type);
     const sessionEcoThinking = (type: string) => store.sessionEcoThinkingOverride?.(type);
 
@@ -54,90 +305,6 @@ export async function showModelSettingsMenu(
       values: ["ON", "OFF"],
       description: "Exclude bundled agent types from discovery; takes effect on the next parent turn.",
     });
-
-    const modelOverride = (key: string, label: string) =>
-      (mode: "session" | "permanent" | "clear", model: string | null): boolean | void => {
-        if (mode === "clear") {
-          if (!applyPersistedSetting(ctx, () => {
-            if (key === "default") store.mutate.agent.setDefaultModel(null);
-            else store.mutate.agent.clearModelOverride(key);
-          }, `${label} model updated`)) return false;
-          store.mutate.session.clearOverride(key);
-          return true;
-        } else {
-          const value = model === "(inherits parent)" ? null : model;
-          if (mode === "session") {
-            if (value === null) store.mutate.session.clearOverride(key);
-            else store.mutate.session.setOverride(key, value);
-            ctx.ui.notify(`${label} model updated`, "info");
-            return true;
-          } else {
-            return applyPersistedSetting(ctx, () => {
-              if (key === "default") store.mutate.agent.setDefaultModel(value);
-              else if (value === null) store.mutate.agent.clearModelOverride(key);
-              else store.mutate.agent.setModelOverride(key, value);
-            }, `${label} model updated`);
-          }
-        }
-      };
-
-    const ecoModelOverride = (key: string, label: string) =>
-      (mode: "session" | "permanent" | "clear", model: string | null): boolean | void => {
-        const value = model === "(inherits parent)" ? null : model;
-        if (mode === "session") {
-          if (value === null) store.mutate.session.clearEcoModelOverride(key);
-          else store.mutate.session.setEcoModelOverride(key, value);
-          ctx.ui.notify(`${label} Eco model updated`, "info");
-          return true;
-        }
-        if (mode === "permanent") {
-          return applyPersistedSetting(ctx, () => {
-            if (value === null) store.mutate.agent.clearEcoModelOverride(key);
-            else store.mutate.agent.setEcoModelOverride(key, value);
-          }, `${label} Eco model updated`);
-        }
-        return false;
-      };
-
-    const thinkingOverride = (key: string, label: string) =>
-      (mode: "session" | "permanent" | "clear", level: ThinkingLevel | undefined): boolean | void => {
-        if (mode === "clear") {
-          if (!applyPersistedSetting(ctx, () => {
-            if (key === "default") store.mutate.agent.setDefaultThinking(undefined);
-            else store.mutate.agent.clearThinkingOverride(key);
-          }, `${label} thinking updated`)) return false;
-          store.mutate.session.clearThinkingOverride(key);
-          return true;
-        } else if (mode === "session") {
-          if (level === undefined) store.mutate.session.clearThinkingOverride(key);
-          else store.mutate.session.setThinkingOverride(key, level);
-          ctx.ui.notify(`${label} thinking updated`, "info");
-          return true;
-        } else {
-          return applyPersistedSetting(ctx, () => {
-            if (key === "default") store.mutate.agent.setDefaultThinking(level);
-            else if (level === undefined) store.mutate.agent.clearThinkingOverride(key);
-            else store.mutate.agent.setThinkingOverride(key, level);
-          }, `${label} thinking updated`);
-        }
-      };
-
-    const ecoThinkingOverride = (key: string, label: string) =>
-      (mode: "session" | "permanent" | "clear", level: ThinkingLevel | undefined): boolean | void => {
-        if (mode === "session") {
-          if (level === undefined) store.mutate.session.clearEcoThinkingOverride(key);
-          else store.mutate.session.setEcoThinkingOverride(key, level);
-          ctx.ui.notify(`${label} Eco thinking updated`, "info");
-          return true;
-        }
-        if (mode === "permanent") {
-          return applyPersistedSetting(ctx, () => {
-            if (level === undefined) store.mutate.agent.clearEcoThinkingOverride(key);
-            else store.mutate.agent.setEcoThinkingOverride(key, level);
-          }, `${label} Eco thinking updated`);
-        }
-        return false;
-      };
 
     const globalModel = store.sessionDefaultModel ?? store.agent.defaultModel;
     const globalModelSource: SettingSource = store.sessionDefaultModel
@@ -154,7 +321,7 @@ export async function showModelSettingsMenu(
         modelOptions,
         showClear: globalModelSource !== "parent",
         theme,
-        onSelect: modelOverride("default", "Global default"),
+        onSelect: modelOverride(store, "default", "Global default"),
       }),
     });
 
@@ -172,93 +339,19 @@ export async function showModelSettingsMenu(
       submenu: createThinkingSelectSubmenu({
         showClear: globalThinkingSource !== "parent",
         theme,
-        onSelect: thinkingOverride("default", "Global default"),
+        onSelect: thinkingOverride(store, "default", "Global default"),
       }),
     });
 
     items.push({ id: "__types__", label: "── Per-agent settings ──", currentValue: "────────" });
     for (const typeName of getAllTypes()) {
-      const cfg = getAgentConfig(typeName);
-      const model = store.modelSettingFor(typeName, "inherit", cfg);
-      const thinking = store.thinkingSettingFor(typeName, undefined, cfg);
-      // Some command contexts do not expose a lookup-capable registry (for
-      // example during startup). In that case retain the full level list.
-      const registry = ctx.modelRegistry as typeof ctx.modelRegistry & { find?: unknown };
-      const effectiveModel = typeof registry.find === "function"
-        ? findModelInRegistry(model.value, registry as Parameters<typeof findModelInRegistry>[1], ctx.model)
-        : ctx.model;
-      const effectiveThinking = normalizeThinkingLevel(effectiveModel, thinking.value);
-      const incompatibleThinking = thinking.value !== undefined && effectiveThinking !== thinking.value;
-      const configModel = store.agentConfigSnapshot()[typeName];
-      const ecoModel = ecoModelFor(typeName, "inherit", cfg);
-      const ecoRegistry = ctx.modelRegistry as typeof ctx.modelRegistry & { find?: unknown };
-      const ecoKey = parseModelKey(ecoModel.value);
-      const effectiveEcoModel = typeof ecoRegistry.find === "function"
-        ? ecoModel.ecoConfigured
-          ? ecoKey ? ecoRegistry.find(ecoKey.provider, ecoKey.modelId) : undefined
-          : findModelInRegistry(ecoModel.value, ecoRegistry as Parameters<typeof findModelInRegistry>[1], ctx.model)
-        : ctx.model;
-      const ecoThinking = ecoThinkingFor(typeName, undefined, cfg);
-      const effectiveEcoThinking = normalizeThinkingLevel(effectiveEcoModel, ecoThinking.value);
-
+      const roleSettings = resolveRoleSettings(store, typeName);
       items.push({
-        id: `model:${typeName}`,
-        label: `${typeName} · model`,
-        currentValue: withSource(model.value, model.source),
-        description: `Model setting for ${typeName}. Agent-specific overrides take priority over its MD.`,
-        submenu: createModelSelectSubmenu({
-          modelOptions,
-          showClear: store.sessionModelOverride(typeName) !== null || typeof configModel === "string",
-          theme,
-          onSelect: modelOverride(typeName, typeName),
-        }),
-      });
-      items.push({
-        id: `eco-model:${typeName}`,
-        label: `${typeName} · 🍃 Eco model`,
-        currentValue: withSource(ecoModel.value, ecoModel.source),
-        description: ecoModel.ecoConfigured
-          ? `Eco model for ${typeName}.`
-          : `No Eco model configured; using the fully resolved Default model.`,
-        submenu: createModelSelectSubmenu({
-          modelOptions,
-          // Scope-aware inheritance replaces the ambiguous cross-scope Clear action.
-          showClear: false,
-          inheritLabel: "Inherit Default",
-          theme,
-          onSelect: ecoModelOverride(typeName, typeName),
-        }),
-      });
-      items.push({
-        id: `thinking:${typeName}`,
-        label: `${typeName} · thinking`,
-        currentValue: withSource(effectiveThinking, thinking.source),
-        description: incompatibleThinking
-          ? `Using ${effectiveThinking}; requested ${thinking.value} from ${SOURCE_LABELS[thinking.source]} is unsupported by the effective model.`
-          : `Thinking setting for ${typeName}. Agent-specific overrides take priority over its MD.`,
-        submenu: createThinkingSelectSubmenu({
-          showClear: store.sessionThinkingOverride(typeName) !== undefined
-            || store.persistedThinkingOverride(typeName) !== undefined,
-          levels: supportedThinkingLevels(effectiveModel),
-          theme,
-          onSelect: thinkingOverride(typeName, typeName),
-        }),
-      });
-      items.push({
-        id: `eco-thinking:${typeName}`,
-        label: `${typeName} · 🍃 Eco thinking`,
-        currentValue: withSource(effectiveEcoThinking, ecoThinking.source),
-        description: ecoThinking.ecoConfigured
-          ? `Eco thinking for ${typeName}; normalized against its effective Eco model.`
-          : `No Eco thinking configured; using the fully resolved Default thinking.`,
-        submenu: createThinkingSelectSubmenu({
-          // Scope-aware inheritance replaces the ambiguous cross-scope Clear action.
-          showClear: false,
-          inheritLabel: "Inherit Default",
-          levels: supportedThinkingLevels(effectiveEcoModel),
-          theme,
-          onSelect: ecoThinkingOverride(typeName, typeName),
-        }),
+        id: `role:${typeName}`,
+        label: typeName,
+        currentValue: formatRoleSummary(roleSettings),
+        description: `Edit Standard and Eco model/thinking settings for ${typeName}.`,
+        submenu: createRoleEditor(typeName, theme),
       });
     }
 
@@ -317,9 +410,8 @@ export async function showModelSettingsMenu(
     });
 
     return items;
-  };
+  }
 
-  let rebuild: ((items: SettingItem[]) => void) | undefined;
   await ctx.ui.custom((_tui, theme, _kb, done) => {
     const items = buildItems(getStore(), theme);
     let settingsList: SettingsList;
@@ -339,15 +431,16 @@ export async function showModelSettingsMenu(
           );
           return;
         }
-        rebuild?.(buildItems(getStore(), theme));
+        rebuildOverview?.(buildItems(getStore(), theme));
       },
       () => done(undefined),
     );
+    overviewList = settingsList;
     return new SettingsListWrapper(settingsList, {
       title: "Agent Settings",
       theme,
       onCancel: () => done(undefined),
-      onRebuild: (callback) => { rebuild = callback; },
+      onRebuild: (callback) => { rebuildOverview = callback; },
     });
   });
 }
