@@ -4,9 +4,10 @@
 
 import { randomUUID } from "node:crypto";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { runAgent } from "./agent-runner.js";
+import { executeAgentTurn, runAgent } from "./agent-runner.js";
 import { AgentOutputLog } from "./output-file.js";
 import {
+  type AgentExecutionSummary,
   type AgentRecord,
   type AgentHierarchy,
   type AgentStatus,
@@ -31,14 +32,15 @@ import {
   type SessionStatsContextUsage,
 } from "./usage.js";
 import { errorMessage } from "../utils.js";
+import { DEFAULT_GRACE_TURNS } from "../config/config-io.js";
 import { getSubagentRuntimeContext, type NestedAgentExecutor } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 
 /** How often to check for expired agent records (milliseconds). */
 const CLEANUP_INTERVAL_MS = 60_000;
 
-/** Age after which a completed agent record is evicted (milliseconds). Default: 10 min. */
-const DEFAULT_RETENTION_MINUTES = 10;
+/** Age after which a completed agent record is evicted (milliseconds). Default: 60 min. */
+const DEFAULT_RETENTION_MINUTES = 60;
 
 /** UUID prefix length for agent IDs stored in the agents map (uniqueness). */
 const AGENT_ID_PREFIX_LENGTH = 17;
@@ -65,7 +67,7 @@ export interface ConcurrencyConfig {
   default: number;
 }
 
-export type OnAgentComplete = (record: AgentRecord) => void;
+export type OnAgentComplete = (record: AgentRecord, execution?: AgentExecutionSummary) => void;
 /**
  * Internal records always carry the hierarchy projection; public AgentRecord
  * remains compatible with records created before nested delegation.
@@ -79,6 +81,13 @@ type OnAgentStart = (record: AgentRecord) => void;
 interface ConcurrencySlot {
   limit: number;
   running: number;
+}
+
+/** Baseline snapshot used to compute one execution's usage/tool/compaction deltas. */
+interface ExecutionBaseline {
+  usage: AgentUsage;
+  toolUses: number;
+  compactionCount: number;
 }
 
 /** Cheap identity of the live session state last used for record telemetry. */
@@ -125,6 +134,57 @@ interface SpawnArgs {
   options: SpawnOptions;
 }
 
+/** One accepted continuation, either waiting for or owning a global slot. */
+interface ContinueRequest {
+  /** Manager-assigned execution id; unique within the record. */
+  executionId: string;
+  prompt: string;
+  isBackground: boolean;
+  /** Per-execution overrides; fall back to the spawn's stored tunables. */
+  maxTurns?: number;
+  graceTurns?: number;
+  signal?: AbortSignal;
+  onToolActivity?: (activity: ToolActivity) => void;
+  onTextDelta?: (delta: string, fullText: string) => void;
+  resolve: (result: string) => void;
+  reject: (error: Error) => void;
+  /** Acceptance timestamp; the execution summary is created synchronously. */
+  startedAt: number;
+}
+
+interface SpawnQueueEntry {
+  kind: "spawn";
+  id: string;
+  args: SpawnArgs;
+  resolve: (result: string) => void;
+}
+
+interface ContinueQueueEntry {
+  kind: "continue";
+  id: string;
+  request: ContinueRequest;
+}
+
+type QueueEntry = SpawnQueueEntry | ContinueQueueEntry;
+
+/** Input accepted by AgentManager.continueAgent. */
+export interface ContinueOptions {
+  isBackground?: boolean;
+  /** Per-execution overrides; fall back to the spawn's stored tunables. */
+  maxTurns?: number;
+  graceTurns?: number;
+  signal?: AbortSignal;
+  onToolActivity?: (activity: ToolActivity) => void;
+  onTextDelta?: (delta: string, fullText: string) => void;
+}
+
+/** Result of an accepted continuation. executionId is manager/coordinator-internal. */
+export interface ContinueResult {
+  executionId: string;
+  record: AgentRecord;
+  promise: Promise<string>;
+}
+
 export interface SpawnOptions extends SpawnConfig, RunCallbacks {
   isBackground?: boolean;
   /** Parent abort signal — when aborted, the subagent is also stopped. */
@@ -159,6 +219,12 @@ function updateCumulativeCacheHitRate(record: ManagedAgentRecord): void {
     : undefined;
 }
 
+/** Normalize a turn budget the same way the runner does (0/undefined = unlimited). */
+function normalizeTurnBudget(value: number | undefined): number | undefined {
+  if (value == null || value === 0) return undefined;
+  return Math.max(1, value);
+}
+
 export class AgentManager {
   private agents = new Map<string, ManagedAgentRecord>();
   /** Authoritative control ledger, deliberately separate from public records. */
@@ -177,11 +243,14 @@ export class AgentManager {
   /** Retention cutoff in minutes for finished agents. Updated at runtime via setRetentionMinutes. */
   private retentionMinutes = DEFAULT_RETENTION_MINUTES;
 
+  /** Default finished-agent retention when no explicit value is configured. */
+  static readonly DEFAULT_RETENTION_MINUTES = DEFAULT_RETENTION_MINUTES;
+
   /** All agents share one concurrency slot, regardless of model. */
   private concurrencySlot: ConcurrencySlot;
 
-  /** Queue of agents waiting to start, including completion for foreground waiters. */
-  private queue: { id: string; args: SpawnArgs; resolve: (result: string) => void }[] = [];
+  /** Root executions waiting for a global concurrency slot. */
+  private queue: QueueEntry[] = [];
 
   /** Parent-signal listeners, retained so they can be removed at terminal states. */
   private parentAbortListeners = new Map<string, { signal: AbortSignal; listener: () => void }>();
@@ -194,6 +263,9 @@ export class AgentManager {
 
   /** Root records whose slot is retained until their borrowed descendants settle. */
   private heldBorrowedSlots = new Set<string>();
+
+  /** Per-execution baselines used to compute per-execution usage/tool/compaction deltas. */
+  private executionBases = new Map<string, ExecutionBaseline>();
 
   /** Trusted effective configured cap; nested callers cannot override it. */
   private maxNestingDepth: number;
@@ -388,11 +460,12 @@ export class AgentManager {
       status: queued ? "queued" : "running",
       settled: false,
     };
+    const now = Date.now();
     const record: ManagedAgentRecord = {
       id,
       lifecycle: {
         status: control.status,
-        startedAt: Date.now(),
+        startedAt: now,
         settled: false,
       },
       display: {
@@ -423,13 +496,24 @@ export class AgentManager {
         turnCount: 1,
         compactionCount: 0,
         cacheRead: 0,
-        maxTurns: options.maxTurns,
+        maxTurns: normalizeTurnBudget(options.maxTurns ?? agentConfig?.maxTurns),
+        graceTurns: options.graceTurns ?? DEFAULT_GRACE_TURNS,
         contextStats: createContextStats(),
         compactionReasons: [],
+        executions: [{
+          id: randomUUID().slice(0, AGENT_ID_PREFIX_LENGTH),
+          prompt,
+          mode: options.isBackground ? "background" : "foreground",
+          status: control.status,
+          startedAt: now,
+        }],
       },
     };
     this.agents.set(id, record);
     this.nestedControls.set(id, control);
+    // The initial execution's baseline is captured at acceptance so a
+    // queued agent's pre-start usage is never attributed to its own execution.
+    this.executionBases.set(record.stats.executions![0]!.id, this.snapshotExecutionBaseline(record));
     if (parent) {
       parent.childIds.add(id);
       parent.waitingOnChildId = id;
@@ -439,7 +523,7 @@ export class AgentManager {
     // Add a queued entry before binding the parent signal: an already-aborted
     // signal must be able to remove and settle it immediately.
     if (queued) {
-      this.queue.push({ id, args, resolve: resolveQueued! });
+      this.queue.push({ kind: "spawn", id, args, resolve: resolveQueued! });
       this.bindParentAbortSignal(id, options.signal);
       this.totalAgentCount++;
       return id;
@@ -453,7 +537,14 @@ export class AgentManager {
       // includes an already-aborted nested parent, so clear its waiting state.
       this.setSettled(record, control);
       this.clearParentWaitingChild(control);
-      this.safeNotifyComplete(record);
+      const abortedExecution = record.stats.executions?.[0];
+      if (abortedExecution) {
+        abortedExecution.status = "stopped";
+        abortedExecution.completedAt = Date.now();
+        // No runner will finalize this execution; release its baseline.
+        this.executionBases.delete(abortedExecution.id);
+      }
+      this.safeNotifyComplete(record, abortedExecution);
       this.totalAgentCount++;
       return id;
     }
@@ -538,6 +629,10 @@ export class AgentManager {
 
     this.onStart?.(record);
 
+    const initialExecution = record.stats.executions!.at(-1)!;
+    // A queued spawn's summary starts as "queued"; flip it the moment the
+    // runner actually starts so the UI never shows a stale queued marker.
+    initialExecution.status = "running";
     const promise = runAgent(ctx, record.display.type, prompt, {
       pi,
       agentId: id,
@@ -557,12 +652,22 @@ export class AgentManager {
       // mutable reference to the manager's authorization ledger.
       agentCatalog: snapshotAgentCatalog(control.agentCatalog),
       signal: record.execution.abortController!.signal,
-      ...this.createRecordCallbacks(record, options),
+      ...this.createRecordCallbacks(record, options, initialExecution.id),
       onTurnEnd: (turnCount) => {
+        // A delayed turn-end callback from an earlier execution must never
+        // overwrite the cumulative record total or reach the caller's live
+        // view during a later execution.
+        if (!this.isActiveExecution(record, initialExecution.id)) return;
         record.stats.turnCount = turnCount;
+        initialExecution.turnCount = turnCount;
         options.onTurnEnd?.(turnCount);
       },
-      onTextDelta: options.onTextDelta,
+      onTextDelta: (delta, fullText) => {
+        // A stale text delta from an earlier execution must never reach the
+        // caller's live view during a later execution.
+        if (!this.isActiveExecution(record, initialExecution.id)) return;
+        options.onTextDelta?.(delta, fullText);
+      },
       onSessionCreated: (session) => {
         // Shutdown can win the race with asynchronous session setup. Do not
         // retain or observe a late session for an evicted record.
@@ -593,15 +698,17 @@ export class AgentManager {
       },
     })
       .then(({ responseText, session, aborted, turnLimited }) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (control.status !== "stopped") {
-          this.setStatus(record, control, aborted ? "aborted" : turnLimited ? "turn_limited" : "completed");
-        }
-        record.result = responseText;
         // A shutdown may evict the record before a late runner resolution.
         // Do not restore execution handles for a record no longer owned here.
         if (this.agents.get(record.id) === record) record.execution.session = session;
-        record.lifecycle.completedAt ??= Date.now();
+        this.finishTurnExecution(
+          record, control, initialExecution,
+          { responseText, aborted, turnLimited },
+          concurrencySlot,
+        );
+        // The promise resolution is the foreground caller's actual return;
+        // background handoff is recorded by the coordinator on success.
+        if (initialExecution.mode === "foreground") initialExecution.deliveredText = responseText;
         return responseText;
       })
       .catch((err) => {
@@ -610,60 +717,419 @@ export class AgentManager {
           const child = this.agents.get(childId);
           if (child) this.stopAgent(child, "parent");
         }
-        // Don't overwrite status if externally stopped via abort()
-        if (control.status !== "stopped") {
-          this.setStatus(record, control, "error");
-        }
-        record.error = errorMessage(err);
-        record.lifecycle.completedAt ??= Date.now();
+        this.finishTurnExecution(
+          record, control, initialExecution,
+          { responseText: "", aborted: false, turnLimited: false, error: errorMessage(err) },
+          concurrencySlot,
+        );
         return "";
-      })
-      .finally(() => {
-        // Session handles are not guaranteed to remain usable after completion,
-        // so retain the footer values that terminal cards need before cleanup.
-        // The shared observer always performs one final context/auth snapshot,
-        // preserves a valid null-after-compaction sample, and synchronizes the
-        // cheap revision tracker without walking history a second time.
-        this.observeContext(record, true);
-
-        // Finalize output log with final stats
-        if (record.execution.outputLog) {
-          try {
-            record.execution.outputLog.finalize({
-              turnCount: record.stats.turnCount ?? 0,
-              toolUseCount: record.stats.toolUses,
-              totalTokens: getLifetimeTotal(record.stats.lifetimeUsage),
-              cost: record.stats.lifetimeUsage.cost,
-            });
-          } catch { /* ignore */ }
-          record.execution.outputLog = undefined;
-        }
-
-        // The runner has now fully settled, including after a prior stop().
-        // Retention may safely release its execution handles from this point.
-        this.setSettled(record, control);
-        this.clearParentWaitingChild(control);
-
-        // A stopped parent can settle before its borrowed child has finished
-        // observing cancellation. Retain its global slot until every descendant
-        // has settled, then drain exactly once.
-        const releasedSlot = control.usesParentSlot
-          ? this.tryReleaseHeldOwnerSlot(record, concurrencySlot)
-          : this.releaseOwnerSlotWhenDescendantsSettle(record, concurrencySlot);
-        this.clearParentAbortSignal(id);
-
-        this.safeNotifyComplete(record);
-        if (releasedSlot) this.drainQueue();
       });
 
     record.execution.promise = promise;
     return promise;
   }
 
+  /**
+   * Continue a completed agent's session with a new prompt.
+   *
+   * The continuation reuses the record, session, model, and working directory.
+   * Only retained depth-1 records that are `completed`, settled, and still hold
+   * a usable session can be continued: running, queued, and unsettled records
+   * (including a previously accepted continuation) are rejected, as are all
+   * non-completed terminal statuses. The continuation consumes a normal global
+   * concurrency slot — it waits in the shared queue when the limit is reached —
+   * and never increments the accepted-agent count.
+   */
+  continueAgent(agentId: string, prompt: string, options: ContinueOptions = {}): ContinueResult {
+    if (getSubagentRuntimeContext()) {
+      throw new Error("Root agent continuation is unavailable from a child runtime");
+    }
+    if (typeof prompt !== "string" || prompt.trim() === "") {
+      throw new Error("AgentContinue prompt is required");
+    }
+    const resolved = this.resolveAgentId(agentId);
+    if (!resolved.ok) {
+      throw new Error(resolved.error);
+    }
+    const record = this.agents.get(resolved.id)!;
+    const control = this.nestedControls.get(resolved.id)!;
+    if (control.parentId) {
+      throw new Error("Nested agents cannot be continued");
+    }
+    if (control.status !== "completed" || !control.settled) {
+      throw new Error(`Agent ${resolved.id.slice(0, SHORT_ID_LENGTH)} is ${control.status} and cannot be continued`);
+    }
+    if (!record.execution.session) {
+      throw new Error(`Agent ${resolved.id.slice(0, SHORT_ID_LENGTH)} session is no longer available`);
+    }
+
+    const executionId = randomUUID().slice(0, AGENT_ID_PREFIX_LENGTH);
+    let resolveRequest: (result: string) => void = () => {};
+    let rejectRequest: (error: Error) => void = () => {};
+    const promise = new Promise<string>((resolve, reject) => {
+      resolveRequest = resolve;
+      rejectRequest = reject;
+    });
+    const startedAt = Date.now();
+    const request: ContinueRequest = {
+      executionId,
+      prompt,
+      isBackground: options.isBackground === true,
+      maxTurns: options.maxTurns,
+      graceTurns: options.graceTurns,
+      signal: options.signal,
+      onToolActivity: options.onToolActivity,
+      onTextDelta: options.onTextDelta,
+      resolve: resolveRequest,
+      reject: rejectRequest,
+      startedAt,
+    };
+    // Background callers never await this promise, while queued stops and
+    // start failures reject it. Observe the rejection at acceptance so the
+    // failure surfaces on the record instead of as an unhandled rejection.
+    if (request.isBackground) promise.catch(() => {});
+
+    // Atomically claim the record before any async work: the execution
+    // summary, status, and unsettled marker are all set synchronously so no
+    // second continuation (or StopAgent) can observe a stale completed record.
+    const queued = this.concurrencySlot.running >= this.concurrencySlot.limit;
+    const execution: AgentExecutionSummary = {
+      id: executionId,
+      prompt,
+      mode: request.isBackground ? "background" : "foreground",
+      status: queued ? "queued" : "running",
+      startedAt,
+    };
+    (record.stats.executions ??= []).push(execution);
+    // The baseline is captured at acceptance so pre-start usage is never
+    // attributed to this execution (mirrors the initial spawn).
+    this.executionBases.set(execution.id, this.snapshotExecutionBaseline(record));
+    this.setStatus(record, control, queued ? "queued" : "running");
+    record.lifecycle.settled = false;
+    record.lifecycle.completedAt = undefined;
+
+    if (queued) {
+      // Wait for a global slot like any root execution. StopAgent can still
+      // remove and reject the entry while it waits.
+      this.queue.push({ kind: "continue", id: resolved.id, request });
+      this.bindParentAbortSignal(resolved.id, options.signal);
+      return { executionId, record, promise };
+    }
+
+    this.bindParentAbortSignal(resolved.id, options.signal);
+    // Re-read the authoritative control: an already-aborted parent signal
+    // stops the continuation synchronously (status becomes "stopped").
+    if (this.nestedControls.get(resolved.id)!.status !== "running") {
+      // An already-aborted parent signal stopped the continuation before a
+      // runner existed; settle it here so the caller's promise cannot hang.
+      // stopAgent already marked the summary stopped, so find it by id.
+      const abortedExecution = record.stats.executions?.find((e) => e.id === executionId);
+      if (abortedExecution) {
+        abortedExecution.status = "stopped";
+        abortedExecution.completedAt = Date.now();
+        this.finalizeUnstartedExecution(abortedExecution);
+        // No runner will finalize this execution; release its baseline now.
+        this.executionBases.delete(abortedExecution.id);
+      }
+      // This stop never produced a result; never project a prior execution's
+      // text as the current result.
+      record.result = undefined;
+      request.reject(new Error(`Agent ${resolved.id.slice(0, SHORT_ID_LENGTH)} was stopped`));
+      this.setSettled(record, control);
+      this.clearParentWaitingChild(control);
+      this.safeNotifyComplete(record, abortedExecution);
+      return { executionId, record, promise };
+    }
+
+    try {
+      this.startContinueExecution(record, control, request, this.concurrencySlot);
+    } catch (err) {
+      // Synchronous start failure: release the claimed slot and surface the
+      // failure on the record instead of leaking the claim.
+      this.concurrencySlot.running--;
+      this.setStatus(record, control, "error");
+      record.error = errorMessage(err);
+      record.result = undefined;
+      record.lifecycle.completedAt = Date.now();
+      this.setSettled(record, control);
+      const failedExecution = record.stats.executions?.find((e) => e.id === executionId);
+      if (failedExecution) {
+        failedExecution.status = "error";
+        failedExecution.completedAt = Date.now();
+        failedExecution.error = errorMessage(err);
+        // The runner never started; release its baseline now.
+        this.executionBases.delete(failedExecution.id);
+      }
+      request.reject(err instanceof Error ? err : new Error(errorMessage(err)));
+      this.clearParentAbortSignal(resolved.id);
+      this.safeNotifyComplete(record, failedExecution);
+      this.drainQueue();
+    }
+    return { executionId, record, promise };
+  }
+
+  /**
+   * Resolve a full or short agent ID. A short prefix must match exactly one
+   * retained record; an ambiguous prefix is an error rather than a guess.
+   */
+  private resolveAgentId(agentId: string): { ok: true; id: string } | { ok: false; error: string } {
+    if (this.agents.has(agentId)) return { ok: true, id: agentId };
+    let match: string | undefined;
+    for (const id of this.agents.keys()) {
+      if (!id.startsWith(agentId)) continue;
+      if (match !== undefined) {
+        return { ok: false, error: `Agent ${agentId} is ambiguous; use a longer ID prefix` };
+      }
+      match = id;
+    }
+    return match !== undefined
+      ? { ok: true, id: match }
+      : { ok: false, error: `Agent ${agentId} not found` };
+  }
+
+  /** Start an accepted continuation on the live session, consuming one global slot. */
+  private startContinueExecution(
+    record: ManagedAgentRecord,
+    control: NestedControl,
+    request: ContinueRequest,
+    concurrencySlot: ConcurrencySlot,
+  ): void {
+    // Continuations are always root executions and consume a normal global
+    // slot; finalizeAgentCompletion releases it when the agent settles.
+    if (!control.usesParentSlot) concurrencySlot.running++;
+    const execution = record.stats.executions?.find((e) => e.id === request.executionId);
+    const session = record.execution.session;
+    if (!execution || !session) {
+      // The summary is created synchronously at acceptance and the session is
+      // retained until eviction; their absence means the record was replaced
+      // underneath us. Let the caller settle the record as a late failure.
+      throw new Error(`Agent ${record.id.slice(0, SHORT_ID_LENGTH)} session is no longer available`);
+    }
+
+    execution.status = "running";
+    this.setStatus(record, control, "running");
+    record.lifecycle.settled = false;
+    record.lifecycle.completedAt = undefined;
+    // A fresh controller isolates this execution from the previous one; the
+    // old controller's signal was already consumed by the prior turn. The
+    // previous execution's parent-signal binding is replaced by this one.
+    record.execution.abortController = new AbortController();
+    this.clearParentAbortSignal(record.id);
+    this.bindParentAbortSignal(record.id, request.signal);
+
+    // Continuations append to the same output log: the deterministic agent
+    // path is reopened in append mode from the current message count so
+    // earlier executions are never rewritten.
+    try {
+      if (record.execution.outputLog) {
+        record.execution.outputLog.append(request.prompt);
+        // The prompt was just appended manually; start streaming at the
+        // message this turn will add so it is never written twice.
+        record.execution.outputLog.attach(session, session.messages.length + 1);
+      } else {
+        record.execution.outputLog = new AgentOutputLog(record.id, request.prompt, undefined, this.bufferSize, true);
+        record.display.outputFile = record.execution.outputLog.path;
+        record.execution.outputLog.attach(session, session.messages.length + 1);
+      }
+    } catch { /* ignore output-log initialization failures */ }
+
+    this.onStart?.(record);
+
+    const promise = executeAgentTurn(session, request.prompt, {
+      // The original spawn tunables are stored on the record and reused when
+      // the caller does not override them per execution.
+      maxTurns: request.maxTurns ?? record.stats.maxTurns,
+      graceTurns: request.graceTurns ?? record.stats.graceTurns,
+      signal: record.execution.abortController.signal,
+      onTurnEnd: (turnCount) => {
+        // Turn limits apply per execution; cumulative totals are finalized in
+        // finishTurnExecution so a live widget never reads a partial sum. A
+        // delayed callback from an earlier execution must never mutate the
+        // older summary during a later execution.
+        if (!this.isActiveExecution(record, execution.id)) return;
+        execution.turnCount = turnCount;
+      },
+      ...this.createRecordCallbacks(record, {
+        onToolActivity: request.onToolActivity,
+      }, execution.id),
+      onTextDelta: (delta, fullText) => {
+        // A stale text delta from an earlier execution must never reach the
+        // caller's live view during a later execution.
+        if (!this.isActiveExecution(record, execution.id)) return;
+        request.onTextDelta?.(delta, fullText);
+      },
+    })
+      .then(({ responseText, aborted, turnLimited }) => {
+        this.finishTurnExecution(
+          record, control, execution,
+          { responseText, aborted, turnLimited },
+          concurrencySlot,
+        );
+        // Foreground callers receive the text at this resolution; background
+        // handoff is recorded by the coordinator only after a successful send.
+        if (!request.isBackground) execution.deliveredText = responseText;
+        request.resolve(responseText);
+        return responseText;
+      })
+      .catch((err) => {
+        this.finishTurnExecution(
+          record, control, execution,
+          { responseText: "", aborted: false, turnLimited: false, error: errorMessage(err) },
+          concurrencySlot,
+        );
+        request.resolve("");
+        return "";
+      });
+
+    record.execution.promise = promise;
+  }
+
+  /**
+   * Shared completion for one executed turn (initial spawn or continuation).
+   *
+   * Updates record telemetry and the per-execution summary, then settles the
+   * agent and releases its global slot. Exactly one completion notification is
+   * delivered per executed turn.
+   */
+  private finishTurnExecution(
+    record: ManagedAgentRecord,
+    control: NestedControl,
+    execution: AgentExecutionSummary,
+    outcome: { responseText: string; aborted: boolean; turnLimited: boolean; error?: string },
+    concurrencySlot: ConcurrencySlot,
+  ): void {
+    // Active-generation guard: only the latest execution may settle the
+    // record. A stale completion from an earlier generation must not mutate
+    // the current execution, release its slot, or notify.
+    if (record.stats.executions?.at(-1) !== execution) {
+      // Its baseline can never be consumed by a delta computation now.
+      this.executionBases.delete(execution.id);
+      return;
+    }
+    // Session handles are not guaranteed to remain usable after completion,
+    // so retain the footer values that terminal cards need before cleanup.
+    // The shared observer always performs one final context/auth snapshot,
+    // preserves a valid null-after-compaction sample, and synchronizes the
+    // cheap revision tracker without walking history a second time.
+    this.observeContext(record, true);
+
+    const completedAt = Date.now();
+    const status: AgentStatus = control.status === "stopped"
+      ? "stopped"
+      : outcome.error !== undefined
+        ? "error"
+        : outcome.aborted ? "aborted" : outcome.turnLimited ? "turn_limited" : "completed";
+    execution.status = status;
+    execution.completedAt = completedAt;
+    execution.responseText = outcome.responseText;
+    execution.error = outcome.error;
+    // The per-execution delta is computed exactly once; the baseline is
+    // deleted so a second finish cannot double-count usage, tools, or cost.
+    const delta = this.executionDelta(record, execution.id);
+    execution.usage = delta?.usage;
+    execution.toolUses = delta?.toolUses;
+    execution.compactionCount = delta?.compactionCount;
+    this.executionBases.delete(execution.id);
+    this.totalAgentCost += execution.usage?.cost ?? 0;
+
+    if (control.status !== "stopped") this.setStatus(record, control, status);
+    record.result = outcome.responseText;
+    record.error = outcome.error;
+    record.lifecycle.completedAt ??= completedAt;
+    // The record's turn count is cumulative across executions: the initial
+    // spawn's turn-end callback already wrote its absolute total (kept here
+    // when no turn events fired), and each continuation adds its own count.
+    if (record.stats.executions?.[0] === execution) {
+      record.stats.turnCount = execution.turnCount ?? record.stats.turnCount;
+    } else {
+      record.stats.turnCount = (record.stats.turnCount ?? 0) + (execution.turnCount ?? 0);
+    }
+
+    this.finalizeAgentCompletion(record, control, concurrencySlot);
+    this.safeNotifyComplete(record, execution);
+  }
+
+  /** Release the record's terminal handles once no execution remains. */
+  private finalizeAgentCompletion(
+    record: ManagedAgentRecord,
+    control: NestedControl,
+    concurrencySlot: ConcurrencySlot,
+  ): void {
+    // Finalize output log with cumulative stats
+    if (record.execution.outputLog) {
+      try {
+        record.execution.outputLog.finalize({
+          turnCount: record.stats.turnCount ?? 0,
+          toolUseCount: record.stats.toolUses,
+          totalTokens: getLifetimeTotal(record.stats.lifetimeUsage),
+          cost: record.stats.lifetimeUsage.cost,
+        });
+      } catch { /* ignore */ }
+      record.execution.outputLog = undefined;
+    }
+
+    // The runner has now fully settled, including after a prior stop().
+    // Retention may safely release its execution handles from this point.
+    this.setSettled(record, control);
+    this.clearParentWaitingChild(control);
+
+    // A stopped parent can settle before its borrowed child has finished
+    // observing cancellation. Retain its global slot until every descendant
+    // has settled, then drain exactly once.
+    const releasedSlot = control.usesParentSlot
+      ? this.tryReleaseHeldOwnerSlot(record, concurrencySlot)
+      : this.releaseOwnerSlotWhenDescendantsSettle(record, concurrencySlot);
+    this.clearParentAbortSignal(record.id);
+
+    if (releasedSlot) this.drainQueue();
+  }
+
+  /** Snapshot the cumulative counters an execution delta is computed against. */
+  private snapshotExecutionBaseline(record: ManagedAgentRecord): ExecutionBaseline {
+    return {
+      usage: {
+        input: record.stats.lifetimeUsage.input,
+        output: record.stats.lifetimeUsage.output,
+        cacheWrite: record.stats.lifetimeUsage.cacheWrite,
+        cost: record.stats.lifetimeUsage.cost,
+        cacheRead: record.stats.cacheRead,
+      },
+      toolUses: record.stats.toolUses,
+      compactionCount: record.stats.compactionCount,
+    };
+  }
+
+  /** Per-execution usage/tool/compaction deltas against the baseline captured at execution start. */
+  private executionDelta(record: ManagedAgentRecord, executionId: string): ExecutionBaseline | undefined {
+    const base = this.executionBases.get(executionId);
+    if (!base) return undefined;
+    return {
+      usage: {
+        input: Math.max(0, record.stats.lifetimeUsage.input - base.usage.input),
+        output: Math.max(0, record.stats.lifetimeUsage.output - base.usage.output),
+        cacheWrite: Math.max(0, record.stats.lifetimeUsage.cacheWrite - base.usage.cacheWrite),
+        cacheRead: Math.max(0, record.stats.cacheRead - base.usage.cacheRead),
+        cost: Math.max(0, record.stats.lifetimeUsage.cost - base.usage.cost),
+      },
+      toolUses: Math.max(0, record.stats.toolUses - base.toolUses),
+      compactionCount: Math.max(0, record.stats.compactionCount - base.compactionCount),
+    };
+  }
+
+  /** Finalize an accepted execution that never acquired a runner or slot. */
+  private finalizeUnstartedExecution(execution: AgentExecutionSummary): void {
+    execution.usage = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+    execution.turnCount = 0;
+    execution.toolUses = 0;
+    execution.compactionCount = 0;
+  }
+
   /** Notify completion callback, ignoring any errors. */
-  private safeNotifyComplete(record: AgentRecord): void {
-    this.totalAgentCost += record.stats.lifetimeUsage.cost;
-    try { this.onComplete?.(record); } catch { /* ignore */ }
+  private safeNotifyComplete(record: AgentRecord, execution?: AgentExecutionSummary): void {
+    try {
+      if (execution) this.onComplete?.(record, execution);
+      else this.onComplete?.(record);
+    } catch { /* ignore */ }
   }
 
   setOnComplete(cb: OnAgentComplete): void {
@@ -885,7 +1351,7 @@ export class AgentManager {
    * eviction, and session replacement. Multiple callbacks in one synchronous
    * boundary share one queued read.
    */
-  private deferContextSample(record: ManagedAgentRecord): void {
+  private deferContextSample(record: ManagedAgentRecord, executionId?: string): void {
     const session = record.execution.session;
     if (!session) return;
     const pending = this.deferredContextSamples.get(record);
@@ -899,6 +1365,9 @@ export class AgentManager {
       const control = this.nestedControls.get(record.id);
       if (current !== record || !control || control.settled || control.status !== "running") return;
       if (record.execution.session !== session) return;
+      // The sample belongs to one execution generation: a stale defer from an
+      // earlier execution must never observe during a later execution.
+      if (executionId !== undefined && !this.isActiveExecution(record, executionId)) return;
       this.observeContext(record);
     });
   }
@@ -933,26 +1402,42 @@ export class AgentManager {
     (record.stats.compactionReasons ??= []).push(metadata);
   }
 
+  /** True when the record is still manager-owned and the execution that registered callbacks is still the active one. */
+  private isActiveExecution(record: ManagedAgentRecord, executionId: string): boolean {
+    return this.agents.get(record.id) === record
+      && record.stats.executions?.at(-1)?.id === executionId;
+  }
+
   /**
    * Build common record-tracking callbacks shared by startAgent.
    * Updates the record's toolUses, lifetimeUsage, and compactionCount.
    * When options are provided, also forwards events to the caller.
+   *
+   * `executionId` ties every callback to one execution generation: once a
+   * newer execution claims the record (or the record is evicted), stale
+   * events from this generation can no longer mutate record telemetry, defer
+   * observations, or reach the caller's live view.
    */
   private createRecordCallbacks(
     record: ManagedAgentRecord,
     options?: Pick<SpawnOptions, "onToolActivity" | "onAssistantUsage" | "onCompaction">,
+    executionId?: string,
   ): {
     onToolActivity: (activity: ToolActivity) => void;
     onAssistantUsage: (usage: AgentUsage) => void;
     onSupplementalUsage: (usage: AgentUsage) => void;
     onCompaction: (info: CompactionInfo) => void;
   } {
+    const isActive = (): boolean =>
+      executionId === undefined || this.isActiveExecution(record, executionId);
     return {
       onToolActivity: (activity) => {
+        if (!isActive()) return;
         if (activity.type === "end") record.stats.toolUses++;
         options?.onToolActivity?.(activity);
       },
       onAssistantUsage: (usage) => {
+        if (!isActive()) return;
         addUsage(record.stats.lifetimeUsage, usage);
         record.stats.cacheRead += usage.cacheRead;
         updateCumulativeCacheHitRate(record);
@@ -960,16 +1445,18 @@ export class AgentManager {
         // AgentSession emits message_end before SessionManager persistence.
         // Keep accounting and consumer callbacks synchronous, then take one
         // context-only sample once the event's persistence has run.
-        this.deferContextSample(record);
+        this.deferContextSample(record, executionId);
       },
       // Compaction and tool-result usage contributes to the same session-level
       // usage totals displayed by the UI, including its cache hit rate.
       onSupplementalUsage: (usage) => {
+        if (!isActive()) return;
         addUsage(record.stats.lifetimeUsage, usage);
         record.stats.cacheRead += usage.cacheRead;
         updateCumulativeCacheHitRate(record);
       },
       onCompaction: (info) => {
+        if (!isActive()) return;
         record.stats.compactionCount++;
         this.persistCompactionReason(record, info);
         this.observeContext(record);
@@ -1016,7 +1503,7 @@ export class AgentManager {
     return true;
   }
 
-  /** Start queued agents while global capacity is available. */
+  /** Start queued root executions (spawns and continuations) while capacity is available. */
   private drainQueue() {
     const started = new Set<string>();
     for (const entry of this.queue) {
@@ -1026,20 +1513,36 @@ export class AgentManager {
       if (!record || !control || control.status !== "queued") continue;
 
       try {
-        const promise = this.startAgent(entry.id, record, entry.args, this.concurrencySlot);
-        promise.then(entry.resolve);
+        if (entry.kind === "spawn") {
+          const promise = this.startAgent(entry.id, record, entry.args, this.concurrencySlot);
+          promise.then(entry.resolve);
+        } else {
+          this.startContinueExecution(record, control, entry.request, this.concurrencySlot);
+        }
         started.add(entry.id);
       } catch (err) {
         // Late failure — surface on the record so the user can see it
         if (!control.usesParentSlot) this.concurrencySlot.running--;
         this.setStatus(record, control, "error");
         record.error = errorMessage(err);
+        record.result = undefined;
         record.lifecycle.completedAt = Date.now();
         this.setSettled(record, control);
-        entry.resolve("");
+        if (entry.kind === "continue") entry.request.reject(new Error(errorMessage(err)));
+        else entry.resolve("");
         started.add(entry.id);
         this.clearParentAbortSignal(entry.id);
-        this.safeNotifyComplete(record);
+        const failedExecution = record.stats.executions?.find(
+          (e) => e.status === "running" || e.status === "queued",
+        );
+        if (failedExecution) {
+          failedExecution.status = "error";
+          failedExecution.completedAt = Date.now();
+          failedExecution.error = errorMessage(err);
+          // The runner never started; release its baseline now.
+          this.executionBases.delete(failedExecution.id);
+        }
+        this.safeNotifyComplete(record, failedExecution);
       }
     }
     this.queue = this.queue.filter(e => !started.has(e.id));
@@ -1120,10 +1623,18 @@ export class AgentManager {
       const child = this.agents.get(childId);
       if (child) this.stopAgent(child, "parent");
     }
+    // Queued continuations will never execute: reject them so foreground
+    // callers observe the stop instead of hanging behind the queue.
     const wasQueued = control.status === "queued";
     if (wasQueued) {
       const queuedEntry = this.queue.find(q => q.id === record.id);
-      queuedEntry?.resolve("");
+      if (queuedEntry) {
+        if (queuedEntry.kind === "continue") {
+          queuedEntry.request.reject(new Error(`Agent ${record.id.slice(0, SHORT_ID_LENGTH)} was stopped`));
+        } else {
+          queuedEntry.resolve("");
+        }
+      }
       this.queue = this.queue.filter(q => q.id !== record.id);
     } else if (control.status !== "running") {
       return false;
@@ -1133,14 +1644,33 @@ export class AgentManager {
     this.setStatus(record, control, "stopped");
     record.lifecycle.stoppedBy = stoppedBy;
     record.lifecycle.completedAt = Date.now();
+    // A stop never reuses a prior execution's text as the current result; a
+    // running runner repopulates record.result when it settles.
+    record.result = undefined;
+    // The active execution summary reflects the stop immediately; a running
+    // agent's runner later confirms it through the shared completion path.
+    const activeExecution = record.stats.executions?.find(
+      (e) => e.status === "running" || e.status === "queued",
+    );
+    if (activeExecution) {
+      activeExecution.status = "stopped";
+      activeExecution.completedAt ??= Date.now();
+      if (wasQueued) {
+        this.finalizeUnstartedExecution(activeExecution);
+        // A queued continuation never reaches finishTurnExecution; release its
+        // baseline now so it cannot linger until eviction. A running execution's
+        // baseline is deleted by the shared completion path.
+        this.executionBases.delete(activeExecution.id);
+      }
+    }
     // Queued work has no runner to settle. A running agent remains unsettled
-    // until startAgent's finally block has observed the runner completion.
+    // until the shared completion path has observed the runner resolution.
     if (wasQueued) {
       this.setSettled(record, control);
       this.clearParentWaitingChild(control);
     }
     this.clearParentAbortSignal(record.id);
-    if (wasQueued) this.safeNotifyComplete(record);
+    if (wasQueued) this.safeNotifyComplete(record, activeExecution);
     return true;
   }
 
@@ -1154,12 +1684,14 @@ export class AgentManager {
     record.execution.pendingSteers = undefined;
     record.execution.outputLog = undefined;
   }
-
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: ManagedAgentRecord): void {
     try { this.onRecordEvicted?.(record); } catch { /* coordinator cleanup is best-effort */ }
     this.deferredContextSamples.delete(record);
     this.sessionRevisions.delete(id);
+    for (const execution of record.stats.executions ?? []) {
+      this.executionBases.delete(execution.id);
+    }
     this.releaseExecution(record);
     this.agents.delete(id);
     this.nestedControls.delete(id);
@@ -1183,7 +1715,12 @@ export class AgentManager {
 
   dispose() {
     clearInterval(this.cleanupInterval);
-    for (const entry of this.queue) entry.resolve("");
+    // Shutdown rejects queued continuations so foreground callers cannot hang
+    // behind executions that will never start.
+    for (const entry of this.queue) {
+      if (entry.kind === "continue") entry.request.reject(new Error("Agent session shut down"));
+      else entry.resolve("");
+    }
     this.queue = [];
     for (const id of [...this.parentAbortListeners.keys()]) this.clearParentAbortSignal(id);
     for (const [id, record] of this.agents) {

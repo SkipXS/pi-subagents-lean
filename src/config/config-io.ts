@@ -47,7 +47,7 @@ const DEFAULT_AGENT: SubagentsConfig["agent"] = {
   showCost: false,
   showTime: true,
   outputThinkingBufferSize: 0,
-  finishedRetentionMinutes: 10,
+  finishedRetentionMinutes: 60,
   maxNestingDepth: DEFAULT_MAX_NESTING_DEPTH,
 };
 

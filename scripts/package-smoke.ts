@@ -69,7 +69,7 @@ try {
       if (result.extensions.length !== 1) throw new Error("Expected exactly one loaded extension");
       const extension = result.extensions[0];
       const tools = [...extension.tools.keys()];
-      if (tools.join(",") !== "Agent,StopAgent,AgentStatus") {
+      if (tools.join(",") !== "Agent,AgentContinue,StopAgent,AgentStatus") {
         throw new Error("Unexpected tools: " + tools.join(","));
       }
       if (!extension.commands.has("agents")) throw new Error("Missing /agents command");

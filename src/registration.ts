@@ -1,6 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { executeAgentTool, executeStopAgentTool } from "./agents/tool-execution.js";
+import { executeAgentTool, executeContinueAgentTool, executeStopAgentTool } from "./agents/tool-execution.js";
 import { executeAgentStatusTool } from "./agents/agent-status.js";
 import { renderAgentToolCall, renderAgentToolResult, renderSubagentResult } from "./ui/renderer.js";
 import { showAgentsMainMenu } from "./ui/menu/menus.js";
@@ -64,6 +64,21 @@ function registerAgentTool(pi: ExtensionAPI): void {
 export function registerTools(pi: ExtensionAPI): void {
   // Agent tool — fixed stealth schema; live agents are advertised separately.
   registerAgentTool(pi);
+
+  // AgentContinue tool — stealth schema, continue an existing agent session
+  const continueAgentTool = {
+    name: "AgentContinue",
+    label: "AgentContinue",
+    description: "Continue an existing agent's session with a new prompt.",
+    parameters: Type.Object({
+      agent_id: Type.String(),
+      prompt: Type.String(),
+      run_in_background: Type.Optional(Type.Boolean()),
+    }, { additionalProperties: false }),
+    execute: throwingToolExecute(executeContinueAgentTool),
+    constrainedSampling: CONSTRAINED_SAMPLING,
+  };
+  pi.registerTool(continueAgentTool);
 
   // StopAgent tool — stealth schema, stop a running agent by ID
   const stopAgentTool = {

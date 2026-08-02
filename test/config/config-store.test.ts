@@ -269,7 +269,7 @@ describe("ConfigStore reads", () => {
     expect(store.agent.widgetCompact).toBe(false);
     expect(store.agent.widgetShortcut).toBe(false);
     expect(store.agent.defaultModel).toBeNull();
-    expect(store.agent.finishedRetentionMinutes).toBe(10);
+    expect(store.agent.finishedRetentionMinutes).toBe(60);
     expect(store.agent.maxNestingDepth).toBe(2);
   });
 

@@ -191,6 +191,9 @@ export function buildAgentActionsList(
   const hasSession = !!record.execution.session;
   const hasResult = !!record.result && record.result.length > 0;
   const hasError = !!record.error && record.error.length > 0;
+  const coordinator = getCoordinator();
+  const hasRetryableDelivery = record.delivery?.state === "failed"
+    || coordinator?.hasRetryableDelivery?.(record.id) === true;
 
   if (hasSession) {
     items.push({ value: "view-conversation", label: "View conversation" });
@@ -205,7 +208,7 @@ export function buildAgentActionsList(
     items.push({ value: "steer", label: "Steer" });
     items.push({ value: "stop", label: "Stop" });
   }
-  if (!isRunning && record.delivery?.state === "failed") {
+  if (!isRunning && hasRetryableDelivery) {
     items.push({ value: "retry-delivery", label: "Retry delivery" });
   }
 

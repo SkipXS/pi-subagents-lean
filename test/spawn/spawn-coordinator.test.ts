@@ -13,9 +13,10 @@ import { buildInvocationTags } from "../../src/ui/format.js";
 
 // --- Mock modules ---
 
-const { mockAgentConfig, mockRunAgent } = vi.hoisted(() => ({
+const { mockAgentConfig, mockRunAgent, mockExecuteAgentTurn } = vi.hoisted(() => ({
   mockAgentConfig: vi.fn(() => undefined),
   mockRunAgent: vi.fn(),
+  mockExecuteAgentTurn: vi.fn(),
 }));
 
 vi.mock("../../src/agents/agent-types.js", () => ({
@@ -33,6 +34,7 @@ vi.mock("../../src/spawn/worktree-validator.js", () => ({
 
 vi.mock("../../src/agents/agent-runner.js", () => ({
   runAgent: mockRunAgent,
+  executeAgentTurn: mockExecuteAgentTurn,
 }));
 
 vi.mock("../../src/utils.js", () => ({
@@ -45,6 +47,7 @@ vi.mock("../../src/config/config-io.js", () => ({
   loadConfig: vi.fn(() => ({ agent: { default: null, forceBackground: false }, concurrency: { default: 4 } })),
   saveConfigAtomic: vi.fn(),
   DEFAULT_CONFIG: { agent: { default: null, forceBackground: false }, concurrency: { default: 4 } },
+  DEFAULT_GRACE_TURNS: 6,
 }));
 
 // Hoist mock pi so shell mock can return it
@@ -119,6 +122,7 @@ function makeMockManager() {
     listAgents: vi.fn(() => [...records.values()]),
     abort: vi.fn(() => true),
     steer: vi.fn(async () => true),
+    continueAgent: vi.fn(),
     getTotalAgentCost: vi.fn(() => 0),
     getTotalAgentCount: vi.fn(() => 0),
     dispose: vi.fn(),
@@ -129,6 +133,11 @@ function makeMockManager() {
 
 function makeMockCtx() {
   return { cwd: "/test", model: undefined, modelRegistry: {} } as unknown as ExtensionContext;
+}
+
+/** Current per-execution delivery entries (test introspection). */
+function deliveryEntries(coordinator: any): any[] {
+  return [...coordinator.backgroundDeliveries.values()];
 }
 
 // --- Tests ---
@@ -145,6 +154,7 @@ describe("SpawnCoordinator", () => {
     ctx = makeMockCtx();
     mockPi.sendMessage.mockClear();
     mockRunAgent.mockReset();
+    mockExecuteAgentTurn.mockReset();
     mockAgentConfig.mockReset().mockReturnValue(undefined);
     mockGetPiInstance.mockReturnValue(mockPi);
     mockIsIdle.mockReturnValue(true);
@@ -533,7 +543,7 @@ describe("SpawnCoordinator", () => {
       coordinator.scheduleNudge(result.agentId);
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
-      expect((coordinator as any).autoNudgeIssued.has(result.agentId)).toBe(false);
+      expect(deliveryEntries(coordinator).some((e) => e.autoNudgeIssued)).toBe(false);
 
       result.record.lifecycle.status = "completed";
       coordinator.onAgentComplete(result.record);
@@ -549,7 +559,7 @@ describe("SpawnCoordinator", () => {
       vi.advanceTimersByTime(200);
 
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
-      expect((coordinator as any).autoNudgeIssued.has("agent-999")).toBe(false);
+      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
     });
 
     it("starts new batch window for nudges arriving after the previous window", async () => {
@@ -577,6 +587,433 @@ describe("SpawnCoordinator", () => {
 
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("continueAgent", () => {
+    function continuedRecord(overrides: Record<string, unknown> = {}): any {
+      return {
+        id: "agent-x",
+        display: { type: "builder", description: "continued" },
+        lifecycle: { status: "running", startedAt: Date.now(), settled: false },
+        stats: {
+          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+          toolUses: 0,
+          turnCount: 1,
+          compactionCount: 0,
+        },
+        execution: {},
+        ...overrides,
+      };
+    }
+
+    it("awaits the execution delta for a foreground continuation", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const record = continuedRecord();
+      let resolveExecution!: (value: string) => void;
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-1",
+        record,
+        promise: new Promise<string>((resolve) => { resolveExecution = resolve; }),
+      });
+
+      let settled = false;
+      const pending = coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "wrap up", runInBackground: false,
+      }).then((result) => { settled = true; return result; });
+      await Promise.resolve();
+      expect(settled).toBe(false); // foreground callers await the execution
+      expect(coordinator.liveView("agent-x")).toBeDefined();
+
+      resolveExecution("final result");
+      const result = await pending;
+      expect(result.record).toBe(record);
+      expect(record.lifecycle.resultConsumed).toBe(true);
+      expect(coordinator.liveView("agent-x")).toBeUndefined();
+      expect((coordinator as any).backgroundDeliveries.has("exec-1")).toBe(false);
+    });
+
+    it("acknowledges a background continuation immediately", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const record = continuedRecord();
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-1",
+        record,
+        promise: new Promise<string>(() => {}), // never settles in this test
+      });
+
+      const result = await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
+      });
+      expect(result.record).toBe(record);
+      expect(record.delivery).toMatchObject({ state: "pending", attempts: 0 });
+      expect(record.lifecycle.resultConsumed).toBe(false);
+      expect(coordinator.isBackground("agent-x")).toBe(true);
+      expect((coordinator as any).backgroundDeliveries.has("exec-1")).toBe(true);
+    });
+
+    it("delivers exactly one automatic completion per background execution id", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const record = continuedRecord({ result: "bg result" });
+      manager.getRecord.mockReturnValue(record);
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-1",
+        record,
+        promise: new Promise<string>(() => {}),
+      });
+      await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
+      });
+
+      record.lifecycle.status = "completed";
+      const execution = { id: "exec-1", mode: "background", status: "completed", startedAt: Date.now() };
+      coordinator.onAgentComplete(record, execution as any);
+      vi.advanceTimersByTime(200);
+      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
+      expect(mockPi.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ customType: "subagent-result", content: expect.stringContaining("bg result") }),
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+
+      // A duplicate completion for the same generation is ignored.
+      coordinator.onAgentComplete(record, execution as any);
+      vi.advanceTimersByTime(200);
+      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
+
+      // A later continuation with a fresh execution id claims its own delivery.
+      const second = continuedRecord({ result: "second bg result" });
+      manager.getRecord.mockReturnValue(second);
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-2",
+        record: second,
+        promise: new Promise<string>(() => {}),
+      });
+      await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "more", runInBackground: true,
+      });
+      second.lifecycle.status = "completed";
+      coordinator.onAgentComplete(second, { id: "exec-2", mode: "background", status: "completed", startedAt: Date.now() } as any);
+      vi.advanceTimersByTime(200);
+      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
+      expect(mockPi.sendMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({ content: expect.stringContaining("second bg result") }),
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+    });
+
+    it("delivers each same-record continuation's frozen result even when the record moves on", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const record = continuedRecord({ result: "first bg result" });
+      manager.getRecord.mockReturnValue(record);
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-1",
+        record,
+        promise: new Promise<string>(() => {}),
+      });
+      await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "first", runInBackground: true,
+      });
+      record.lifecycle.status = "completed";
+      coordinator.onAgentComplete(record, { id: "exec-1", mode: "background", status: "completed", startedAt: Date.now() } as any);
+
+      // The same record is continued again BEFORE the first nudge timer fires;
+      // the record's mutable result now belongs to the second execution.
+      record.result = "second bg result";
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-2",
+        record,
+        promise: new Promise<string>(() => {}),
+      });
+      await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "second", runInBackground: true,
+      });
+      record.lifecycle.status = "completed";
+      coordinator.onAgentComplete(record, { id: "exec-2", mode: "background", status: "completed", startedAt: Date.now() } as any);
+
+      // Both timers fire in order; each delivers its own frozen payload. The
+      // stale first timer can never send the later execution's result.
+      vi.advanceTimersByTime(200);
+      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
+      const contents = mockPi.sendMessage.mock.calls.map((call) => call[0].content);
+      expect(contents[0]).toContain("first bg result");
+      expect(contents[0]).not.toContain("second bg result");
+      expect(contents[1]).toContain("second bg result");
+      expect(contents[1]).not.toContain("first bg result");
+      // Exactly one success delivery per execution; the projection reflects
+      // the latest execution only.
+      expect(record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
+      expect(deliveryEntries(coordinator)).toHaveLength(0);
+    });
+
+    it("sets deliveredText only after a successful background handoff, never on completion", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const record = continuedRecord({
+        result: "bg result",
+        stats: {
+          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+          toolUses: 0,
+          turnCount: 1,
+          compactionCount: 0,
+          executions: [{
+            id: "exec-1", mode: "background", status: "running", startedAt: Date.now(),
+          }],
+        },
+      });
+      manager.getRecord.mockReturnValue(record);
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-1",
+        record,
+        promise: new Promise<string>(() => {}),
+      });
+      await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
+      });
+
+      record.lifecycle.status = "completed";
+      // First attempt fails: no handoff happened, so nothing is marked delivered.
+      mockGetPiInstance.mockReturnValue(null);
+      coordinator.onAgentComplete(record, { id: "exec-1", mode: "background", status: "completed", startedAt: Date.now() } as any);
+      vi.advanceTimersByTime(200);
+      expect(record.delivery).toMatchObject({ state: "failed", attempts: 1 });
+      expect(record.lifecycle.resultConsumed).toBe(false); // never marked consumed without a handoff
+      expect(record.stats.executions![0]!.deliveredText).toBeUndefined();
+
+      // Manual retry succeeds: the successful handoff is what marks delivered.
+      mockGetPiInstance.mockReturnValue(mockPi);
+      mockPi.sendMessage.mockReset();
+      expect(coordinator.retryDelivery("agent-x")).toBe(true);
+      expect(record.delivery).toMatchObject({ state: "accepted", attempts: 2 });
+      expect(record.lifecycle.resultConsumed).toBe(true);
+      expect(record.stats.executions![0]!.deliveredText).toBe("bg result");
+    });
+
+    it("keeps an older failed delivery retryable after a later continuation is accepted", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      mockPi.sendMessage.mockReset();
+      const firstExecution: any = {
+        id: "exec-a", prompt: "first", mode: "background", status: "running", startedAt: 1_000,
+      };
+      const secondExecution: any = {
+        id: "exec-b", prompt: "second", mode: "background", status: "running", startedAt: 2_000,
+      };
+      const record = continuedRecord({
+        result: "A immutable result",
+        stats: {
+          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+          toolUses: 0,
+          turnCount: 1,
+          compactionCount: 0,
+          cacheRead: 0,
+          executions: [firstExecution],
+        },
+      });
+      manager.getRecord.mockReturnValue(record);
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-a",
+        record,
+        promise: new Promise<string>(() => {}),
+      });
+      await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "first", runInBackground: true,
+      });
+
+      // A's automatic handoff fails, but its frozen payload remains retained.
+      record.lifecycle.status = "completed";
+      mockGetPiInstance.mockReturnValue(null);
+      coordinator.onAgentComplete(record, { ...firstExecution, status: "completed", completedAt: 1_100 } as any);
+      vi.advanceTimersByTime(200);
+      expect(record.delivery).toMatchObject({ state: "failed", attempts: 1 });
+
+      // B uses the same record and is accepted successfully. It must not
+      // replace A's retryable delivery entry or its immutable payload.
+      record.result = "B result";
+      record.stats.executions!.push(secondExecution);
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-b",
+        record,
+        promise: new Promise<string>(() => {}),
+      });
+      await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "second", runInBackground: true,
+      });
+      record.lifecycle.status = "completed";
+      mockGetPiInstance.mockReturnValue(mockPi);
+      coordinator.onAgentComplete(record, { ...secondExecution, status: "completed", completedAt: 2_100 } as any);
+      vi.advanceTimersByTime(200);
+
+      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
+      expect(mockPi.sendMessage.mock.calls[0]![0].content).toContain("B result");
+      expect(mockPi.sendMessage.mock.calls[0]![0].content).not.toContain("A immutable result");
+      expect(coordinator.hasRetryableDelivery("agent-x")).toBe(true);
+      expect(deliveryEntries(coordinator).map((entry) => entry.key)).toEqual(["exec-a"]);
+
+      // The record-level menu retry selects A's oldest failed execution and
+      // sends it once; B is neither duplicated nor substituted.
+      expect(coordinator.retryDelivery("agent-x")).toBe(true);
+      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
+      expect(mockPi.sendMessage.mock.calls[1]![0].content).toContain("A immutable result");
+      expect(mockPi.sendMessage.mock.calls[1]![0].content).not.toContain("B result");
+      // B remains the visible latest delivery projection even though A was
+      // the older entry selected for retry.
+      expect(record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
+      expect(coordinator.retryDelivery("agent-x")).toBe(false);
+      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
+      expect(firstExecution.deliveredText).toBe("A immutable result");
+      expect(secondExecution.deliveredText).toBe("B result");
+    });
+
+    it("reports per-execution deltas, not lifetime totals, in background continuation details", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const execution = {
+        id: "exec-1", mode: "background", status: "completed", startedAt: 10_000, completedAt: 11_250,
+        turnCount: 2, toolUses: 3, compactionCount: 1,
+        usage: { input: 20, output: 6, cacheWrite: 1, cacheRead: 4, cost: 0.02 },
+      };
+      const record = continuedRecord({
+        result: "bg result",
+        stats: {
+          lifetimeUsage: { input: 50, output: 12, cacheWrite: 4, cost: 0.05 },
+          toolUses: 9,
+          turnCount: 7,
+          compactionCount: 3,
+          cacheRead: 9,
+          executions: [
+            {
+              id: "exec-0", prompt: "initial", mode: "foreground", status: "completed",
+              startedAt: Date.now(), turnCount: 5, toolUses: 6, compactionCount: 2,
+              usage: { input: 30, output: 6, cacheWrite: 3, cacheRead: 5, cost: 0.03 },
+            },
+            execution,
+          ],
+        },
+      });
+      manager.getRecord.mockReturnValue(record);
+      manager.continueAgent.mockReturnValueOnce({
+        executionId: "exec-1",
+        record,
+        promise: new Promise<string>(() => {}),
+      });
+      await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
+      });
+
+      record.lifecycle.status = "completed";
+      coordinator.onAgentComplete(record, execution as any);
+      vi.advanceTimersByTime(200);
+
+      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
+      const details = mockPi.sendMessage.mock.calls[0]![0].details;
+      // The continuation delivery exposes the exact execution summary deltas,
+      // never the cumulative lifetime totals on the record.
+      expect(details.turnCount).toBe(2);
+      expect(details.toolUses).toBe(3);
+      expect(details.input).toBe(20);
+      expect(details.output).toBe(6);
+      expect(details.cacheRead).toBe(4);
+      expect(details.cacheWrite).toBe(1);
+      expect(details.cost).toBeCloseTo(0.02);
+      expect(details.compactions).toBe(1);
+      expect(details.compactionCount).toBe(1);
+      expect(details.durationMs).toBe(1250);
+      expect(details.currentExecution).toMatchObject({
+        mode: "background", status: "completed", turnCount: 2, toolUses: 3, compactionCount: 1,
+      });
+      // No execution ids or history leak into delivery details.
+      expect((details.currentExecution as Record<string, unknown>).id).toBeUndefined();
+      expect(details.executions).toBeUndefined();
+      expect(record.stats.executions![1]!.deliveredText).toBe("bg result");
+    });
+
+    it("observes a rejected queued background continuation without an unhandled rejection", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const record = continuedRecord();
+      let rejectExecution!: (error: Error) => void;
+      const promise = new Promise<string>((_, reject) => { rejectExecution = reject; });
+      manager.continueAgent.mockReturnValueOnce({ executionId: "exec-1", record, promise });
+
+      await coordinator.continueAgent(mockPi, ctx, {
+        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
+      });
+      expect(coordinator.isBackground("agent-x")).toBe(true);
+
+      // StopAgent rejects the queued continuation: the coordinator must
+      // observe the rejection (never an unhandled rejection) and the
+      // execution never runs.
+      rejectExecution(new Error("Agent agent-x was stopped"));
+      await Promise.resolve();
+      expect(manager.continueAgent).toHaveBeenCalledOnce();
+      expect((coordinator as any).backgroundDeliveries.has("exec-1")).toBe(true); // claim stays until completion/abandon
+    });
+
+    it("reports a queued background continuation stopped before start exactly once and never runs it", async () => {
+      const realManager = new AgentManager(undefined, { default: 1 });
+      const coordinator = new SpawnCoordinator(realManager);
+      realManager.setOnComplete((record, execution) => coordinator.onAgentComplete(record, execution));
+      try {
+        mockRunAgent.mockResolvedValueOnce({
+          responseText: "done",
+          session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() },
+          aborted: false,
+          turnLimited: false,
+        });
+        const firstId = realManager.spawn(mockPi, ctx, "builder", "first", { description: "first" });
+        await realManager.getRecord(firstId)!.execution.promise;
+        const firstRecord = realManager.getRecord(firstId)!;
+        firstRecord.stats.lifetimeUsage = { input: 11, output: 22, cacheWrite: 33, cost: 0.44 };
+        firstRecord.stats.cacheRead = 55;
+        firstRecord.stats.toolUses = 6;
+        firstRecord.stats.turnCount = 7;
+        firstRecord.stats.compactionCount = 8;
+
+        const blocker = new Promise<any>(() => {});
+        mockRunAgent.mockReturnValueOnce(blocker);
+        realManager.spawn(mockPi, ctx, "builder", "blocker", { description: "blocker" });
+
+        coordinator.continueAgent(mockPi, ctx, {
+          agentId: firstId, prompt: "bg follow-up", runInBackground: true,
+        });
+        const record = realManager.getRecord(firstId)!;
+        expect(record.lifecycle.status).toBe("queued");
+
+        realManager.abort(firstId, "agent");
+        await Promise.resolve(); // the coordinator observed the rejection
+        expect(mockExecuteAgentTurn).not.toHaveBeenCalled(); // never runs
+        mockPi.sendMessage.mockClear();
+        vi.advanceTimersByTime(200);
+
+        // Exactly one stopped notification for the stopped execution, never
+        // the prior execution's result text.
+        expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
+        const content = mockPi.sendMessage.mock.calls[0]![0].content;
+        expect(content).toContain("stopped");
+        expect(content).not.toContain("done");
+        expect(record.lifecycle).toMatchObject({ status: "stopped", settled: true });
+        expect(record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
+        expect(record.stats.executions![1]).toMatchObject({
+          status: "stopped",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+          turnCount: 0,
+          toolUses: 0,
+          compactionCount: 0,
+        });
+        const deliveryDetails = mockPi.sendMessage.mock.calls[0]![0].details;
+        expect(deliveryDetails).toMatchObject({
+          status: "stopped",
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: 0,
+          turnCount: 0,
+          toolUses: 0,
+          compactions: 0,
+          compactionCount: 0,
+          currentExecution: { status: "stopped", turnCount: 0, toolUses: 0, compactionCount: 0 },
+        });
+        expect(deliveryDetails.durationMs).toBeGreaterThanOrEqual(0);
+      } finally {
+        realManager.dispose();
+      }
     });
   });
 
@@ -887,11 +1324,11 @@ describe("SpawnCoordinator", () => {
       });
 
       coordinator.onAgentComplete(result.record);
-      expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(true);
+      expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId && e.signal)).toBe(true);
 
       parent.abort();
       expect(result.record.lifecycle.resultConsumed).toBe(true);
-      expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(false);
+      expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId)).toBe(false);
 
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
@@ -915,7 +1352,7 @@ describe("SpawnCoordinator", () => {
         expect(result.record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent", resultConsumed: true });
         expect(result.record.delivery).toMatchObject({ state: "abandoned" });
         expect(coordinator.isBackground(result.agentId)).toBe(false);
-        expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(false);
+        expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId)).toBe(false);
 
         vi.advanceTimersByTime(200);
         expect(mockPi.sendMessage).not.toHaveBeenCalled();
@@ -963,7 +1400,7 @@ describe("SpawnCoordinator", () => {
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
       expect(result.record.delivery?.state).toBe("abandoned");
-      expect((coordinator as any).backgroundParentAborts.size).toBe(0);
+      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
 
       const acceptedParent = new AbortController();
       const accepted = await coordinator.spawn(mockPi, ctx, {
@@ -992,9 +1429,7 @@ describe("SpawnCoordinator", () => {
 
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
       expect(result.record.delivery?.state).toBe("abandoned");
-      expect((coordinator as any).pendingNudges.size).toBe(0);
-      expect((coordinator as any).backgroundParentAborts.size).toBe(0);
-      expect((coordinator as any).autoNudgeIssued.size).toBe(0);
+      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
     });
 
     it("clears failed-delivery parent tracking when retention evicts its record", async () => {
@@ -1008,11 +1443,10 @@ describe("SpawnCoordinator", () => {
       coordinator.onAgentComplete(result.record);
       vi.advanceTimersByTime(200);
       expect(result.record.delivery?.state).toBe("failed");
-      expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(true);
+      expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId && e.signal)).toBe(true);
 
       coordinator.onRecordEvicted(result.record);
-      expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(false);
-      expect((coordinator as any).autoNudgeIssued.has(result.agentId)).toBe(false);
+      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
     });
 
     it("cleans failed-delivery parent tracking when only its manager is disposed", async () => {
@@ -1036,12 +1470,11 @@ describe("SpawnCoordinator", () => {
       await result.record.execution.promise;
       vi.advanceTimersByTime(200);
       expect(result.record.delivery?.state).toBe("failed");
-      expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(true);
+      expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId && e.signal)).toBe(true);
 
       realManager.dispose();
 
-      expect((coordinator as any).backgroundParentAborts.has(result.agentId)).toBe(false);
-      expect((coordinator as any).autoNudgeIssued.has(result.agentId)).toBe(false);
+      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
       expect(removeListener).toHaveBeenCalledTimes(2);
     });
   });

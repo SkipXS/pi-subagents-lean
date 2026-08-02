@@ -551,7 +551,8 @@ describe("event listener lifecycle", () => {
     expect(currentWidget.setUICtx).toHaveBeenCalledWith(ctx.ui);
     expect(currentWidget.onTurnStart).toHaveBeenCalledOnce();
     currentManager.onComplete({ id: "agent-1" });
-    expect(currentCoordinator.onAgentComplete).toHaveBeenCalledWith({ id: "agent-1" });
+    // The completion handler forwards the optional per-execution summary.
+    expect(currentCoordinator.onAgentComplete).toHaveBeenCalledWith({ id: "agent-1" }, undefined);
     expect(currentWidget.update).toHaveBeenCalledOnce();
   });
 

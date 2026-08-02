@@ -174,7 +174,7 @@ vi.mock("../src/shell.js", () => {
         showContext: a.showContext !== false,
         showTime: a.showTime !== false,
         outputThinkingBufferSize: a.outputThinkingBufferSize ?? 0,
-        finishedRetentionMinutes: a.finishedRetentionMinutes ?? 10,
+        finishedRetentionMinutes: a.finishedRetentionMinutes ?? 60,
         maxNestingDepth: a.maxNestingDepth ?? 2,
       };
     },

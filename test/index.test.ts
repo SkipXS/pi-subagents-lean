@@ -257,13 +257,13 @@ describe("tool registration", () => {
     await loadExtension(api.api);
   });
 
-  it("registers exactly 3 tools", () => {
-    expect(api.tools).toHaveLength(3);
+  it("registers exactly 4 tools", () => {
+    expect(api.tools).toHaveLength(4);
   });
 
-  it("registers Agent, StopAgent, and AgentStatus tools", () => {
+  it("registers Agent, AgentContinue, StopAgent, and AgentStatus tools", () => {
     const names = api.tools.map((t) => t.name);
-    expect(names).toEqual(["Agent", "StopAgent", "AgentStatus"]);
+    expect(names).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
   });
 });
 
@@ -474,7 +474,7 @@ describe("constrained sampling", () => {
     expect(findTool(api, "Agent")!.constrainedSampling).toBeUndefined();
   });
 
-  for (const toolName of ["StopAgent", "AgentStatus"]) {
+  for (const toolName of ["StopAgent", "AgentStatus", "AgentContinue"]) {
     it(`${toolName} has constrainedSampling with json_schema and strict: prefer`, () => {
       const tool = findTool(api, toolName);
       expect(tool).toBeDefined();
@@ -485,11 +485,20 @@ describe("constrained sampling", () => {
     });
   }
 
-  for (const toolName of ["Agent", "StopAgent", "AgentStatus"]) {
+  for (const toolName of ["Agent", "AgentContinue", "StopAgent", "AgentStatus"]) {
     it(`${toolName} schema has additionalProperties: false`, () => {
       const tool = findTool(api, toolName);
       expect(tool).toBeDefined();
       expect(tool!.parameters.additionalProperties).toBe(false);
     });
   }
+
+  it("AgentContinue schema requires agent_id and prompt, with optional run_in_background", () => {
+    const tool = findTool(api, "AgentContinue");
+    expect(tool!.parameters.properties).toMatchObject({
+      agent_id: { type: "string" },
+      prompt: { type: "string" },
+      run_in_background: { type: "boolean", optional: true },
+    });
+  });
 });

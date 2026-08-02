@@ -467,7 +467,9 @@ describe("AgentManager", () => {
       expect(failedRecord.lifecycle.status).toBe("error");
       expect(failedRecord.lifecycle.completedAt).toEqual(expect.any(Number));
       expect(failedRecord.error).toBe("queued startup failed");
-      expect(onComplete).toHaveBeenCalledWith(failedRecord);
+      // Every terminal path reports its exact execution summary.
+      expect(onComplete).toHaveBeenCalledWith(failedRecord, failedRecord.stats.executions![0]);
+      expect(failedRecord.stats.executions![0]).toMatchObject({ status: "error", error: "queued startup failed" });
       expect(manager.getRecord(continuedId)?.lifecycle.status).toBe("running");
       expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(3);
 
@@ -539,7 +541,8 @@ describe("AgentManager", () => {
       expect(manager.abort(queuedId, "user")).toBe(true);
       await expect(queuedRecord.execution.promise).resolves.toBe("");
       expect(queuedRecord.lifecycle.status).toBe("stopped");
-      expect(onComplete).toHaveBeenCalledWith(queuedRecord);
+      expect(onComplete).toHaveBeenCalledWith(queuedRecord, queuedRecord.stats.executions![0]);
+      expect(queuedRecord.stats.executions![0]).toMatchObject({ status: "stopped" });
       first.resolve(mockRunResult());
     });
 
@@ -557,7 +560,8 @@ describe("AgentManager", () => {
       expect(mockModules.mockRunAgent).not.toHaveBeenCalled();
       expect(record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent" });
       expect(record.lifecycle.completedAt).toEqual(expect.any(Number));
-      expect(onComplete).toHaveBeenCalledWith(record);
+      expect(onComplete).toHaveBeenCalledWith(record, record.stats.executions![0]);
+      expect(record.stats.executions![0]).toMatchObject({ status: "stopped" });
       expect(removeListener).toHaveBeenCalledOnce();
     });
 
@@ -579,7 +583,8 @@ describe("AgentManager", () => {
       parent.abort();
       await expect(queuedRecord.execution.promise).resolves.toBe("");
       expect(queuedRecord.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent" });
-      expect(onComplete).toHaveBeenCalledWith(queuedRecord);
+      expect(onComplete).toHaveBeenCalledWith(queuedRecord, queuedRecord.stats.executions![0]);
+      expect(queuedRecord.stats.executions![0]).toMatchObject({ status: "stopped" });
       expect(removeListener).toHaveBeenCalledOnce();
 
       first.resolve(mockRunResult());
@@ -656,7 +661,7 @@ describe("AgentManager", () => {
 
       // Record is consumed (result read) — eligible for eviction when old.
       record.lifecycle.resultConsumed = true;
-      record.lifecycle.completedAt = Date.now() - 20 * 60_000;
+      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
       (manager as any).cleanup();
 
       expect(manager.getRecord(id)).toBeUndefined();
@@ -794,7 +799,7 @@ describe("AgentManager", () => {
       const record = manager.getRecord(id)!;
       await record.execution.promise;
       record.lifecycle.resultConsumed = true;
-      record.lifecycle.completedAt = Date.now() - 20 * 60_000;
+      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
       (manager as any).cleanup();
 
       expect(manager.getRecord(id)).toBeUndefined();
@@ -815,7 +820,7 @@ describe("AgentManager", () => {
 
       // Retention bounds result text even while a failed delivery is retryable.
       record.delivery = { state: "failed", attempts: 1, lastError: "Pi unavailable" };
-      record.lifecycle.completedAt = Date.now() - 20 * 60_000;
+      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
       (manager as any).cleanup();
 
       expect(manager.getRecord(id)).toBeUndefined();
@@ -829,7 +834,7 @@ describe("AgentManager", () => {
       const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
       const record = manager.getRecord(id)!;
       await record.execution.promise;
-      record.lifecycle.completedAt = Date.now() - 20 * 60_000;
+      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
 
       (manager as any).cleanup();
 
@@ -870,7 +875,7 @@ describe("AgentManager", () => {
 
       // Once the LLM has read the result, the record is safe to evict when old.
       record.lifecycle.resultConsumed = true;
-      record.lifecycle.completedAt = Date.now() - 20 * 60_000;
+      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
       (manager as any).cleanup();
 
       expect(manager.getRecord(id)).toBeUndefined();
@@ -884,7 +889,7 @@ describe("AgentManager", () => {
       const record = manager.getRecord(id)!;
       await record.execution.promise;
       record.lifecycle.resultConsumed = true;
-      // Just completed — well within the 10-minute retention window.
+      // Just completed — well within the 60-minute retention window.
       (manager as any).cleanup();
 
       expect(manager.getRecord(id)).toBeDefined();
@@ -917,12 +922,12 @@ describe("AgentManager", () => {
       const record = manager.getRecord(id)!;
       await record.execution.promise;
 
-      // Record completed 15 minutes ago — would be evicted with default 10-min retention
+      // Record completed 70 minutes ago — would be evicted with the default 60-min retention
       record.lifecycle.resultConsumed = true;
-      record.lifecycle.completedAt = Date.now() - 15 * 60_000;
+      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
 
-      // But bump retention to 20 minutes before cleanup
-      manager.setRetentionMinutes(20);
+      // But bump retention to 90 minutes before cleanup
+      manager.setRetentionMinutes(90);
       (manager as any).cleanup();
 
       // Should survive because retention was raised
@@ -1107,11 +1112,24 @@ describe("usage accounting", () => {
     expect((manager as any).sessionRevisions.size).toBe(0);
   });
 
+  it("disposes a late session when shutdown evicted the record before setup finished", async () => {
+    manager = new AgentManager(onComplete);
+    const deferred = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(deferred.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const onSessionCreated = mockModules.mockRunAgent.mock.calls[0]![3].onSessionCreated;
+
+    manager.dispose();
+    const lateSession = mockAgentSession();
+    onSessionCreated(lateSession);
+    expect(lateSession.dispose).toHaveBeenCalledTimes(1);
+    expect(manager.getRecord(id)).toBeUndefined();
+  });
+
   it("does not resample a session after dispose races a late runner settlement", async () => {
     manager = new AgentManager(onComplete);
     const getContextUsage = vi.fn(() => ({ percent: 20, contextWindow: 100 }));
-    const session = {
-      ...mockAgentSession(),
+    const session = {      ...mockAgentSession(),
       getContextUsage,
       sessionManager: { getLeafId: () => "leaf-1" },
     };

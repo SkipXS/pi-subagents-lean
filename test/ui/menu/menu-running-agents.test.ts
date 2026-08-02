@@ -55,6 +55,7 @@ vi.mock("@earendil-works/pi-tui", () => ({
 // Import AFTER mock setup
 import { showRunningAgentsMenu, buildAgentActionsList } from "../../../src/ui/menu/menu-running-agents.js";
 import { getDisplayName } from "../../../src/ui/format.js";
+import { getCoordinator } from "../../../src/shell.js";
 
 function makeRecord(overrides: any = {}): any {
   return {
@@ -250,6 +251,18 @@ describe("buildAgentActionsList — actions submenu", () => {
     expect((buildAgentActionsList(createMockCtx(), failed, noopTheme, () => {}, () => {}, () => {}) as any).items.map((i: any) => i.value)).toContain("retry-delivery");
     expect((buildAgentActionsList(createMockCtx(), accepted, noopTheme, () => {}, () => {}, () => {}) as any).items.map((i: any) => i.value)).not.toContain("retry-delivery");
     expect((buildAgentActionsList(createMockCtx(), abandoned, noopTheme, () => {}, () => {}, () => {}) as any).items.map((i: any) => i.value)).not.toContain("retry-delivery");
+  });
+
+  it("shows Retry delivery when an older failure is retained behind an accepted projection", () => {
+    vi.mocked(getCoordinator).mockReturnValueOnce({
+      hasRetryableDelivery: vi.fn(() => true),
+    } as any);
+    const acceptedProjection = makeRecord({ delivery: { state: "accepted", attempts: 1 } });
+    const values = (buildAgentActionsList(
+      createMockCtx(), acceptedProjection, noopTheme, () => {}, () => {}, () => {},
+    ) as any).items.map((item: any) => item.value);
+
+    expect(values).toContain("retry-delivery");
   });
 
 });

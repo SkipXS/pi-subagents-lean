@@ -150,6 +150,42 @@ export type StopInitiator = "user" | "agent" | "parent";
 /** Background-result delivery state. `accepted` only means Pi did not synchronously reject sendMessage. */
 export type BackgroundDeliveryState = "pending" | "accepted" | "failed" | "abandoned";
 
+/** Whether an execution runs in the foreground (awaited) or background (notification). */
+export type AgentExecutionMode = "foreground" | "background";
+
+/**
+ * Per-execution summary retained on the record for every turn executed on an
+ * agent session (the initial spawn plus each AgentContinue execution). Each
+ * entry carries its own generation (response text), delivery (text handed to
+ * the caller), usage delta, and turn count so continuation history stays
+ * inspectable after the session is gone.
+ */
+export interface AgentExecutionSummary {
+  /** Manager-assigned execution id; unique within the record. */
+  id: string;
+  /** Prompt that started this execution. */
+  prompt: string;
+  mode: AgentExecutionMode;
+  /** "queued" | "running" while active; terminal status after completion. */
+  status: AgentStatus;
+  startedAt: number;
+  completedAt?: number;
+  /** Assistant text generated during this execution (trimmed). */
+  responseText?: string;
+  /** Text delivered to the caller (foreground result or background notification). */
+  deliveredText?: string;
+  /** Usage delta accumulated during this execution only. */
+  usage?: AgentUsage;
+  /** Turns consumed by this execution only. */
+  turnCount?: number;
+  /** Tool uses accumulated during this execution only. */
+  toolUses?: number;
+  /** Compactions that occurred during this execution only. */
+  compactionCount?: number;
+  /** Terminal error for this execution, when failed. */
+  error?: string;
+}
+
 /** Metadata retained with a background agent result for delivery retry and UI status. */
 export interface BackgroundDelivery {
   state: BackgroundDeliveryState;
@@ -231,6 +267,8 @@ export interface AgentAccumulatedStats {
   turnCount?: number;
   /** Max turns limit (from invocation or default). */
   maxTurns?: number;
+  /** Grace turns limit captured at spawn; continuations reuse it per execution. */
+  graceTurns?: number;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /** Previous input token count for delta estimation (vLLM doesn't report cache hits). */
@@ -247,6 +285,8 @@ export interface AgentAccumulatedStats {
   contextStats?: ContextStats;
   /** Compaction reasons retained for viewers opened after the event. */
   compactionReasons?: CompactionReasonMetadata[];
+  /** Per-execution summaries: the initial run plus every AgentContinue execution. */
+  executions?: AgentExecutionSummary[];
 }
 
 
