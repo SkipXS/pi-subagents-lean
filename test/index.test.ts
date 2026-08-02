@@ -26,11 +26,19 @@ vi.mock("@sinclair/typebox", () => {
   });
   return {
     Type: {
-      Object: (properties: Record<string, any>, opts?: any) => ({
-        type: "object",
-        properties,
-        ...(opts || {}),
-      }),
+      Object: (properties: Record<string, any>, opts?: any) => {
+        // Faithful to real TypeBox: `required` lists every property that is
+        // not wrapped in Type.Optional (which the mock marks with optional: true).
+        const required = Object.entries(properties)
+          .filter(([, schema]) => !schema.optional)
+          .map(([key]) => key);
+        return {
+          type: "object",
+          properties,
+          ...(required.length > 0 ? { required } : {}),
+          ...(opts || {}),
+        };
+      },
       String: createType("string"),
       Number: createType("number"),
       Boolean: createType("boolean"),
@@ -493,12 +501,14 @@ describe("constrained sampling", () => {
     });
   }
 
-  it("AgentContinue schema requires agent_id and prompt, with optional run_in_background", () => {
+  it("AgentContinue schema requires agent_id, prompt, and run_in_background (strict-mode compatible)", () => {
     const tool = findTool(api, "AgentContinue");
+    expect(tool!.parameters.required).toEqual(["agent_id", "prompt", "run_in_background"]);
     expect(tool!.parameters.properties).toMatchObject({
       agent_id: { type: "string" },
       prompt: { type: "string" },
-      run_in_background: { type: "boolean", optional: true },
+      run_in_background: { type: "boolean" },
     });
+    expect(tool!.parameters.properties.run_in_background.optional).toBeUndefined();
   });
 });

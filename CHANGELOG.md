@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AgentRecord source compatibility.** `hierarchy` is optional for records created before nested delegation; manager-created records retain it internally.
 - **Nesting settings and manager enforcement.** `maxNestingDepth` defaults to 2 and normalizes only to 1 or 2; depth 2 is the hard runtime maximum. The manager centrally enforces captured-catalog permission, depth, budget, and active-child checks for every nested spawn. The bundled `implementer` may create up to four direct children; other delegators without an explicit limit default to one child.
 
+### Fixed
+- **`AgentContinue` schema now satisfies strict-mode providers.** Codex rejects tool schemas whose `required` array omits any property, so `run_in_background` is now a mandatory boolean (`Type.Boolean()` instead of `Type.Optional`) — the executor still treats `false`/missing as foreground, so behavior is unchanged.
+
 ## [0.1.0] - 2026-07-29
 
 ### Changed

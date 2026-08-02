@@ -70,10 +70,13 @@ export function registerTools(pi: ExtensionAPI): void {
     name: "AgentContinue",
     label: "AgentContinue",
     description: "Continue an existing agent's session with a new prompt.",
+    // Strict-mode providers (Codex) require every property to be present in
+    // `required`, so run_in_background must be a mandatory boolean here even
+    // though the executor tolerates its absence (defaults to foreground).
     parameters: Type.Object({
       agent_id: Type.String(),
       prompt: Type.String(),
-      run_in_background: Type.Optional(Type.Boolean()),
+      run_in_background: Type.Boolean(),
     }, { additionalProperties: false }),
     execute: throwingToolExecute(executeContinueAgentTool),
     constrainedSampling: CONSTRAINED_SAMPLING,

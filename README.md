@@ -106,15 +106,16 @@ spawn flow. `worktree_path` is rejected for nested children.
 
 ### `AgentContinue`
 
-`AgentContinue({ agent_id, prompt, run_in_background? })` continues a
+`AgentContinue({ agent_id, prompt, run_in_background })` continues a
 finished agent on its existing session, reusing its model, working directory,
-output log, and stored `max_turns`/`grace_turns` limits. Only retained depth-1
+output log, and stored `max_turns`/`grace_turns` limits. `run_in_background`
+is a mandatory boolean (strict-mode tool schemas cannot declare optional
+parameters): pass `true` to acknowledge immediately with a completion
+notification, or `false` to await the new execution's result. Only retained depth-1
 agents that completed successfully can be continued; running, queued,
 unsettled, stopped, aborted, turn-limited, or failed agents are rejected, as
 are nested children. A short `agent_id` prefix is accepted only when it matches
-exactly one retained agent; ambiguous prefixes are rejected. Foreground calls
-return the new execution's result; `run_in_background` acknowledges immediately
-and delivers one completion notification per execution. Each execution is
+exactly one retained agent; ambiguous prefixes are rejected. Each execution is
 retained as its own entry (`id`, `mode`, `status`, `usage`, `turnCount`) in the
 record's `executions` history and the accumulated usage, cost, tool, turn, and
 compaction totals stay cumulative across executions.
