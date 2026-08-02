@@ -523,6 +523,73 @@ describe("AgentManager.continueAgent", () => {
     expect(record.stats.executions![1]).toMatchObject({ status: "error" });
   });
 
+  it("releases the queue after a continuation startup failure and starts later work", async () => {
+    manager = new AgentManager(onComplete, { default: 1 }, (record) => {
+      if ((record.stats.executions?.length ?? 0) > 1) throw new Error("queued continuation start failed");
+    });
+    const { id } = await spawnCompletedAgent("first");
+
+    const blocker = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
+    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+
+    const queued = manager.continueAgent(id, "queued follow-up", {});
+    const queuedRejection = expect(queued.promise).rejects.toThrow("queued continuation start failed");
+    const laterRun = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(laterRun.promise);
+    const laterId = manager.spawn(fakePi(), fakeCtx(), "scout", "later", { description: "later" });
+
+    expect(manager.getRecord(id)!.lifecycle.status).toBe("queued");
+    expect(manager.getRecord(laterId)!.lifecycle.status).toBe("queued");
+    blocker.resolve(mockRunResult());
+    await manager.getRecord(blockerId)!.execution.promise;
+    await queuedRejection;
+
+    const failed = manager.getRecord(id)!;
+    expect(failed.lifecycle).toMatchObject({ status: "error", settled: true });
+    expect(failed.error).toBe("queued continuation start failed");
+    expect(failed.stats.executions![1]).toMatchObject({
+      status: "error",
+      error: "queued continuation start failed",
+    });
+    expect(mockModules.mockExecuteAgentTurn).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(manager.getRecord(laterId)!.lifecycle.status).toBe("running"));
+
+    laterRun.resolve(mockRunResult());
+    await manager.getRecord(laterId)!.execution.promise;
+  });
+
+  it("stops a queued continuation when its parent signal aborts", async () => {
+    manager = new AgentManager(onComplete, { default: 1 });
+    const { id } = await spawnCompletedAgent("first");
+
+    const blocker = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
+    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const parent = new AbortController();
+    const removeListener = vi.spyOn(parent.signal, "removeEventListener");
+    const queued = manager.continueAgent(id, "queued follow-up", { signal: parent.signal });
+    const record = manager.getRecord(id)!;
+    const stopped = expect(queued.promise).rejects.toThrow("was stopped");
+
+    parent.abort();
+    await stopped;
+    expect(record.lifecycle).toMatchObject({ status: "stopped", settled: true, stoppedBy: "parent" });
+    expect(record.stats.executions![1]).toMatchObject({
+      status: "stopped",
+      usage: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+      turnCount: 0,
+      toolUses: 0,
+      compactionCount: 0,
+    });
+    expect(mockModules.mockExecuteAgentTurn).not.toHaveBeenCalled();
+    expect(removeListener).toHaveBeenCalledOnce();
+
+    blocker.resolve(mockRunResult());
+    await manager.getRecord(blockerId)!.execution.promise;
+    expect(mockModules.mockExecuteAgentTurn).not.toHaveBeenCalled();
+  });
+
   it("turns an aborted continuation into an aborted execution entry", async () => {
     manager = new AgentManager(onComplete);
     const { id } = await spawnCompletedAgent("initial task");
@@ -569,12 +636,14 @@ describe("AgentManager.continueAgent", () => {
     await manager.getRecord(parentId)!.execution.promise;
   });
 
-  it("rejects continuation from a child runtime", async () => {
+  it("rejects root spawning and continuation from a child runtime", async () => {
     manager = new AgentManager(onComplete);
     const { id } = await spawnCompletedAgent("initial task");
     await runWithSubagentRuntime(
       createSubagentRuntimeContext(async () => ({ content: [] }), getStore().createSubagentRuntimeSettings()),
       async () => {
+        expect(() => manager.spawn(fakePi(), fakeCtx(), "scout", "nope", { description: "nope" }))
+          .toThrow("Root agent spawning is unavailable from a child runtime");
         expect(() => manager.continueAgent(id, "nope", {}))
           .toThrow("Root agent continuation is unavailable from a child runtime");
       },
@@ -903,16 +972,108 @@ describe("AgentManager.continueAgent", () => {
     const second = manager.continueAgent(id, "second follow-up", {});
     getContextUsage.mockClear();
 
-    // A late usage event from execution 1 arrives while execution 2 runs. It
-    // must not mutate the record or observe the session.
+    // Late events from execution 1 arrive while execution 2 runs. They must
+    // not mutate the record, observe the session, or reach a live consumer.
+    const usageBefore = { ...record.stats.lifetimeUsage };
+    const toolUsesBefore = record.stats.toolUses;
+    const compactionsBefore = record.stats.compactionCount;
     firstCallbacks.onAssistantUsage({ input: 1, output: 1, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    firstCallbacks.onToolActivity({ type: "end", toolName: "stale" });
+    firstCallbacks.onSupplementalUsage({ input: 2, output: 2, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    firstCallbacks.onCompaction({ reason: "threshold", tokensBefore: 500 });
     await Promise.resolve();
     expect(getContextUsage).not.toHaveBeenCalled();
     expect(record.stats.contextStats?.count ?? 0).toBe(samplesAfterFirst);
+    expect(record.stats.lifetimeUsage).toEqual(usageBefore);
+    expect(record.stats.toolUses).toBe(toolUsesBefore);
+    expect(record.stats.compactionCount).toBe(compactionsBefore);
 
     secondRun.resolve({ responseText: "second", aborted: false, turnLimited: false });
     await second.promise;
     expect(record.stats.executions![2]).toMatchObject({ status: "completed", responseText: "second" });
+  });
+
+  it("continues when output-log attachment fails and still settles normally", async () => {
+    manager = new AgentManager(onComplete);
+    const session = mockAgentSession();
+    const { id } = await spawnCompletedAgent("initial task", { session });
+    session.subscribe.mockImplementationOnce(() => {
+      throw new Error("output stream unavailable");
+    });
+    mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
+      responseText: "continued", aborted: false, turnLimited: false,
+    });
+
+    const { promise, record } = manager.continueAgent(id, "follow-up", {});
+    await expect(promise).resolves.toBe("continued");
+    expect(session.subscribe).toHaveBeenCalledOnce();
+    expect(record.lifecycle.status).toBe("completed");
+    expect(record.execution.outputLog).toBeUndefined();
+  });
+
+  it("evicts a completed continuation and disposes its retained session", async () => {
+    manager = new AgentManager(onComplete);
+    const session = mockAgentSession();
+    const { id } = await spawnCompletedAgent("initial task", { session });
+    mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
+      responseText: "continued", aborted: false, turnLimited: false,
+    });
+    const { promise, record } = manager.continueAgent(id, "follow-up", {});
+    await promise;
+
+    const onEvicted = vi.fn();
+    manager.setOnRecordEvicted(onEvicted);
+    record.lifecycle.completedAt = Date.now() - 2 * 60_000;
+    manager.setRetentionMinutes(1);
+    (manager as any).cleanup();
+
+    expect(manager.getRecord(id)).toBeUndefined();
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(onEvicted).toHaveBeenCalledWith(record);
+  });
+
+  it("fails a queued continuation if its retained session disappears before start", async () => {
+    manager = new AgentManager(onComplete, { default: 1 });
+    const { id } = await spawnCompletedAgent("initial task");
+
+    const blocker = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
+    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const queued = manager.continueAgent(id, "queued follow-up", {});
+    const record = manager.getRecord(id)!;
+    record.execution.session = undefined;
+
+    blocker.resolve(mockRunResult());
+    await manager.getRecord(blockerId)!.execution.promise;
+    await expect(queued.promise).rejects.toThrow("session is no longer available");
+    expect(record.lifecycle).toMatchObject({ status: "error", settled: true });
+    expect(record.stats.executions![1]).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("session is no longer available"),
+    });
+  });
+
+  it("supports steering before and after a running session becomes available", async () => {
+    manager = new AgentManager(onComplete);
+    const running = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(running.promise);
+    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "running", { description: "running" });
+    const record = manager.getRecord(id)!;
+
+    expect(await manager.steer(id, "before session")).toBe(true);
+    expect(record.execution.pendingSteers).toEqual(["before session"]);
+
+    const session = mockAgentSession();
+    session.steer.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("idle"));
+    record.execution.session = session;
+    expect(await manager.steer(id, "live")).toBe(true);
+    expect(await manager.steer(id, "late")).toBe(false);
+    expect(session.steer).toHaveBeenNthCalledWith(1, "live");
+    expect(session.steer).toHaveBeenNthCalledWith(2, "late");
+
+    running.resolve(mockRunResult({ session }));
+    await record.execution.promise;
+    expect(await manager.steer(id, "finished")).toBe(false);
   });
 
   it("returns an empty continuation result instead of the prior execution's text", async () => {
@@ -928,6 +1089,41 @@ describe("AgentManager.continueAgent", () => {
     expect(record.result).toBe("");
     expect(record.result).not.toBe("done"); // never reuses the prior assistant text
     expect(record.stats.executions![1]!.responseText).toBe("");
+  });
+
+  it("keeps manager configuration and cleanup failure-safe around retained records", async () => {
+    manager = new AgentManager(onComplete);
+    manager.setRetentionMinutes(0);
+    manager.setConcurrency({ default: 0 });
+    manager.setMaxNestingDepth(Number.NaN);
+
+    expect(manager.preflightNested("missing", "scout")).toEqual({
+      ok: false,
+      error: "Nested agent parent is no longer running",
+    });
+    expect(() => manager.spawnNested("missing", fakePi(), fakeCtx(), "scout", "child", {
+      description: "child",
+      isBackground: true,
+    })).toThrow("Nested agents must run in the foreground");
+    expect(manager.abort("missing", "agent")).toBe(false);
+
+    const session = mockAgentSession();
+    session.dispose.mockImplementation(() => { throw new Error("dispose failed"); });
+    const { id } = await spawnCompletedAgent("initial task", { session });
+    expect(manager.abort(id, "agent")).toBe(false);
+
+    const record = manager.getRecord(id)!;
+    const onEvicted = vi.fn(() => { throw new Error("eviction callback failed"); });
+    manager.setOnRecordEvicted(onEvicted);
+    record.lifecycle.completedAt = 0;
+    (manager as any).cleanup();
+
+    expect(onEvicted).toHaveBeenCalledWith(record);
+    expect(manager.getRecord(id)).toBeUndefined();
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(record.execution.session).toBeUndefined();
+    expect(record.execution.abortController).toBeUndefined();
+    expect(record.execution.promise).toBeUndefined();
   });
 
   it("keeps the retention default at 60 minutes", () => {
