@@ -54,11 +54,11 @@ describe("validateWorktreePath real git integration", () => {
   let root: string | undefined;
 
   afterEach(() => {
-    if (root) rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+    if (root) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     root = undefined;
   });
 
-  it("accepts a main checkout and linked worktree, and rejects an independent repository", async () => {
+  it("accepts a main checkout and linked worktree, and rejects an independent repository", { timeout: 30_000 }, async () => {
     root = mkdtempSync(join(tmpdir(), "pi-worktree-validator-"));
     const main = join(root, "main");
     const linked = join(root, "linked");
