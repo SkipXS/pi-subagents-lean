@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { formatCost, formatTokens } from "./usage.js";
-import { summarizeToolArgs } from "../ui/format.js";
+import { summarizeToolArgs } from "../utils.js";
 
 
 /** Find the last sentence boundary in text. Returns the index of the

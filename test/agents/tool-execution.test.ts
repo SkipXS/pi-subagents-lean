@@ -154,10 +154,6 @@ vi.mock("../../src/shell.js", () => {
     getTotalAgentCost: vi.fn(() => 0),
     abort: vi.fn(() => false),
   }),
-  getWidget: () => ({
-    ensureTimer: vi.fn(),
-    update: vi.fn(),
-  }),
   getCoordinator: () => coordinator,
 };
 });

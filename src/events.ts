@@ -1,25 +1,16 @@
-import type { AgentRecord } from "./types.js";
-
 import * as path from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, isKeyRelease } from "@earendil-works/pi-tui";
 import { registerAgents, getAvailableAgents, setAgentScanDirs, scanAndMerge } from "./agents/agent-types.js";
 import { AgentManager } from "./agents/agent-manager.js";
-import { AgentWidget, type UICtx } from "./ui/agent-widget.js";
-import { ConversationViewer, VIEWER_OVERLAY_OPTIONS } from "./ui/conversation-viewer.js";
 import { SpawnCoordinator } from "./spawn/spawn-coordinator.js";
 import { toolCallListener } from "./agents/tool-execution.js";
-import { ECO_STATUS_KEY, syncEcoStatus } from "./ui/eco-status.js";
 import { getOrchestrationPromptUpdate } from "./prompt/orchestration.js";
 import {
-  getPiInstance,
-  getManager,
-  getWidget,
   getCoordinator,
+  getManager,
   getStore,
   setSessionCtx,
   setManager,
-  setWidget,
   setCoordinator,
 } from "./shell.js";
 
@@ -28,52 +19,29 @@ import {
 // ============================================================================
 
 /**
- * Ensure the manager and widget singletons exist.
+ * Ensure the root manager and coordinator singletons exist.
  * Idempotent — safe to call on every session_start.
  */
-export function ensureManagerAndWidget(): void {
-  const currentManager = getManager();
-  const currentWidget = getWidget();
+export function ensureManagerAndCoordinator(): void {
+  let manager = getManager();
 
-  // Create manager if missing
-  if (!currentManager) {
-    // Coordinator will be created after manager, so use a placeholder onComplete
-    // that we'll replace once coordinator is created.
-    const newManager = new AgentManager(
-      undefined, // onComplete wired below
+  if (!manager) {
+    manager = new AgentManager(
+      undefined,
       getStore().concurrency as unknown as ConstructorParameters<typeof AgentManager>[1],
       undefined,
       getStore().agent.outputThinkingBufferSize,
       getStore().agent.maxNestingDepth,
     );
-    setManager(newManager);
-    // Sync the manager as a config side-effect target (concurrency setters call setConcurrency).
-    getStore().setDeps({ manager: newManager });
-
-    // Now create coordinator with the real manager
-    const coordinator = new SpawnCoordinator(newManager);
-    setCoordinator(coordinator);
-
-    // Wire the manager's onComplete to the coordinator
-    newManager.setOnComplete((record, execution) => {
-      // Delegate completion side-effects to coordinator
-      coordinator.onAgentComplete(record, execution);
-      getWidget()?.update();
-    });
-    newManager.setOnRecordEvicted?.((record) => coordinator.onRecordEvicted(record));
+    setManager(manager);
+    getStore().setDeps({ manager });
   }
 
-  // Create widget if missing (uses existing or newly created manager)
-  if (!currentWidget) {
-    const newWidget = new AgentWidget(
-      getManager()!,
-      (id: string) => getCoordinator()?.liveView(id),
-    );
-    setWidget(newWidget);
-    // Sync the widget as a config side-effect target. setDeps re-syncs showCost +
-    // all widget display settings from current config (absorbs the old
-    // newWidget.setShowCost(...) + syncWidgetSettings() calls).
-    getStore().setDeps({ widget: newWidget });
+  if (!getCoordinator()) {
+    const coordinator = new SpawnCoordinator(manager);
+    setCoordinator(coordinator);
+    manager.setOnComplete((record, execution) => coordinator.onAgentComplete(record, execution));
+    manager.setOnRecordEvicted?.((record) => coordinator.onRecordEvicted(record));
   }
 }
 
@@ -96,9 +64,6 @@ export async function scanAndRegisterAgents(
   setAgentScanDirs(userAgentDir, projectAgentDir, sharedAgentDir);
 
   const disableDefaults = getStore().agent.disableDefaultAgents;
-
-  // Scan user/shared/project layers and merge with defaults
-  // (skip defaults when disableDefaultAgents is on)
   const merged = await scanAndMerge({ disableDefaultAgents: disableDefaults });
 
   // A session can be shut down while its scan is pending. The catalog is a
@@ -113,10 +78,8 @@ export async function loadConfigAndRegisterAgents(
   ctx: ExtensionContext,
   shouldRegister?: () => boolean,
 ): Promise<void> {
-  // ConfigStore is authoritative for config + session overrides + widget/manager
-  // side effects.
   getStore().reload();
-  ensureManagerAndWidget();
+  ensureManagerAndCoordinator();
   await scanAndRegisterAgents(ctx, shouldRegister);
 }
 
@@ -124,112 +87,7 @@ export async function loadConfigAndRegisterAgents(
 // Event listener setup
 // ============================================================================
 
-/**
- * Open a ConversationViewer overlay for the given agent record.
- * Sets viewerOpen flag on the widget to prevent nav deactivation while open.
- */
-async function openViewer(ctx: ExtensionContext, record: AgentRecord | null): Promise<void> {
-  if (!record) return;
-  if (!record.execution?.session) return;
-  const widget = getWidget();
-  if (!widget) return;
-  const manager = getManager();
-  const coordinator = getCoordinator();
-
-  try {
-    widget.setViewerOpen(true);
-
-    await ctx.ui.custom<void>(
-      (tui, theme, kb, done) =>
-        new ConversationViewer(
-          tui,
-          record.execution.session!,
-          record,
-          theme,
-          done,
-          () => manager?.abort(record.id, "user"),
-          kb,
-          (msg: string) => manager?.steer(record.id, msg),
-          getStore().agent,
-        ),
-      { overlay: true, overlayOptions: VIEWER_OVERLAY_OPTIONS },
-    );
-  } finally {
-    widget.setViewerOpen(false);
-  }
-}
-
-/**
- * Return type for terminal input listeners.
- */
-type InputListenerResult = { consume: true } | undefined;
-
-/**
- * Factory for the navigation + ctrl+o terminal input handler.
- * Exposed so tests can drive the real handler with a stubbed ctx.
- */
-export function createNavInputHandler(ctx: ExtensionContext): (data: string) => InputListenerResult {
-  return (data: string) => {
-    const widget = getWidget();
-
-    // Only fire on key press (not release).
-    if (isKeyRelease(data)) return undefined;
-
-    // Viewer overlay open — don't consume, don't deactivate.
-    if (widget?.isViewerOpen()) { return undefined; }
-
-    // Editor lost focus (dialog, menu, etc.) — deactivate.
-    if (widget && !widget.isEditorFocused()) {
-      if (widget.isNavActive()) widget.navDeactivate();
-      return undefined;
-    }
-
-    if (widget) {
-      if (!widget.isNavActive()) {
-        // ↓ + empty editor + agents exist → activate
-        const agents = getManager()?.listAgents() ?? [];
-        const hasAgents = agents.length > 0;
-        const editorEmpty = (ctx.ui as any).getEditorText?.() === "";
-        if (matchesKey(data, "down") && hasAgents && editorEmpty) {
-          widget.navActivate();
-          return { consume: true };
-        }
-      } else {
-        // Nav active
-        if (matchesKey(data, "down")) { widget.navDown(); return { consume: true }; }
-        if (matchesKey(data, "up")) { widget.navUp(); return { consume: true }; }
-        if (matchesKey(data, "escape")) { widget.navDeactivate(); return { consume: true }; }
-        if (matchesKey(data, "enter")) {
-          const record = widget.navSelect();
-          openViewer(ctx, record).catch(err => {
-            ctx.ui.notify(`Failed to open agent viewer: ${String(err)}`, "error");
-          });
-          return { consume: true };
-        }
-        // Any other key → deactivate, pass through.
-        widget.navDeactivate();
-      }
-    }
-
-    // ctrl+o = 0x0F (15) — toggles tool expansion
-    if (data === "\u000f") {
-      // Read state after a tick to let the built-in handler process it first
-      setTimeout(() => {
-        const ui = ctx.ui as unknown as { getToolsExpanded?: () => boolean };
-        const expanded = ui.getToolsExpanded?.();
-        if (expanded !== undefined) {
-          // Widget render hint (tool row state), then config-gated compact toggle.
-          getWidget()?.notifyToolsExpansionChanged(expanded);
-          getStore().notifyToolsExpanded(expanded);
-        }
-      }, 0);
-    }
-
-    return undefined; // Don't consume the input
-  };
-}
-
-/** Register all pi.on() event listeners. */
+/** Register the root lifecycle and catalog listeners. */
 export function setupEventListeners(pi: ExtensionAPI): void {
   pi.on("tool_call", toolCallListener);
 
@@ -245,36 +103,17 @@ export function setupEventListeners(pi: ExtensionAPI): void {
     return systemPrompt === undefined ? undefined : { systemPrompt };
   });
 
-  pi.on("tool_execution_start", async (_event, ctx) => {
-    // Headless sessions have no widget/UI contract to bind. In particular,
-    // do not pass a minimal headless ui object into the widget path: an active
-    // agent would otherwise try to call setStatus/setWidget on it.
-    if (ctx.hasUI === false) return;
-
-    // Set UI context on first tool execution
-    if (!getWidget()) {
-      ensureManagerAndWidget();
-    }
-    getWidget()?.setUICtx(ctx.ui as unknown as UICtx);
-    getWidget()?.onTurnStart();
-  });
-
-
   // session_start — load config, scan agents, and initialise the parent runtime.
-  // Listen for ctrl+o keypress to sync compact mode (push-based, no polling)
-  let unregisterTerminalInput: (() => void) | undefined;
   // Invalidates an in-flight startup before its asynchronous scan can publish
-  // listeners or other session-visible state after shutdown.
+  // session-visible state after shutdown.
   let sessionEpoch = 0;
-  // A new session waits for the latest shutdown handler. A separate tail
-  // serializes cleanup that can mutate global UI/configuration state.
   let cleanupPromise: Promise<void> | undefined;
   let globalCleanupPromise: Promise<void> | undefined;
 
   /**
    * Tear down every per-session collaborator, including partially initialized
-   * ones. This is shared by normal shutdown and failed startup so a retry
-   * never inherits stale listeners, store deps, or shell references.
+   * ones. This is shared by normal shutdown and failed startup so a retry never
+   * inherits stale manager, coordinator, or store references.
    */
   const cleanupSessionRuntime = async (cleanupEpoch: number): Promise<void> => {
     let cleanupError: unknown;
@@ -288,19 +127,13 @@ export function setupEventListeners(pi: ExtensionAPI): void {
 
     // Claim the coordinator before awaiting its disposal. A second shutdown
     // can clean the remaining global collaborators while this one is blocked.
-    const terminalInput = unregisterTerminalInput;
-    unregisterTerminalInput = undefined;
     const coordinator = getCoordinator();
     setCoordinator(null);
-
-    if (terminalInput) await attempt(() => terminalInput());
     if (coordinator) await attempt(() => coordinator.dispose());
 
-    // ConfigStore, AgentWidget, AgentManager, and sessionCtx are global or
-    // affect global UI state. Serialize this part independently: a newer
-    // shutdown waits for an older global cleanup before claiming its runtime,
-    // while an old cleanup that was delayed in coordinator.dispose() observes
-    // its stale generation and leaves the newer runtime alone.
+    // ConfigStore, AgentManager, and session context are global. Serialize
+    // this part independently so a newer session waits for older global
+    // cleanup before mutating the shared runtime.
     const previousGlobalCleanup = globalCleanupPromise;
     const globalCleanup = (async () => {
       if (previousGlobalCleanup) {
@@ -315,17 +148,10 @@ export function setupEventListeners(pi: ExtensionAPI): void {
       await attempt(() => getStore().dispose());
       if (sessionEpoch !== cleanupEpoch) return;
 
-      const widget = getWidget();
-      setWidget(null);
-      if (widget) await attempt(() => widget.dispose());
-      if (sessionEpoch !== cleanupEpoch) return;
-
       const manager = getManager();
       setManager(null);
       if (manager) await attempt(() => manager.dispose());
-      if (sessionEpoch === cleanupEpoch) {
-        setSessionCtx(null);
-      }
+      if (sessionEpoch === cleanupEpoch) setSessionCtx(null);
     })();
     // Preserve this handler's rejection for its caller while allowing a newer
     // generation to wait for completion before mutating global state itself.
@@ -336,10 +162,8 @@ export function setupEventListeners(pi: ExtensionAPI): void {
 
   const beginCleanup = (): Promise<void> => {
     const cleanup = cleanupSessionRuntime(sessionEpoch);
-    // Future starts wait for the most recent cleanup even if shutdown reports
-    // a disposal error; cleanupSessionRuntime already attempts every claimed
-    // collaborator before rejecting. Older overlapping cleanups are scoped to
-    // their captured objects and cannot dispose a runtime started afterwards.
+    // Future starts wait for the most recent cleanup even if shutdown reports a
+    // disposal error; every claimed collaborator was attempted.
     cleanupPromise = cleanup.catch(() => undefined);
     return cleanup;
   };
@@ -351,52 +175,33 @@ export function setupEventListeners(pi: ExtensionAPI): void {
     try {
       await loadConfigAndRegisterAgents(ctx, () => sessionEpoch === startupEpoch);
       // session_shutdown may have run while scanAndMerge() was pending. Its
-      // cleanup owns the runtime, so this stale startup must not publish a
-      // terminal listener or block the next session from registering one.
+      // cleanup owns the runtime, so this stale startup must not publish state
+      // after the next session has started.
       if (sessionEpoch !== startupEpoch) return;
-
-      if (ctx.hasUI) syncEcoStatus(ctx.ui, getStore().mode);
-
-      // Register ctrl+o listener
-      if (ctx.hasUI && !unregisterTerminalInput) {
-        unregisterTerminalInput = ctx.ui.onTerminalInput(createNavInputHandler(ctx));
-      }
-      // Sync compact mode with initial tool expansion state
-      getStore().notifyToolsExpanded(false);
     } catch (err) {
-      // Startup may fail after publishing the footer but before the session is
-      // usable. Never leave a stale Eco indicator behind.
-      // A newer shutdown/startup owns both its footer and cleanup; a stale
-      // failed scan must not clear or tear down that newer runtime.
-      if (sessionEpoch !== startupEpoch) return;
-
-      if (ctx.hasUI && typeof ctx.ui.setStatus === "function") ctx.ui.setStatus(ECO_STATUS_KEY, undefined);
       // Preserve the startup error even if disposal itself encounters a fault.
+      if (sessionEpoch !== startupEpoch) return;
       try {
         await beginCleanup();
       } catch {
         // The initialization failure is the actionable error for callers.
       }
-      // Shutdown can invalidate this startup while its own cleanup is waiting
-      // for a disposer. Do not surface that now-stale rejection either.
       if (sessionEpoch !== startupEpoch) return;
       throw err;
     }
   });
 
-  // session_shutdown — abort all, dispose manager
+  // session_shutdown — abort all root executions and dispose the manager.
   pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
-    // Invalidate a pending session_start before beginning asynchronous cleanup.
     ++sessionEpoch;
 
-    if (ctx.hasUI && typeof ctx.ui.setStatus === "function") ctx.ui.setStatus(ECO_STATUS_KEY, undefined);
-
-    // Warn if agents were killed
+    // A standard host notification is retained for diagnostics; no custom TUI
+    // state or terminal input is involved.
     const currentManager = getManager();
     if (currentManager) {
       const records = currentManager.listAgents();
       const active = records.filter(r => r.lifecycle.status === "running" || r.lifecycle.status === "queued");
-      if (active.length > 0 && ctx.hasUI) {
+      if (active.length > 0 && ctx.hasUI && ctx.ui?.notify) {
         ctx.ui.notify(`${active.length} agent(s) killed by reload`, "warning");
       }
     }

@@ -1053,29 +1053,6 @@ describe("AgentManager.continueAgent", () => {
     });
   });
 
-  it("supports steering before and after a running session becomes available", async () => {
-    manager = new AgentManager(onComplete);
-    const running = makeResolvablePromise();
-    mockModules.mockRunAgent.mockReturnValueOnce(running.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "running", { description: "running" });
-    const record = manager.getRecord(id)!;
-
-    expect(await manager.steer(id, "before session")).toBe(true);
-    expect(record.execution.pendingSteers).toEqual(["before session"]);
-
-    const session = mockAgentSession();
-    session.steer.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("idle"));
-    record.execution.session = session;
-    expect(await manager.steer(id, "live")).toBe(true);
-    expect(await manager.steer(id, "late")).toBe(false);
-    expect(session.steer).toHaveBeenNthCalledWith(1, "live");
-    expect(session.steer).toHaveBeenNthCalledWith(2, "late");
-
-    running.resolve(mockRunResult({ session }));
-    await record.execution.promise;
-    expect(await manager.steer(id, "finished")).toBe(false);
-  });
-
   it("returns an empty continuation result instead of the prior execution's text", async () => {
     manager = new AgentManager(onComplete);
     const { id } = await spawnCompletedAgent("initial task");

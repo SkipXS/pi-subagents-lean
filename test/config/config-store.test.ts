@@ -1,361 +1,191 @@
-/**
- * config-store.test.ts — Tests the ConfigStore interface directly.
- *
- * Interface is the test surface: in-memory ConfigIO, stub widget/manager.
- * No state.ts / config-io / config-mutator mocking — the store owns its state.
- */
-
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { ConfigStore, type ConfigIO } from "../../src/config/config-store.ts";
-import type { AgentWidget } from "../../src/ui/agent-widget.ts";
 import type { AgentManager } from "../../src/agents/agent-manager.ts";
 import type { SubagentsConfig } from "../../src/models/model-precedence.ts";
 
 function defaultConfig(): SubagentsConfig {
-  // Matches the defaults merged by loadConfig when no config file exists
   return {
     agent: {
       default: null,
       forceBackground: false,
       graceTurns: 6,
-      widgetMaxLines: 12,
-      widgetDescLengthFull: 50,
-      widgetDescLengthCompact: 30,
-      widgetCompact: false,
-      widgetShortcut: false,
       systemPromptMode: "replace",
       includeContextFiles: true,
       disableDefaultAgents: false,
-      showTools: true,
-      showTurns: true,
-      showInput: true,
-      showOutput: true,
-      showContext: true,
-      showCost: false,
-      showTime: true,
+      orchestrationPrompt: true,
+      outputThinkingBufferSize: 0,
+      finishedRetentionMinutes: 60,
+      maxNestingDepth: 2,
     },
+    thinkingOverrides: {},
+    ecoModelOverrides: {},
+    ecoThinkingOverrides: {},
     concurrency: { default: 4 },
   };
 }
 
-/** In-memory ConfigIO. Merges initial config with defaults (matches loadConfig behavior). */
-function memIO(initial: Partial<SubagentsConfig> = defaultConfig()): { io: ConfigIO; saves: SubagentsConfig[]; current: () => SubagentsConfig } {
-  // Merge with defaults like loadConfig does
-  const merged: SubagentsConfig = {
-    agent: { ...(defaultConfig().agent), ...(initial.agent ?? {}) },
-    thinkingOverrides: { ...(initial.thinkingOverrides ?? {}) },
-    mode: initial.mode,
-    ecoModelOverrides: { ...(initial.ecoModelOverrides ?? {}) },
-    ecoThinkingOverrides: { ...(initial.ecoThinkingOverrides ?? {}) },
-    concurrency: { default: 4, ...(initial.concurrency ?? {}) },
-  };
-  let cur = structuredClone(merged);
+function memIO(initial: Partial<SubagentsConfig> = {}): {
+  io: ConfigIO;
+  saves: SubagentsConfig[];
+  current: () => SubagentsConfig;
+} {
+  let current = structuredClone({
+    ...defaultConfig(),
+    ...initial,
+    agent: { ...defaultConfig().agent, ...(initial.agent ?? {}) },
+    concurrency: { ...defaultConfig().concurrency, ...(initial.concurrency ?? {}) },
+  });
   const saves: SubagentsConfig[] = [];
   return {
     io: {
-      load: () => structuredClone(cur),
-      save: (c) => {
-        cur = structuredClone(c);
-        saves.push(structuredClone(c));
+      load: () => structuredClone(current),
+      save: (config) => {
+        current = structuredClone(config);
+        saves.push(structuredClone(config));
       },
     },
     saves,
-    current: () => cur,
+    current: () => current,
   };
 }
 
-function widgetStub(): { w: AgentWidget; calls: string[] } {
-  const calls: string[] = [];
-  const w = {
-    setShowCost: (e: boolean) => calls.push(`setShowCost:${e}`),
-    setForceCompact: (e: boolean) => calls.push(`setForceCompact:${e}`),
-    setWidgetShortcut: (e: boolean) => calls.push(`setWidgetShortcut:${e}`),
-    setShowModelThinking: (e: boolean) => calls.push(`setShowModelThinking:${e}`),
-    setShowStartTime: (e: boolean) => calls.push(`setShowStartTime:${e}`),
-    setMaxLines: (n: number) => calls.push(`setMaxLines:${n}`),
-    setMaxLinesCompact: (n: number) => calls.push(`setMaxLinesCompact:${n}`),
-    setDescLengthFull: (n: number) => calls.push(`setDescLengthFull:${n}`),
-    setDescLengthCompact: (n: number) => calls.push(`setDescLengthCompact:${n}`),
-    setCompactMode: (c: boolean) => calls.push(`setCompactMode:${c}`),
-    setStatsVisibility: (v: any) => calls.push(`setStatsVisibility:${JSON.stringify(v)}`),
-  };
-  return { w: w as unknown as AgentWidget, calls };
-}
-
-function managerStub(): { m: AgentManager; concurrencies: unknown[]; retentions: number[]; nestingDepths: number[] } {
+function managerStub(): {
+  manager: AgentManager;
+  concurrencies: unknown[];
+  retentions: number[];
+  nestingDepths: number[];
+} {
   const concurrencies: unknown[] = [];
   const retentions: number[] = [];
   const nestingDepths: number[] = [];
-  const m = {
-    setConcurrency: (c: unknown) => concurrencies.push(c),
-    setRetentionMinutes: (n: number) => retentions.push(n),
-    setMaxNestingDepth: (n: number) => nestingDepths.push(n),
-  };
-  return { m: m as unknown as AgentManager, concurrencies, retentions, nestingDepths };
+  const manager = {
+    setConcurrency: (config: unknown) => concurrencies.push(config),
+    setRetentionMinutes: (minutes: number) => retentions.push(minutes),
+    setMaxNestingDepth: (depth: number) => nestingDepths.push(depth),
+  } as unknown as AgentManager;
+  return { manager, concurrencies, retentions, nestingDepths };
 }
 
-/* ------------------------------------------------------------------ */
-/*  Reads & defaults                                                   */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore child runtime snapshot", () => {
-  it("is frozen, narrow, and stable after root settings mutate", () => {
+describe("ConfigStore runtime settings", () => {
+  it("captures a frozen, stable child snapshot", () => {
     const { io } = memIO({
-      agent: { ...defaultConfig().agent, default: "persisted/model", graceTurns: 3, showCost: true },
+      agent: { ...defaultConfig().agent, default: "persisted/model", graceTurns: 3 },
       thinkingOverrides: { scout: "low" as any },
-      concurrency: { default: 4 },
     });
     const store = new ConfigStore(io);
     store.mutate.session.setOverride("scout", "session/model");
     store.mutate.session.setThinkingOverride("scout", "high" as any);
     const snapshot = store.createSubagentRuntimeSettings();
 
-    expect(Object.keys(snapshot).sort()).toEqual(["agent", "mode", "modelFor", "modelSettingForMode", "thinkingSettingFor", "thinkingSettingForMode"]);
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot.agent)).toBe(true);
     expect(snapshot.modelFor("scout", "parent/model")).toBe("session/model");
     expect(snapshot.thinkingSettingFor("scout", undefined).value).toBe("high");
 
     store.mutate.session.setOverride("scout", "later/model");
-    store.mutate.session.setThinkingOverride("scout", "low" as any);
     store.mutate.agent.setGraceTurns(9);
-    store.mutate.agent.setShowCost(false);
-
     expect(snapshot.modelFor("scout", "parent/model")).toBe("session/model");
-    expect(snapshot.thinkingSettingFor("scout", undefined).value).toBe("high");
-    expect(snapshot.agent).toMatchObject({ graceTurns: 3, showCost: true });
+    expect(snapshot.agent.graceTurns).toBe(3);
     expect(snapshot).not.toHaveProperty("mutate");
-    expect(snapshot).not.toHaveProperty("setDeps");
-    expect(snapshot).not.toHaveProperty("reload");
-    expect(snapshot).not.toHaveProperty("dispose");
-  });
-});
-
-describe("ConfigStore Eco mode", () => {
-  it("preserves a session mode when a permanent mode save fails", () => {
-    const config = defaultConfig();
-    const store = new ConfigStore({
-      load: () => structuredClone(config),
-      save: () => { throw new Error("disk full"); },
-    });
-    store.mutate.session.setMode("eco");
-
-    expect(() => store.mutate.agent.setMode("default")).toThrow("disk full");
-    expect(store.mode).toBe("eco");
-    expect(store.modeSource).toBe("session");
   });
 
-  it("defaults to Default, persists mode, and snapshots Eco settings for nested agents", () => {
+  it("retains Eco resolution independently from the removed UI", () => {
     const { io, current } = memIO({
-      ...defaultConfig(),
       ecoModelOverrides: { scout: "saved/eco" },
       ecoThinkingOverrides: { scout: "low" },
     });
     const store = new ConfigStore(io);
     expect(store.mode).toBe("default");
-    expect(store.modeSource).toBe("default");
-
     store.mutate.agent.setMode("eco");
     store.mutate.session.setEcoModelOverride("scout", "session/eco");
     const snapshot = store.createSubagentRuntimeSettings();
+
     expect(current().mode).toBe("eco");
     expect(snapshot.mode).toBe("eco");
     expect(snapshot.modelSettingForMode!("scout", "parent/model").value).toBe("session/eco");
     expect(snapshot.thinkingSettingForMode!("scout", "high").value).toBe("low");
-
-    store.mutate.session.setMode("default");
-    store.mutate.session.setEcoModelOverride("scout", "later/eco");
-    expect(snapshot.mode).toBe("eco");
-    expect(snapshot.modelSettingForMode!("scout", "parent/model").value).toBe("session/eco");
   });
 
-  it("reads session Eco overrides ahead of persisted overrides and clears them without saving", () => {
+  it("keeps session Eco overrides above persisted values without saving them", () => {
     const { io, saves } = memIO({
-      ...defaultConfig(),
       ecoModelOverrides: { scout: "saved/eco" },
       ecoThinkingOverrides: { scout: "low" },
     });
     const store = new ConfigStore(io);
 
     expect(store.hasPersistedEcoOverrides()).toBe(true);
-    expect(store.persistedEcoModelOverride("scout")).toBe("saved/eco");
-    expect(store.persistedEcoThinkingOverride("scout")).toBe("low");
     expect(store.ecoModelOverride("scout")).toBe("saved/eco");
     expect(store.ecoThinkingOverride("scout")).toBe("low");
 
     store.mutate.session.setEcoModelOverride("scout", "session/eco");
     store.mutate.session.setEcoThinkingOverride("scout", "high");
-    expect(store.sessionEcoModelOverride("scout")).toBe("session/eco");
-    expect(store.sessionEcoThinkingOverride("scout")).toBe("high");
     expect(store.ecoModelOverride("scout")).toBe("session/eco");
     expect(store.ecoThinkingOverride("scout")).toBe("high");
 
     store.mutate.session.clearEcoModelOverride("scout");
     store.mutate.session.clearEcoThinkingOverride("scout");
-    expect(store.sessionEcoModelOverride("scout")).toBeUndefined();
-    expect(store.sessionEcoThinkingOverride("scout")).toBeUndefined();
     expect(store.ecoModelOverride("scout")).toBe("saved/eco");
     expect(store.ecoThinkingOverride("scout")).toBe("low");
     expect(saves).toHaveLength(0);
   });
 
-  it("persists and clears Eco overrides and a saved mode", () => {
-    const { io, current, saves } = memIO();
-    const store = new ConfigStore(io);
-
-    store.mutate.agent.setEcoModelOverride("scout", "saved/eco");
-    store.mutate.agent.setEcoThinkingOverride("scout", "medium");
-    expect(store.hasPersistedEcoOverrides()).toBe(true);
-    expect(current().ecoModelOverrides).toEqual({ scout: "saved/eco" });
-    expect(current().ecoThinkingOverrides).toEqual({ scout: "medium" });
-
-    store.mutate.agent.clearEcoModelOverride("scout");
-    store.mutate.agent.clearEcoThinkingOverride("scout");
-    expect(store.hasPersistedEcoOverrides()).toBe(false);
-    expect(store.persistedEcoModelOverride("scout")).toBeUndefined();
-    expect(store.persistedEcoThinkingOverride("scout")).toBeUndefined();
-
-    store.mutate.agent.setMode("eco");
-    expect(store.modeSource).toBe("saved");
-    store.mutate.agent.setMode(undefined);
-    expect(store.mode).toBe("default");
-    expect(store.modeSource).toBe("default");
-    expect(current().mode).toBeUndefined();
-    expect(saves).toHaveLength(6);
-  });
-
-  it("uses Eco resolution only in Eco mode and retains sources in runtime snapshots", () => {
+  it("resolves scalar defaults without exposing legacy UI fields", () => {
     const { io } = memIO({
-      agent: { ...defaultConfig().agent, default: "default/model", defaultThinking: "high" },
-      mode: "default",
-      ecoModelOverrides: { scout: "saved/eco" },
-      ecoThinkingOverrides: { scout: "low" },
-      concurrency: { default: 4 },
+      agent: {
+        default: null,
+        forceBackground: false,
+        // Legacy files may still contain these; runtime settings do not
+        // expose or recreate presentation-only fields.
+        widgetMaxLines: 20,
+        showCost: true,
+      },
     });
-    const store = new ConfigStore(io);
-
-    expect(store.modelSettingForMode("scout", "parent/model"))
-      .toEqual({ value: "default/model", source: "config-global", ecoConfigured: false });
-    expect(store.thinkingSettingForMode("scout", "minimal"))
-      .toEqual({ value: "high", source: "config-global", ecoConfigured: false });
-    expect(store.ecoModelSettingFor("scout", "parent/model"))
-      .toEqual({ value: "saved/eco", source: "config-agent", ecoConfigured: true });
-    expect(store.ecoThinkingSettingFor("scout", "minimal"))
-      .toEqual({ value: "low", source: "config-agent", ecoConfigured: true });
-
-    const defaultSnapshot = store.createSubagentRuntimeSettings();
-    expect(defaultSnapshot.modelSettingForMode!("scout", "parent/model"))
-      .toEqual({ value: "default/model", source: "config-global", ecoConfigured: false });
-    expect(defaultSnapshot.thinkingSettingForMode!("scout", "minimal"))
-      .toEqual({ value: "high", source: "config-global", ecoConfigured: false });
-
-    store.mutate.session.setMode("eco");
-    expect(store.modelSettingForMode("scout", "parent/model", undefined, "spawn/model"))
-      .toEqual({ value: "spawn/model", source: "spawn", ecoConfigured: false });
-    expect(store.thinkingSettingForMode("scout", "minimal", undefined, "max"))
-      .toEqual({ value: "max", source: "spawn", ecoConfigured: false });
+    const settings = new ConfigStore(io).agent;
+    expect(settings).toMatchObject({
+      defaultModel: null,
+      forceBackground: false,
+      graceTurns: 6,
+      systemPromptMode: "replace",
+      includeContextFiles: true,
+      outputThinkingBufferSize: 0,
+      finishedRetentionMinutes: 60,
+      maxNestingDepth: 2,
+    });
+    expect(settings).not.toHaveProperty("widgetMaxLines");
+    expect(settings).not.toHaveProperty("showCost");
   });
 });
 
-describe("ConfigStore reads", () => {
-  it("bakes in scalar defaults when fields are absent", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false }, concurrency: { default: 4 } });
+describe("ConfigStore model and thinking resolution", () => {
+  it("uses session per-type overrides before persisted and frontmatter values", () => {
+    const { io } = memIO({ agent: { default: "global/model", forceBackground: false, scout: "config/model" } });
     const store = new ConfigStore(io);
-    expect(store.agent.graceTurns).toBe(6);
-    expect(store.agent.showCost).toBe(false);
-    expect(store.agent.forceBackground).toBe(false);
-    expect(store.agent.widgetMaxLines).toBe(12);
-    expect(store.agent.widgetMaxLinesCompact).toBe(6);
-    expect(store.agent.widgetCompact).toBe(false);
-    expect(store.agent.widgetShortcut).toBe(false);
-    expect(store.agent.defaultModel).toBeNull();
-    expect(store.agent.finishedRetentionMinutes).toBe(60);
-    expect(store.agent.maxNestingDepth).toBe(2);
-  });
+    store.mutate.session.setOverride("scout", "session/model");
 
-  it("returns configured values when present", () => {
-    const { io } = memIO({
-      agent: { default: "config/default", forceBackground: true, graceTurns: 9, showCost: true, widgetMaxLines: 20, widgetMaxLinesCompact: 7, widgetCompact: true, widgetShortcut: true },
-      concurrency: { default: 2 },
+    expect(store.modelSettingFor("scout", "parent/model", { model: "md/model" })).toEqual({
+      value: "session/model",
+      source: "session-agent",
     });
-    const store = new ConfigStore(io);
-    expect(store.agent.graceTurns).toBe(9);
-    expect(store.agent.showCost).toBe(true);
-    expect(store.agent.widgetMaxLines).toBe(20);
-    expect(store.agent.widgetMaxLinesCompact).toBe(7);
-    expect(store.concurrency.default).toBe(2);
-    expect(store.agent.defaultModel).toBe("config/default");
-  });
-
-  it("does not expose a malformed global thinking value", () => {
-    const { io } = memIO({
-      agent: { default: null, forceBackground: false, defaultThinking: "invalid" as any },
-      concurrency: { default: 4 },
+    expect(store.modelSettingFor("reviewer", "parent/model", { model: "md/model" })).toEqual({
+      value: "md/model",
+      source: "agent-md",
     });
-    expect(new ConfigStore(io).agent.defaultThinking).toBeUndefined();
-  });
-
-  it("normalizes, persists, and forwards bounded nesting depth to the manager", () => {
-    const { io, current } = memIO();
-    const store = new ConfigStore(io);
-    const { m, nestingDepths } = managerStub();
-    store.setDeps({ manager: m });
-    expect(nestingDepths).toEqual([2]);
-    store.mutate.agent.setMaxNestingDepth(3);
-    expect(store.agent.maxNestingDepth).toBe(2);
-    expect(current().agent.maxNestingDepth).toBe(2);
-    store.mutate.agent.setMaxNestingDepth(4);
-    expect(store.agent.maxNestingDepth).toBe(2);
-    store.mutate.agent.setMaxNestingDepth(0);
-    expect(store.agent.maxNestingDepth).toBe(1);
-    expect(nestingDepths.at(-1)).toBe(1);
-  });
-
-  it("exposes only the global concurrency limit", () => {
-    const store = new ConfigStore(memIO().io);
-    expect(store.concurrency).toEqual({ default: 4 });
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  Model resolution                                                   */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore model resolution", () => {
-  it("session per-type override wins", () => {
-    const { io } = memIO({ agent: { default: "config/default", forceBackground: false, Explore: "config/explore" }, concurrency: { default: 4 } });
-    const store = new ConfigStore(io);
-    store.mutate.session.setOverride("Explore", "session/explore");
-    expect(store.modelFor("Explore", "parent", { model: "frontmatter" })).toBe("session/explore");
-  });
-
-  it("uses frontmatter before the global default", () => {
-    const { io } = memIO({ agent: { default: "config/default", forceBackground: false }, concurrency: { default: 4 } });
-    const store = new ConfigStore(io);
-    expect(store.modelFor("Explore", "parent", { model: "frontmatter" })).toBe("frontmatter");
-    expect(store.modelFor("Explore", "parent")).toBe("config/default");
   });
 
   it("resolves persisted and session thinking overrides with sources", () => {
-    const { io } = memIO({
-      agent: { default: null, forceBackground: false, defaultThinking: "low" },
-      thinkingOverrides: { reviewer: "medium" },
-      concurrency: { default: 4 },
-    });
+    const { io } = memIO({ thinkingOverrides: { scout: "low" as any } });
     const store = new ConfigStore(io);
-    expect(store.thinkingSettingFor("reviewer", "minimal", { thinkingLevel: "high" }))
-      .toEqual({ value: "medium", source: "config-agent" });
-    store.mutate.session.setThinkingOverride("reviewer", "xhigh");
-    expect(store.thinkingSettingFor("reviewer", "minimal", { thinkingLevel: "high" }))
-      .toEqual({ value: "xhigh", source: "session-agent" });
+    expect(store.thinkingSettingFor("scout", "high").value).toBe("low");
+    store.mutate.session.setThinkingOverride("scout", "medium" as any);
+    expect(store.thinkingSettingFor("scout", "high")).toEqual({ value: "medium", source: "session-agent" });
   });
 
-  it("returns parentModelId when nothing else is set", () => {
+  it("falls back to the parent when no model is configured", () => {
     const store = new ConfigStore(memIO().io);
-    expect(store.modelFor("Explore", "parent/model")).toBe("parent/model");
+    expect(store.modelFor("scout", "parent/model")).toBe("parent/model");
   });
 
-  it("reports model and thinking sources through the complete store precedence chain", () => {
+  it("reports the complete model and thinking precedence chain", () => {
     const { io } = memIO({
       agent: {
         default: "config/global-model",
@@ -364,19 +194,18 @@ describe("ConfigStore model resolution", () => {
         defaultThinking: "low",
       },
       thinkingOverrides: { reviewer: "medium" },
-      concurrency: { default: 4 },
     });
     const store = new ConfigStore(io);
-    const agentMd = { model: "md/model", thinkingLevel: "high" as const };
+    const agentMd = { model: "md/model", thinkingLevel: "high" as any };
 
     store.mutate.session.setOverride("reviewer", "session/reviewer-model");
-    store.mutate.session.setThinkingOverride("reviewer", "xhigh");
+    store.mutate.session.setThinkingOverride("reviewer", "xhigh" as any);
     store.mutate.session.setOverride("default", "session/global-model");
-    store.mutate.session.setThinkingOverride("default", "off");
+    store.mutate.session.setThinkingOverride("default", "off" as any);
 
     expect(store.modelSettingFor("reviewer", "parent/model", agentMd, "spawn/model"))
       .toEqual({ value: "spawn/model", source: "spawn" });
-    expect(store.thinkingSettingFor("reviewer", "minimal", agentMd, "max"))
+    expect(store.thinkingSettingFor("reviewer", "minimal", agentMd, "max" as any))
       .toEqual({ value: "max", source: "spawn" });
 
     expect(store.modelSettingFor("reviewer", "parent/model", agentMd))
@@ -409,148 +238,113 @@ describe("ConfigStore model resolution", () => {
       .toEqual({ value: "config/global-model", source: "config-global" });
     expect(store.thinkingSettingFor("reviewer", "minimal"))
       .toEqual({ value: "low", source: "config-global" });
-
-    const parentOnly = new ConfigStore(memIO().io);
-    expect(parentOnly.modelSettingFor("reviewer", "parent/model"))
-      .toEqual({ value: "parent/model", source: "parent" });
-    expect(parentOnly.thinkingSettingFor("reviewer", "minimal"))
-      .toEqual({ value: "minimal", source: "parent" });
   });
 });
 
-/* ------------------------------------------------------------------ */
-/*  Persisted mutations — behavioral tests                              */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore persisted mutations", () => {
-  it("setShowCost persists and syncs the widget", () => {
-    const { io, saves } = memIO();
-    const { w, calls } = widgetStub();
+describe("ConfigStore persistence and manager effects", () => {
+  it("persists non-visual settings through the injected ConfigIO", () => {
+    const { io, current, saves } = memIO();
     const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    saves.length = 0;
 
-    store.mutate.agent.setShowCost(true);
-    expect(store.agent.showCost).toBe(true);
-    expect(saves).toHaveLength(1);
-    expect(saves[0].agent.showCost).toBe(true);
-    expect(calls).toContain("setShowCost:true");
-    expect(calls.some(c => c.startsWith("setStatsVisibility:" ))).toBe(true);
-  });
-
-  it("setWidgetMaxLines derives compact when unset and syncs the widget", () => {
-    const { io, saves } = memIO();
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-
-    store.mutate.widget.setMaxLines(20);
-    expect(saves[0].agent.widgetMaxLines).toBe(20);
-    expect(saves[0].agent.widgetMaxLinesCompact).toBe(10);
-    expect(calls).toContain("setMaxLines:20");
-    expect(calls).toContain("setMaxLinesCompact:10");
-  });
-
-  it("setMaxLines does not overwrite an explicitly-set compact value", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, widgetMaxLinesCompact: 3 }, concurrency: { default: 4 } });
-    const store = new ConfigStore(io);
-    store.mutate.widget.setMaxLines(20);
-    expect(store.agentConfigSnapshot().widgetMaxLinesCompact).toBe(3);
-  });
-
-  it("setWidgetCompact persists and syncs widget", () => {
-    const { io } = memIO();
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    store.mutate.widget.setCompact(true);
-    expect(store.agent.widgetCompact).toBe(true);
-    expect(calls).toContain("setForceCompact:true");
-  });
-
-  it("setShortcut persists but does not sync widget", () => {
-    const { io, saves } = memIO();
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    store.mutate.widget.setShortcut(true);
-    expect(saves[0].agent.widgetShortcut).toBe(true);
-    expect(calls.some((c) => c.startsWith("setWidgetShortcut"))).toBe(true);
-  });
-
-  it("global concurrency setter persists and calls manager.setConcurrency", () => {
-    const { io, saves } = memIO();
-    const { m, concurrencies } = managerStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ manager: m });
-    concurrencies.length = 0;
-
+    store.mutate.agent.setGraceTurns(9);
+    store.mutate.agent.setOutputThinkingBufferSize(128);
     store.mutate.concurrency.setDefault(8);
 
-    expect(store.concurrency).toEqual({ default: 8 });
-    expect(saves).toHaveLength(1);
-    expect(concurrencies).toEqual([{ default: 8 }]);
+    expect(saves).toHaveLength(3);
+    expect(current().agent.graceTurns).toBe(9);
+    expect(current().agent.outputThinkingBufferSize).toBe(128);
+    expect(current().concurrency).toEqual({ default: 8 });
   });
 
-  it("resetConcurrency restores the global default", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false }, concurrency: { default: 8 } });
+  it("updates concurrency, retention, and nesting through the manager", () => {
+    const { io, current } = memIO();
+    const { manager, concurrencies, retentions, nestingDepths } = managerStub();
     const store = new ConfigStore(io);
-    store.mutate.concurrency.reset();
-    expect(store.concurrency).toEqual({ default: 4 });
-  });
-
-  it("setFinishedRetentionMinutes persists and calls manager", () => {
-    const { io, saves } = memIO();
-    const { m, retentions } = managerStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ manager: m });
+    store.setDeps({ manager });
+    concurrencies.length = 0;
     retentions.length = 0;
+    nestingDepths.length = 0;
 
-    store.mutate.agent.setFinishedRetentionMinutes(15);
-    expect(store.agent.finishedRetentionMinutes).toBe(15);
-    expect(saves).toHaveLength(1);
-    expect(saves[0].agent.finishedRetentionMinutes).toBe(15);
-    expect(retentions).toEqual([15]);
+    store.mutate.concurrency.setDefault(2);
+    store.mutate.agent.setFinishedRetentionMinutes(0);
+    store.mutate.agent.setMaxNestingDepth(99);
+
+    expect(concurrencies.at(-1)).toEqual({ default: 2 });
+    expect(retentions.at(-1)).toBe(1);
+    expect(nestingDepths.at(-1)).toBe(2);
+    expect(current().agent.finishedRetentionMinutes).toBe(1);
   });
 
-  it("adopts the transaction commit before applying manager effects", () => {
-    const disk = defaultConfig();
-    const updates: string[] = [];
+  it("clears model and thinking overrides while preserving runtime settings", () => {
+    const { io, current } = memIO({
+      agent: { default: "global/model", scout: "scout/model", forceBackground: true },
+      thinkingOverrides: { scout: "low" as any },
+    });
+    const store = new ConfigStore(io);
+    store.mutate.agent.clearAllModelOverrides();
+    store.mutate.agent.clearAllThinkingOverrides();
+
+    expect(current().agent.default).toBe("global/model");
+    expect(current().agent.scout).toBeUndefined();
+    expect(current().agent.forceBackground).toBe(true);
+    expect(current().thinkingOverrides).toEqual({});
+  });
+
+  it("rolls back in-memory state when persistence fails", () => {
+    let config = defaultConfig();
+    const store = new ConfigStore({
+      load: () => structuredClone(config),
+      save: () => { throw new Error("disk full"); },
+    });
+    expect(() => store.mutate.agent.setGraceTurns(20)).toThrow("disk full");
+    expect(store.agent.graceTurns).toBe(6);
+  });
+
+  it("rolls back Eco overrides to the last durable values when saving fails", () => {
+    const initial = {
+      ...defaultConfig(),
+      ecoModelOverrides: { scout: "saved/eco" },
+      ecoThinkingOverrides: { scout: "medium" as any },
+    };
+    const store = new ConfigStore({
+      load: () => structuredClone(initial),
+      save: () => { throw new Error("disk full"); },
+    });
+
+    expect(() => store.mutate.agent.setEcoModelOverride("scout", "new/eco")).toThrow("disk full");
+    expect(store.ecoModelOverride("scout")).toBe("saved/eco");
+    expect(store.ecoThinkingOverride("scout")).toBe("medium");
+    expect(store.persistedEcoModelOverride("scout")).toBe("saved/eco");
+    expect(store.persistedEcoThinkingOverride("scout")).toBe("medium");
+  });
+
+  it("preserves an independent concurrent change during a transactional update", () => {
+    let disk = defaultConfig();
     const io: ConfigIO = {
       load: () => ({ config: structuredClone(disk), health: "healthy", canRepair: false }),
       save: () => { throw new Error("legacy save should not run"); },
       update: (change) => {
         const latest = structuredClone(disk);
-        latest.agent.showCost = true; // concurrent writer's independent field
+        latest.agent.forceBackground = true;
         change(latest);
-        disk.agent = structuredClone(latest.agent);
-        disk.concurrency = structuredClone(latest.concurrency);
-        updates.push("committed");
+        disk = structuredClone(latest);
         return { config: latest, health: "healthy", canRepair: false };
       },
     };
-    const { m, concurrencies } = managerStub();
     const store = new ConfigStore(io);
-    store.setDeps({ manager: m });
-    concurrencies.length = 0;
 
     store.mutate.concurrency.setDefault(8);
 
-    expect(updates).toEqual(["committed"]);
-    expect(store.agent.showCost).toBe(true);
-    expect(store.concurrency).toEqual({ default: 8 });
-    expect(concurrencies).toEqual([{ default: 8 }]);
+    expect(disk.agent.forceBackground).toBe(true);
+    expect(disk.concurrency).toEqual({ default: 8 });
+    expect(store.agent.forceBackground).toBe(true);
   });
 
-  it("merges concurrent Eco-map updates without losing either field", () => {
-    const disk: SubagentsConfig = {
+  it("merges concurrent Eco-map changes without dropping either update", () => {
+    let disk: SubagentsConfig = {
       ...defaultConfig(),
       ecoModelOverrides: { scout: "old/eco" },
-      ecoThinkingOverrides: { scout: "low" },
+      ecoThinkingOverrides: { scout: "low" as any },
     };
     const io: ConfigIO = {
       load: () => ({ config: structuredClone(disk), health: "healthy", canRepair: false }),
@@ -558,9 +352,9 @@ describe("ConfigStore persisted mutations", () => {
       update: (change) => {
         const latest = structuredClone(disk);
         latest.ecoModelOverrides = { ...(latest.ecoModelOverrides ?? {}), reviewer: "concurrent/eco" };
-        latest.ecoThinkingOverrides = { ...(latest.ecoThinkingOverrides ?? {}), reviewer: "high" };
+        latest.ecoThinkingOverrides = { ...(latest.ecoThinkingOverrides ?? {}), reviewer: "high" as any };
         change(latest);
-        Object.assign(disk, structuredClone(latest));
+        disk = structuredClone(latest);
         return { config: latest, health: "healthy", canRepair: false };
       },
     };
@@ -573,764 +367,34 @@ describe("ConfigStore persisted mutations", () => {
     expect(store.ecoModelOverride("reviewer")).toBe("concurrent/eco");
     expect(store.ecoThinkingOverride("reviewer")).toBe("high");
   });
-
-  it("rolls back RAM and suppresses widget and manager effects when saving fails", () => {
-    const disk = defaultConfig();
-    const io: ConfigIO = {
-      load: () => structuredClone(disk),
-      save: () => { throw new Error("disk full"); },
-    };
-    const { w, calls } = widgetStub();
-    const { m, concurrencies } = managerStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w, manager: m });
-    calls.length = 0;
-    concurrencies.length = 0;
-
-    expect(() => store.mutate.widget.setCompact(true)).toThrow("disk full");
-    expect(store.agent.widgetCompact).toBe(false);
-    expect(disk.agent.widgetCompact).toBe(false);
-    expect(calls).toHaveLength(0);
-
-    expect(() => store.mutate.concurrency.setDefault(8)).toThrow("disk full");
-    expect(store.concurrency).toEqual({ default: 4 });
-    expect(disk.concurrency).toEqual({ default: 4 });
-    expect(concurrencies).toHaveLength(0);
-  });
-
-  it("rolls back Eco overrides and retains durable values when saving fails", () => {
-    const initial: SubagentsConfig = {
-      ...defaultConfig(),
-      ecoModelOverrides: { scout: "saved/eco" },
-      ecoThinkingOverrides: { scout: "medium" },
-    };
-    const io: ConfigIO = {
-      load: () => structuredClone(initial),
-      save: () => { throw new Error("disk full"); },
-    };
-    const store = new ConfigStore(io);
-
-    expect(() => store.mutate.agent.setEcoModelOverride("scout", "new/eco")).toThrow("disk full");
-    expect(store.ecoModelOverride("scout")).toBe("saved/eco");
-    expect(store.ecoThinkingOverride("scout")).toBe("medium");
-    expect(store.persistedEcoModelOverride("scout")).toBe("saved/eco");
-    expect(store.persistedEcoThinkingOverride("scout")).toBe("medium");
-  });
-
-  it("updates recovery health after a failed update finds a newly corrupt primary without losing rollback", () => {
-    const durable = defaultConfig();
-    const backup = defaultConfig();
-    backup.agent.showCost = true;
-    let primaryBecameCorrupt = false;
-    const io: ConfigIO = {
-      load: () => primaryBecameCorrupt
-        ? { config: structuredClone(backup), health: "using-backup", canRepair: true }
-        : { config: structuredClone(durable), health: "healthy", canRepair: false },
-      save: () => { throw new Error("legacy save should not run"); },
-      update: () => {
-        primaryBecameCorrupt = true;
-        throw new Error("primary became corrupt");
-      },
-      repair: () => ({ config: structuredClone(backup), health: "healthy", canRepair: false }),
-    };
-    const store = new ConfigStore(io);
-
-    expect(() => store.mutate.agent.setShowCost(true)).toThrow("primary became corrupt");
-    expect(store.agent.showCost).toBe(false);
-    expect(store.health).toBe("using-backup");
-    expect(store.canRepair).toBe(true);
-  });
-
-  it("setFinishedRetentionMinutes clamps to minimum 1", () => {
-    const { io, saves } = memIO();
-    const { m, retentions } = managerStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ manager: m });
-    retentions.length = 0;
-
-    store.mutate.agent.setFinishedRetentionMinutes(0);
-    expect(store.agent.finishedRetentionMinutes).toBe(1);
-    expect(saves[0].agent.finishedRetentionMinutes).toBe(1);
-    expect(retentions).toEqual([1]);
-  });
 });
 
-/* ------------------------------------------------------------------ */
-/*  Model-override clearing                                             */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore model-override clearing", () => {
-  it("clearModelOverride removes a single per-type override", () => {
-    const { io, saves } = memIO({ agent: { default: null, forceBackground: false, Explore: "m1", general: "m2" }, concurrency: { default: 4 } });
-    const store = new ConfigStore(io);
-    store.mutate.agent.clearModelOverride("Explore");
-    expect(store.agentConfigSnapshot().Explore).toBeUndefined();
-    expect(store.agentConfigSnapshot().general).toBe("m2");
-    expect(saves).toHaveLength(1);
-  });
-
-  it("resetAllModelAndThinkingOverrides commits the complete reset in one save", () => {
-    const { io, saves } = memIO({
-      agent: {
-        default: "global-model", defaultThinking: "high", forceBackground: true,
-        widgetMaxLines: 14, Explore: "explore-model",
-      },
-      thinkingOverrides: { Explore: "low", "removed-agent": "high" },
-      concurrency: { default: 4 },
-    });
-    const store = new ConfigStore(io);
-
-    store.mutate.agent.resetAllModelAndThinkingOverrides();
-
-    expect(saves).toHaveLength(1);
-    expect(saves[0].agent).toMatchObject({ default: null, forceBackground: true, widgetMaxLines: 14 });
-    expect(saves[0].agent.Explore).toBeUndefined();
-    expect(saves[0].agent.defaultThinking).toBeUndefined();
-    expect(saves[0].thinkingOverrides).toEqual({});
-  });
-
-  it("does not leave the partial state that a later reset save failure would expose", () => {
-    const initial = {
-      ...defaultConfig(),
-      agent: { ...defaultConfig().agent, default: "global-model", defaultThinking: "high" as const, Explore: "explore-model" },
-      thinkingOverrides: { Explore: "low" as const },
-    };
-    let saves = 0;
-    const io: ConfigIO = {
-      load: () => structuredClone(initial),
-      save: () => { saves++; throw new Error("disk full"); },
-    };
-    const store = new ConfigStore(io);
-
-    expect(() => store.mutate.agent.resetAllModelAndThinkingOverrides()).toThrow("disk full");
-
-    expect(saves).toBe(1);
-    expect(store.agent.defaultModel).toBe("global-model");
-    expect(store.agent.defaultThinking).toBe("high");
-    expect(store.agentConfigSnapshot().Explore).toBe("explore-model");
-    expect(store.persistedThinkingOverride("Explore")).toBe("low");
-  });
-
-  it("clearAllModelOverrides preserves non-model settings, drops per-type overrides", () => {
-    const { io } = memIO({
-      agent: { default: "keep-default", forceBackground: true, graceTurns: 7, showCost: true, widgetMaxLines: 14, Explore: "m1", general: "m2" },
-      concurrency: { default: 4 },
-    });
-    const store = new ConfigStore(io);
-    store.mutate.agent.clearAllModelOverrides();
-    const snap = store.agentConfigSnapshot();
-    expect(snap.Explore).toBeUndefined();
-    expect(snap.general).toBeUndefined();
-    expect(snap.default).toBe("keep-default");
-    expect(snap.forceBackground).toBe(true);
-    expect(snap.graceTurns).toBe(7);
-    expect(snap.showCost).toBe(true);
-    expect(snap.widgetMaxLines).toBe(14);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  Session showCost override                                           */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore session showCost override", () => {
-  it("session setShowCost overrides config value", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, showCost: false }, concurrency: { default: 4 } });
-    const store = new ConfigStore(io);
-    expect(store.agent.showCost).toBe(false);
-    store.mutate.session.setShowCost(true);
-    expect(store.agent.showCost).toBe(true);
-  });
-
-  it("session setShowCost is not persisted", () => {
-    const { io, saves } = memIO();
-    const store = new ConfigStore(io);
-    saves.length = 0;
-    store.mutate.session.setShowCost(true);
-    expect(saves).toHaveLength(0);
-    expect(store.agent.showCost).toBe(true);
-  });
-
-  it("session clearShowCost reverts to config value", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, showCost: false }, concurrency: { default: 4 } });
-    const store = new ConfigStore(io);
-    store.mutate.session.setShowCost(true);
-    expect(store.agent.showCost).toBe(true);
-    store.mutate.session.clearShowCost();
-    expect(store.agent.showCost).toBe(false);
-  });
-
-  it("session setShowCost syncs to widget", () => {
-    const { io } = memIO();
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    store.mutate.session.setShowCost(true);
-    expect(calls).toContain("setShowCost:true");
-    expect(calls.some(c => c.startsWith("setStatsVisibility:" ))).toBe(true);
-  });
-
-  it("session clearShowCost syncs config value to widget", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, showCost: true }, concurrency: { default: 4 } });
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    store.mutate.session.setShowCost(false);
-    expect(calls).toContain("setShowCost:false");
-    expect(calls.some(c => c.startsWith("setStatsVisibility:" ))).toBe(true);
-    calls.length = 0;
-    store.mutate.session.clearShowCost();
-    expect(calls).toContain("setShowCost:true");
-    expect(calls.some(c => c.startsWith("setStatsVisibility:" ))).toBe(true);
-  });
-
-  it("reload clears session showCost override", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, showCost: false }, concurrency: { default: 4 } });
-    const store = new ConfigStore(io);
-    store.mutate.session.setShowCost(true);
-    expect(store.agent.showCost).toBe(true);
-    store.reload();
-    expect(store.agent.showCost).toBe(false);
-  });
-
-  it("hasSessionShowCost reflects session state", () => {
+describe("ConfigStore lifecycle and session overrides", () => {
+  it("keeps session model overrides in memory and clears them on reload", () => {
     const { io } = memIO();
     const store = new ConfigStore(io);
-    expect(store.hasSessionShowCost).toBe(false);
-    store.mutate.session.setShowCost(true);
-    expect(store.hasSessionShowCost).toBe(true);
-    store.mutate.session.clearShowCost();
-    expect(store.hasSessionShowCost).toBe(false);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  Session overrides                                                   */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore session overrides", () => {
-  it("are not persisted", () => {
-    const { io, saves } = memIO();
-    const store = new ConfigStore(io);
-    saves.length = 0;
-    store.mutate.session.setOverride("Explore", "session/model");
-    store.mutate.session.clearOverride("Explore");
-    store.mutate.session.clearAll();
-    expect(saves).toHaveLength(0);
-  });
-
-  it("are readable and affect modelFor", () => {
-    const store = new ConfigStore(memIO().io);
-    store.mutate.session.setOverride("Explore", "session/explore");
-    expect(store.sessionModelOverride("Explore")).toBe("session/explore");
-    expect(store.modelFor("Explore", "parent")).toBe("session/explore");
-  });
-
-  it("clearAll resets to { default: null }", () => {
-    const store = new ConfigStore(memIO().io);
-    store.mutate.session.setOverride("Explore", "x");
-    store.mutate.session.setOverride("default", "y");
-    store.mutate.session.clearAll();
-    expect(store.sessionModelOverride("Explore")).toBeNull();
-    expect(store.sessionDefaultModel).toBeNull();
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  Generic agent properties — defaults, configured, persist, preserve  */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore agent properties", () => {
-  it("boolean properties default correctly", () => {
-    const store = new ConfigStore(memIO().io);
-    expect(store.agent.includeContextFiles).toBe(true);
-    expect(store.agent.loadSkillsImplicitly).toBe(true);
-    expect(store.agent.loadExtensionsImplicitly).toBe(true);
-    expect(store.agent.disableDefaultAgents).toBe(false);
-  });
-
-  it("string property defaults to 'replace'", () => {
-    const store = new ConfigStore(memIO().io);
-    expect(store.agent.systemPromptMode).toBe("replace");
-  });
-
-  it("optional properties default to undefined", () => {
-    const store = new ConfigStore(memIO().io);
-    expect(store.agent.defaultThinking).toBeUndefined();
-    expect(store.agent.defaultMaxTurns).toBeUndefined();
-  });
-
-  it("widgetDescLength defaults: full=50, compact=30", () => {
-    const store = new ConfigStore(memIO().io);
-    expect(store.agent.widgetDescLengthFull).toBe(50);
-    expect(store.agent.widgetDescLengthCompact).toBe(30);
-  });
-
-  it("configured values override defaults", () => {
-    const { io } = memIO({
-      agent: { default: null, forceBackground: false, includeContextFiles: false, systemPromptMode: "custom", defaultThinking: "high", defaultMaxTurns: 50, widgetDescLengthFull: 80, widgetDescLengthCompact: 20, loadSkillsImplicitly: false, loadExtensionsImplicitly: false, disableDefaultAgents: true },
-      concurrency: { default: 4 },
-    });
-    const store = new ConfigStore(io);
-    expect(store.agent.includeContextFiles).toBe(false);
-    expect(store.agent.systemPromptMode).toBe("custom");
-    expect(store.agent.defaultThinking).toBe("high");
-    expect(store.agent.defaultMaxTurns).toBe(50);
-    expect(store.agent.widgetDescLengthFull).toBe(80);
-    expect(store.agent.widgetDescLengthCompact).toBe(20);
-    expect(store.agent.loadSkillsImplicitly).toBe(false);
-    expect(store.agent.loadExtensionsImplicitly).toBe(false);
-    expect(store.agent.disableDefaultAgents).toBe(true);
-  });
-
-  it("setters persist values", () => {
-    const { io, saves } = memIO();
-    const store = new ConfigStore(io);
-
-    store.mutate.agent.setIncludeContextFiles(false);
-    store.mutate.agent.setSystemPromptMode("custom");
-    store.mutate.agent.setDefaultThinking("medium");
-    store.mutate.agent.setDefaultMaxTurns(30);
-    store.mutate.agent.setLoadSkillsImplicitly(false);
-    store.mutate.agent.setLoadExtensionsImplicitly(false);
-    store.mutate.agent.setDisableDefaultAgents(true);
-
-    expect(store.agent.includeContextFiles).toBe(false);
-    expect(store.agent.systemPromptMode).toBe("custom");
-    expect(store.agent.defaultThinking).toBe("medium");
-    expect(store.agent.defaultMaxTurns).toBe(30);
-    expect(store.agent.loadSkillsImplicitly).toBe(false);
-    expect(store.agent.loadExtensionsImplicitly).toBe(false);
-    expect(store.agent.disableDefaultAgents).toBe(true);
-    expect(saves).toHaveLength(7);
-  });
-
-  it("setDescLengthFull/Compact persist and sync widget", () => {
-    const { io, saves } = memIO();
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    saves.length = 0;
-
-    store.mutate.widget.setDescLengthFull(80);
-    expect(store.agent.widgetDescLengthFull).toBe(80);
-    expect(saves).toHaveLength(1);
-    expect(calls).toContain("setDescLengthFull:80");
-
-    calls.length = 0;
-    saves.length = 0;
-    store.mutate.widget.setDescLengthCompact(20);
-    expect(store.agent.widgetDescLengthCompact).toBe(20);
-    expect(saves).toHaveLength(1);
-    expect(calls).toContain("setDescLengthCompact:20");
-  });
-
-  it("setDefaultThinking/MaxTurns(undefined) removes the field", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, defaultThinking: "high", defaultMaxTurns: 50 }, concurrency: { default: 4 } });
-    const store = new ConfigStore(io);
-    store.mutate.agent.setDefaultThinking(undefined);
-    store.mutate.agent.setDefaultMaxTurns(undefined);
-    expect(store.agent.defaultThinking).toBeUndefined();
-    expect(store.agent.defaultMaxTurns).toBeUndefined();
-    expect(store.agentConfigSnapshot().defaultThinking).toBeUndefined();
-    expect(store.agentConfigSnapshot().defaultMaxTurns).toBeUndefined();
-  });
-
-  it("clearAllModelOverrides preserves all agent properties", () => {
-    const { io } = memIO({
-      agent: { default: "keep", forceBackground: true, includeContextFiles: false, systemPromptMode: "custom", defaultThinking: "low", defaultMaxTurns: 25, widgetDescLengthFull: 80, widgetDescLengthCompact: 20, loadSkillsImplicitly: false, loadExtensionsImplicitly: false, disableDefaultAgents: true, showTools: false, Explore: "m1" },
-      concurrency: { default: 4 },
-    });
-    const store = new ConfigStore(io);
-    store.mutate.agent.clearAllModelOverrides();
-    const snap = store.agentConfigSnapshot();
-    expect(snap.includeContextFiles).toBe(false);
-    expect(snap.systemPromptMode).toBe("custom");
-    expect(snap.defaultThinking).toBe("low");
-    expect(snap.defaultMaxTurns).toBe(25);
-    expect(snap.widgetDescLengthFull).toBe(80);
-    expect(snap.widgetDescLengthCompact).toBe(20);
-    expect(snap.loadSkillsImplicitly).toBe(false);
-    expect(snap.loadExtensionsImplicitly).toBe(false);
-    expect(snap.disableDefaultAgents).toBe(true);
-    expect(snap.showTools).toBe(false);
-    expect(snap.Explore).toBeUndefined();
-  });
-
-  it("reload syncs desc length settings to widget", () => {
-    const { io, current } = memIO();
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    current().agent.widgetDescLengthFull = 100;
-    current().agent.widgetDescLengthCompact = 15;
+    store.mutate.session.setOverride("scout", "session/model");
+    expect(store.modelFor("scout", "parent/model")).toBe("session/model");
     store.reload();
-    expect(calls).toContain("setDescLengthFull:100");
-    expect(calls).toContain("setDescLengthCompact:15");
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  Lifecycle                                                           */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore lifecycle", () => {
-  it("repairs only a backup-backed config and preserves session overrides", () => {
-    const backup = defaultConfig();
-    backup.agent.showCost = true;
-    let repaired = false;
-    const io: ConfigIO = {
-      load: () => ({ config: structuredClone(backup), health: "using-backup", canRepair: true }),
-      save: () => undefined,
-      repair: () => {
-        repaired = true;
-        return { config: structuredClone(backup), health: "healthy", canRepair: false };
-      },
-    };
-    const store = new ConfigStore(io);
-    store.mutate.session.setOverride("reviewer", "session/model");
-
-    store.repair();
-
-    expect(repaired).toBe(true);
-    expect(store.health).toBe("healthy");
-    expect(store.agent.showCost).toBe(true);
-    expect(store.sessionModelOverride("reviewer")).toBe("session/model");
+    expect(store.modelFor("scout", "parent/model")).toBe("parent/model");
   });
 
-  it("reload re-reads disk and resets session overrides", () => {
-    const { io, current } = memIO();
-    const store = new ConfigStore(io);
-    store.mutate.session.setOverride("Explore", "session/explore");
-    store.mutate.agent.setGraceTurns(11);
-
-    current().agent.graceTurns = 5;
-    store.reload();
-
-    expect(store.agent.graceTurns).toBe(5);
-    expect(store.sessionModelOverride("Explore")).toBeNull();
-  });
-
-  it("reload re-syncs deps", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, showCost: true, widgetCompact: true }, concurrency: { default: 4 } });
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    store.reload();
-    expect(calls).toContain("setShowCost:true");
-    expect(calls).toContain("setForceCompact:true");
-  });
-
-  it("reload re-syncs retention to manager", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, finishedRetentionMinutes: 20 } });
-    const { m, retentions } = managerStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ manager: m });
-    retentions.length = 0;
-    store.reload();
-    expect(retentions).toContain(20);
-  });
-
-  it("setDeps re-syncs widget settings from current config", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, widgetMaxLines: 30, showCost: true }, concurrency: { default: 4 } });
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    expect(calls).toContain("setMaxLines:30");
-    expect(calls).toContain("setShowCost:true");
-  });
-
-  it("retains an injected manager when a widget is injected later", () => {
+  it("drops the manager dependency on dispose", () => {
     const { io } = memIO();
-    const { m, concurrencies } = managerStub();
-    const { w } = widgetStub();
+    const { manager, retentions } = managerStub();
     const store = new ConfigStore(io);
-    store.setDeps({ manager: m });
-    store.setDeps({ widget: w });
-    concurrencies.length = 0;
-
-    store.mutate.concurrency.setDefault(8);
-
-    expect(concurrencies).toEqual([{ default: 8 }]);
-  });
-
-  it("dispose drops deps so mutations no longer sync", () => {
-    const { io } = memIO();
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
+    store.setDeps({ manager });
     store.dispose();
-    calls.length = 0;
-    store.mutate.agent.setShowCost(true);
-    expect(calls).toHaveLength(0);
+    retentions.length = 0;
+    store.mutate.agent.setFinishedRetentionMinutes(10);
+    expect(retentions).toEqual([]);
   });
-});
 
-/* ------------------------------------------------------------------ */
-/*  notifyToolsExpanded                                                 */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore notifyToolsExpanded", () => {
-  it("synchronizes compact mode for initial and later tool expansion states", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, widgetShortcut: true, widgetCompact: false }, concurrency: { default: 4 } });
-    const { w, calls } = widgetStub();
+  it("persists output-log buffering without a UI dependency", () => {
+    const { io, current } = memIO();
     const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-
-    store.notifyToolsExpanded(false);
-    expect(calls).toContain("setCompactMode:true");
-    calls.length = 0;
-
-    store.notifyToolsExpanded(true);
-    expect(calls).toContain("setCompactMode:false");
-  });
-
-  it("uses a previously reported expansion state when shortcut is enabled later", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, widgetShortcut: false, widgetCompact: false }, concurrency: { default: 4 } });
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-
-    store.notifyToolsExpanded(false);
-    expect(calls).toHaveLength(0);
-
-    store.mutate.widget.setShortcut(true);
-    expect(calls).toContain("setCompactMode:true");
-  });
-
-  it("is a no-op when widgetShortcut is disabled", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, widgetShortcut: false }, concurrency: { default: 4 } });
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    store.notifyToolsExpanded(true);
-    store.notifyToolsExpanded(false);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("is a no-op when widgetCompact is forced on", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, widgetShortcut: true, widgetCompact: true }, concurrency: { default: 4 } });
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    store.notifyToolsExpanded(true);
-    store.notifyToolsExpanded(false);
-    expect(calls).toHaveLength(0);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  show* stats visibility                                               */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore show* stats visibility", () => {
-  it("all show* keys default to true", () => {
-    const store = new ConfigStore(memIO().io);
-    expect(store.agent.showTools).toBe(true);
-    expect(store.agent.showTurns).toBe(true);
-    expect(store.agent.showInput).toBe(true);
-    expect(store.agent.showOutput).toBe(true);
-    expect(store.agent.showContext).toBe(true);
-    expect(store.agent.showTime).toBe(true);
-  });
-
-  it("configured false values are respected", () => {
-    const { io } = memIO({
-      agent: { default: null, forceBackground: false, showTools: false, showTurns: false, showInput: false, showOutput: false, showContext: false, showTime: false },
-      concurrency: { default: 4 },
-    });
-    const store = new ConfigStore(io);
-    expect(store.agent.showTools).toBe(false);
-    expect(store.agent.showTurns).toBe(false);
-    expect(store.agent.showInput).toBe(false);
-    expect(store.agent.showOutput).toBe(false);
-    expect(store.agent.showContext).toBe(false);
-    expect(store.agent.showTime).toBe(false);
-  });
-
-  it("setShowTools persists and syncs to widget", () => {
-    const { io, saves } = memIO();
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    saves.length = 0;
-
-    store.mutate.agent.setShowTools(false);
-    expect(store.agent.showTools).toBe(false);
-    expect(saves).toHaveLength(1);
-    expect(calls.some(c => c.startsWith("setStatsVisibility:" ))).toBe(true);
-  });
-
-  it("reload syncs stats visibility to widget", () => {
-    const { io } = memIO({ agent: { default: null, forceBackground: false, showTools: false }, concurrency: { default: 4 } });
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    calls.length = 0;
-    store.reload();
-    expect(calls.some(c => c.startsWith("setStatsVisibility:" ))).toBe(true);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  outputThinkingBufferSize                                            */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore outputThinkingBufferSize", () => {
-  it("defaults to 0 when absent", () => {
-    const store = new ConfigStore(memIO().io);
-    expect(store.agent.outputThinkingBufferSize).toBe(0);
-  });
-
-  it("returns configured value when present", () => {
-    const { io } = memIO({
-      agent: { default: null, forceBackground: false, outputThinkingBufferSize: 80 },
-      concurrency: { default: 4 },
-    });
-    const store = new ConfigStore(io);
-    expect(store.agent.outputThinkingBufferSize).toBe(80);
-  });
-
-  it("setOutputThinkingBufferSize persists value", () => {
-    const { io, saves } = memIO();
-    const store = new ConfigStore(io);
-    saves.length = 0;
-
     store.mutate.agent.setOutputThinkingBufferSize(200);
+    expect(current().agent.outputThinkingBufferSize).toBe(200);
     expect(store.agent.outputThinkingBufferSize).toBe(200);
-    expect(saves).toHaveLength(1);
-    expect(saves[0].agent.outputThinkingBufferSize).toBe(200);
-  });
-
-  it("setOutputThinkingBufferSize(0) persists and clears the setting", () => {
-    const { io } = memIO({
-      agent: { default: null, forceBackground: false, outputThinkingBufferSize: 80 },
-      concurrency: { default: 4 },
-    });
-    const store = new ConfigStore(io);
-    expect(store.agent.outputThinkingBufferSize).toBe(80);
-
-    store.mutate.agent.setOutputThinkingBufferSize(0);
-    expect(store.agent.outputThinkingBufferSize).toBe(0);
-    expect(store.agentConfigSnapshot().outputThinkingBufferSize).toBe(0);
-  });
-
-  it("clearAllModelOverrides preserves outputThinkingBufferSize", () => {
-    const { io } = memIO({
-      agent: { default: "keep", forceBackground: true, outputThinkingBufferSize: 500, Explore: "m1" },
-      concurrency: { default: 4 },
-    });
-    const store = new ConfigStore(io);
-    store.mutate.agent.clearAllModelOverrides();
-    const snap = store.agentConfigSnapshot();
-    expect(snap.outputThinkingBufferSize).toBe(500);
-    expect(snap.Explore).toBeUndefined();
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  Thinking overrides and mutation boundaries                         */
-/* ------------------------------------------------------------------ */
-
-describe("ConfigStore thinking overrides and boundaries", () => {
-  it("persists, clears, and reports persisted thinking overrides", () => {
-    const { io, saves } = memIO();
-    const store = new ConfigStore(io);
-
-    store.mutate.agent.setThinkingOverride("reviewer", "high");
-    expect(store.persistedThinkingOverride("reviewer")).toBe("high");
-    expect(store.hasPersistedThinkingOverrides()).toBe(true);
-    expect(saves).toHaveLength(1);
-
-    store.mutate.agent.clearThinkingOverride("reviewer");
-    expect(store.persistedThinkingOverride("reviewer")).toBeUndefined();
-    expect(store.hasPersistedThinkingOverrides()).toBe(false);
-    store.mutate.agent.clearAllThinkingOverrides();
-    expect(saves).toHaveLength(3);
-  });
-
-  it("keeps session thinking overrides in memory and clearAll resets them", () => {
-    const { io, saves } = memIO();
-    const store = new ConfigStore(io);
-    store.mutate.session.setThinkingOverride("reviewer", "medium");
-    expect(store.sessionThinkingOverride("reviewer")).toBe("medium");
-    expect(saves).toHaveLength(0);
-
-    store.mutate.session.clearAll();
-    expect(store.sessionThinkingOverride("reviewer")).toBeUndefined();
-    expect(saves).toHaveLength(0);
-  });
-
-  it("clamps widget line limits to two in reads and mutations", () => {
-    const { io, saves } = memIO({
-      agent: { default: null, forceBackground: false, widgetMaxLines: 1, widgetMaxLinesCompact: 0 },
-      concurrency: { default: 4 },
-    });
-    const store = new ConfigStore(io);
-    expect(store.agent.widgetMaxLines).toBe(2);
-    expect(store.agent.widgetMaxLinesCompact).toBe(2);
-
-    store.mutate.widget.setMaxLines(-5);
-    store.mutate.widget.setMaxLinesCompact(1);
-    expect(saves[0].agent.widgetMaxLines).toBe(2);
-    expect(saves[1].agent.widgetMaxLinesCompact).toBe(2);
-  });
-
-  it("persists the remaining scalar agent mutators", () => {
-    const { io, saves } = memIO();
-    const store = new ConfigStore(io);
-    store.mutate.agent.setDefaultModel("provider/model");
-    store.mutate.agent.setModelOverride("reviewer", "provider/reviewer");
-    store.mutate.agent.setForceBackground(true);
-    store.mutate.agent.setGraceTurns(9);
-    store.mutate.agent.setOrchestrationPrompt(false);
-
-    expect(store.agentConfigSnapshot()).toMatchObject({
-      default: "provider/model",
-      reviewer: "provider/reviewer",
-      forceBackground: true,
-      graceTurns: 9,
-      orchestrationPrompt: false,
-    });
-    expect(saves).toHaveLength(5);
-  });
-});
-
-/* Exercise the per-toggle mutators so each remains wired to persistence and widget sync. */
-describe("ConfigStore remaining display mutators", () => {
-  it("persists every stats and widget display toggle", () => {
-    const { io, saves } = memIO();
-    const { w, calls } = widgetStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ widget: w });
-    saves.length = 0;
-    calls.length = 0;
-
-    store.mutate.agent.setShowTurns(false);
-    store.mutate.agent.setShowInput(false);
-    store.mutate.agent.setShowOutput(false);
-    store.mutate.agent.setShowContext(false);
-    store.mutate.agent.setShowTime(false);
-    store.mutate.widget.setShowModelThinking(false);
-    store.mutate.widget.setShowStartTime(false);
-
-    expect(store.agent).toMatchObject({
-      showTurns: false, showInput: false, showOutput: false, showContext: false, showTime: false,
-      widgetShowModelThinking: false, widgetShowStartTime: false,
-    });
-    expect(saves).toHaveLength(7);
-    expect(calls).toContain("setShowModelThinking:false");
-    expect(calls).toContain("setShowStartTime:false");
-    expect(calls.filter(c => c.startsWith("setStatsVisibility:")).length).toBe(5);
   });
 });

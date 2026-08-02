@@ -103,7 +103,7 @@ interface SessionRevision {
 
 /**
  * Manager-only nested execution state. AgentRecord is intentionally a mutable
- * UI projection, so no authorization, ownership, or slot decision may read it.
+ * public projection, so no authorization, ownership, or slot decision may read it.
  */
 interface NestedControl {
   id: string;
@@ -570,7 +570,7 @@ export class AgentManager {
     return id;
   }
 
-  /** Update the mutable UI projection without ever reading it for control. */
+  /** Update the mutable public projection without ever reading it for control. */
   private syncHierarchy(record: ManagedAgentRecord | undefined, control: NestedControl): void {
     if (!record) return;
     record.hierarchy = {
@@ -664,7 +664,7 @@ export class AgentManager {
       },
       onTextDelta: (delta, fullText) => {
         // A stale text delta from an earlier execution must never reach the
-        // caller's live view during a later execution.
+        // caller's callback during a later execution.
         if (!this.isActiveExecution(record, initialExecution.id)) return;
         options.onTextDelta?.(delta, fullText);
       },
@@ -676,20 +676,10 @@ export class AgentManager {
           return;
         }
         record.execution.session = session;
-        // Capture one bounded initial sample so the widget and result details
-        // never need to read a live session during their render paths. Later
-        // samples are taken only at event boundaries.
+        // Capture one bounded initial sample so tool details never need to
+        // read a live session after execution. Later samples are taken only
+        // at event boundaries.
         this.observeContext(record);
-        // Flush any steers that arrived before the session was ready
-        if (record.execution.pendingSteers?.length) {
-          for (const msg of record.execution.pendingSteers) {
-            session.steer(msg).catch(() => {
-              // Steer is advisory — a failure here (e.g. session already aborting)
-              // is fine; the user can re-send if needed.
-            });
-          }
-          record.execution.pendingSteers = undefined;
-        }
         // Attach output log stream to session
         if (record.execution.outputLog) {
           record.execution.outputLog.attach(session);
@@ -943,7 +933,7 @@ export class AgentManager {
       signal: record.execution.abortController.signal,
       onTurnEnd: (turnCount) => {
         // Turn limits apply per execution; cumulative totals are finalized in
-        // finishTurnExecution so a live widget never reads a partial sum. A
+        // finishTurnExecution so a caller never reads a partial sum. A
         // delayed callback from an earlier execution must never mutate the
         // older summary during a later execution.
         if (!this.isActiveExecution(record, execution.id)) return;
@@ -954,7 +944,7 @@ export class AgentManager {
       }, execution.id),
       onTextDelta: (delta, fullText) => {
         // A stale text delta from an earlier execution must never reach the
-        // caller's live view during a later execution.
+        // caller's callback during a later execution.
         if (!this.isActiveExecution(record, execution.id)) return;
         request.onTextDelta?.(delta, fullText);
       },
@@ -1155,8 +1145,8 @@ export class AgentManager {
    * Refresh telemetry for running sessions whose cheap identity changed.
    *
    * SessionManager.getLeafId() is an O(1) leaf-pointer read. Comparing it
-   * (plus model/session metadata) lets the widget notice idle branch/model
-   * switches without making an unchanged 80ms tick walk session history.
+   * (plus model/session metadata) lets lifecycle boundaries notice idle
+   * branch/model switches without walking session history unnecessarily.
    * Returns whether a context/auth snapshot was taken.
    */
   refreshActiveSessions(): boolean {
@@ -1176,18 +1166,18 @@ export class AgentManager {
       if (!previous) {
         // onSessionCreated normally establishes this baseline after its
         // initial observation. Be defensive for lightweight session doubles
-        // without repeating a full read on the first widget tick.
+        // without repeating a full read on the first lifecycle observation.
         this.sessionRevisions.set(id, revision);
         continue;
       }
       if (!this.sessionRevisionChanged(previous, revision)) continue;
 
-      // Mark the revision before observing so a re-entrant widget update cannot
-      // schedule a second read for the same switch.
+      // Mark the revision before observing so a re-entrant lifecycle update
+      // cannot schedule a second read for the same switch.
       this.sessionRevisions.set(id, revision);
       // A normal assistant message queues its post-persistence sample. Let
       // that one coalesced read observe this newer leaf instead of sampling it
-      // again from the widget cadence.
+      // again from a later lifecycle cadence.
       if (this.deferredContextSamples.get(record) === session) continue;
 
       this.observeContext(record);
@@ -1416,7 +1406,7 @@ export class AgentManager {
    * `executionId` ties every callback to one execution generation: once a
    * newer execution claims the record (or the record is evicted), stale
    * events from this generation can no longer mutate record telemetry, defer
-   * observations, or reach the caller's live view.
+   * observations, or reach the caller's callback.
    */
   private createRecordCallbacks(
     record: ManagedAgentRecord,
@@ -1448,7 +1438,7 @@ export class AgentManager {
         this.deferContextSample(record, executionId);
       },
       // Compaction and tool-result usage contributes to the same session-level
-      // usage totals displayed by the UI, including its cache hit rate.
+      // usage totals returned in tool details, including their cache hit rate.
       onSupplementalUsage: (usage) => {
         if (!isActive()) return;
         addUsage(record.stats.lifetimeUsage, usage);
@@ -1548,31 +1538,6 @@ export class AgentManager {
     this.queue = this.queue.filter(e => !started.has(e.id));
   }
 
-
-  /**
-   * Send a steering message to a running agent.
-   * If the session hasn't been created yet, the message is queued.
-   */
-  async steer(id: string, message: string): Promise<boolean> {
-    const record = this.agents.get(id);
-    const control = this.nestedControls.get(id);
-    if (!record || control?.status !== "running") return false;
-
-    if (!record.execution.session) {
-      // Session not yet created — queue the steer
-      if (!record.execution.pendingSteers) record.execution.pendingSteers = [];
-      record.execution.pendingSteers.push(message);
-      return true;
-    }
-
-    try {
-      await record.execution.session.steer(message);
-      return true;
-    } catch {
-      // steer failures are surfaced to the caller via the boolean return value
-      return false;
-    }
-  }
 
   /** Bind a parent abort signal and retain its listener for explicit cleanup. */
   private bindParentAbortSignal(id: string, signal?: AbortSignal): void {
@@ -1681,7 +1646,6 @@ export class AgentManager {
     record.execution.session = undefined;
     record.execution.abortController = undefined;
     record.execution.promise = undefined;
-    record.execution.pendingSteers = undefined;
     record.execution.outputLog = undefined;
   }
   /** Dispose a record's session and remove it from the map. */

@@ -1,7 +1,7 @@
 /**
  * spawn-coordinator.test.ts — Tests for SpawnCoordinator.
 
- * Verifies: spawn (foreground/background), nudge batching, live-view lifecycle,
+ * Verifies: spawn (foreground/background), nudge batching, completion delivery,
  * onAgentComplete, dispose, stale pi protection.
  */
 
@@ -9,7 +9,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../../src/types.js";
 import { AgentManager } from "../../src/agents/agent-manager.js";
-import { buildInvocationTags } from "../../src/ui/format.js";
 
 // --- Mock modules ---
 
@@ -74,7 +73,6 @@ vi.mock("../../src/shell.js", () => ({
   }),
   getPiInstance: () => mockGetPiInstance(),
   getSessionCtx: () => ({ isIdle: mockIsIdle }),
-  getWidget: () => null,
 }));
 
 function makeMockManager() {
@@ -218,7 +216,6 @@ describe("SpawnCoordinator", () => {
         stoppedBy: "parent",
         resultConsumed: true,
       });
-      expect(coordinator.liveView(result.agentId)).toBeUndefined();
       expect(coordinator.isBackground(result.agentId)).toBe(false);
 
       vi.advanceTimersByTime(200);
@@ -409,56 +406,6 @@ describe("SpawnCoordinator", () => {
     expect(options.thinkingLevel).toBe("high");
     expect(options.invocation.thinkingLevel).toBe("high");
     expect(options.invocation.mode).toBe("eco");
-    expect(buildInvocationTags(options.invocation).tags).not.toContain("thinking: high");
-  });
-
-  it("creates a live view on spawn", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const result = await coordinator.spawn(mockPi, ctx, {
-      type: "builder",
-      prompt: "do something",
-      description: "Test",
-      graceTurns: 6,
-      runInBackground: true,
-    });
-
-    const view = coordinator.liveView(result.agentId);
-    expect(view).toBeDefined();
-    expect(view!.activeTools).toBeInstanceOf(Map);
-    expect(view!.responseText).toBe("");
-  });
-
-  it("tracks same-name parallel tool activity and full response text behaviorally", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const result = await coordinator.spawn(mockPi, ctx, {
-      type: "test", prompt: "work", description: "test", graceTurns: 6,
-      runInBackground: true,
-    });
-    const callbacks = manager.spawn.mock.calls[0]![4];
-    const view = coordinator.liveView(result.agentId)!;
-
-    callbacks.onToolActivity({ type: "start", toolName: "read" });
-    callbacks.onToolActivity({ type: "start", toolName: "read" });
-    expect([...view.activeTools.values()]).toEqual(["read", "read"]);
-    callbacks.onToolActivity({ type: "end", toolName: "read" });
-    expect([...view.activeTools.values()]).toEqual(["read"]);
-    callbacks.onTextDelta("ignored delta", "complete response");
-    expect(view.responseText).toBe("complete response");
-  });
-
-  it("cleans up live view on foreground completion", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const result = await coordinator.spawn(mockPi, ctx, {
-      type: "builder",
-      prompt: "do something",
-      description: "Test",
-      graceTurns: 6,
-      runInBackground: false,
-    });
-
-    // After foreground spawn completes, live view should be cleaned up
-    const view = coordinator.liveView(result.agentId);
-    expect(view).toBeUndefined();
   });
 
   it("registers background agent in backgroundAgentIds", async () => {
@@ -623,13 +570,11 @@ describe("SpawnCoordinator", () => {
       }).then((result) => { settled = true; return result; });
       await Promise.resolve();
       expect(settled).toBe(false); // foreground callers await the execution
-      expect(coordinator.liveView("agent-x")).toBeDefined();
 
       resolveExecution("final result");
       const result = await pending;
       expect(result.record).toBe(record);
       expect(record.lifecycle.resultConsumed).toBe(true);
-      expect(coordinator.liveView("agent-x")).toBeUndefined();
       expect((coordinator as any).backgroundDeliveries.has("exec-1")).toBe(false);
     });
 
@@ -1021,11 +966,9 @@ describe("SpawnCoordinator", () => {
     it("deletes live view on completion", () => {
       const coordinator = new SpawnCoordinator(manager as any);
       // Manually add a live view
-      (coordinator as any).liveViews.set("agent-1", { activeTools: new Map(), responseText: "" });
 
       coordinator.onAgentComplete({ id: "agent-1" } as AgentRecord);
 
-      expect(coordinator.liveView("agent-1")).toBeUndefined();
     });
 
     it("schedules nudge for background agents", async () => {
@@ -1150,11 +1093,9 @@ describe("SpawnCoordinator", () => {
 
     it("clears live views", () => {
       const coordinator = new SpawnCoordinator(manager as any);
-      (coordinator as any).liveViews.set("agent-1", { activeTools: new Map(), responseText: "" });
 
       coordinator.dispose();
 
-      expect(coordinator.liveView("agent-1")).toBeUndefined();
     });
   });
 

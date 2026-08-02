@@ -1,16 +1,16 @@
 /**
  * config-store.ts — Deep module owning persisted config + per-session overrides.
  *
- * Absorbs config-io.ts, config-mutator.ts, and the config/widget-sync half of
- * state.ts. See docs/adr/0004-composition-root-over-shared-state.md.
+ * Absorbs config-io.ts and config-mutator.ts. See
+ * docs/adr/0004-composition-root-over-shared-state.md.
  *
  * - Reads return defaults baked in (no `?? 6` at call sites).
  * - Each persisted mutate method is mutate + persist + its side effect, so a
  *   side effect cannot be forgotten.
- * - Widget/manager are injected after construction (they're created lazily).
+ * - The manager is injected after construction (it is created lazily).
  *
  * Lifecycle: per-session. `reload()` re-reads disk + resets session overrides
- * at session_start. `dispose()` drops deps at session_shutdown.
+ * at session_start. `dispose()` drops the manager dependency at session_shutdown.
  */
 
 import type {
@@ -23,7 +23,6 @@ import type {
   SubagentsConfig,
 } from "../models/model-precedence.js";
 import { resolveEcoModelSetting, resolveEcoThinkingSetting, resolveModelSetting, resolveThinkingSetting } from "../models/model-precedence.js";
-import type { AgentWidget } from "../ui/agent-widget.js";
 import type { AgentManager } from "../agents/agent-manager.js";
 import { CONFIG_AGENT_NON_MODEL_KEYS } from "./types.js";
 import type { SystemPromptMode } from "../agents/types.js";
@@ -65,16 +64,7 @@ export interface ResolvedAgentSettings {
   /** null = inherit parent. Kept nullable to preserve resolveModel's null-skip. */
   readonly defaultModel: string | null;
   readonly forceBackground: boolean;
-  readonly showCost: boolean;
   readonly graceTurns: number;
-  readonly widgetMaxLines: number;
-  readonly widgetMaxLinesCompact: number;
-  readonly widgetCompact: boolean;
-  readonly widgetShortcut: boolean;
-  readonly widgetShowModelThinking: boolean;
-  readonly widgetShowStartTime: boolean;
-  readonly widgetDescLengthFull: number;
-  readonly widgetDescLengthCompact: number;
   /** System prompt mode: replace (default), inherit parent, or custom file. */
   readonly systemPromptMode: SystemPromptMode;
   /** Whether to include AGENTS.md context files in the subagent system prompt. */
@@ -91,18 +81,6 @@ export interface ResolvedAgentSettings {
   readonly disableDefaultAgents: boolean;
   /** Whether to append dynamic parent-agent orchestration guidance. */
   readonly orchestrationPrompt: boolean;
-  /** Whether to show toolUses count in widget stats line. */
-  readonly showTools: boolean;
-  /** Whether to show turn count in widget stats line. */
-  readonly showTurns: boolean;
-  /** Whether to show input tokens in widget stats line. */
-  readonly showInput: boolean;
-  /** Whether to show output tokens in widget stats line. */
-  readonly showOutput: boolean;
-  /** Whether to show context percent and compactions in widget stats line. */
-  readonly showContext: boolean;
-  /** Whether to show elapsed time in widget stats line. */
-  readonly showTime: boolean;
   /** Buffer size for streaming thinking blocks to output file. 0 = disabled. */
   readonly outputThinkingBufferSize: number;
   /** Minutes to retain finished agents before cleanup eviction. */
@@ -140,7 +118,6 @@ export interface SubagentRuntimeSettings {
 }
 
 export interface ConfigStoreDeps {
-  widget?: AgentWidget;
   manager?: AgentManager;
 }
 
@@ -154,13 +131,9 @@ export class ConfigStore {
   private sessionThinkingOverrides: SessionThinkingOverrides = {};
   private sessionEcoOverrides: EcoSessionOverrides = { models: {}, thinking: {} };
   private sessionMode: AgentMode | undefined;
-  private sessionShowCost: boolean | undefined;
   // These are shell-owned control collaborators. ECMAScript private fields
   // keep getStore() from becoming an indirect route to them in child runtimes.
-  #widget?: AgentWidget;
   #manager?: AgentManager;
-  /** Last known tool-expansion state, for ctrl+o compact sync. */
-  private lastToolsExpanded: boolean | undefined;
 
   constructor(private readonly io: ConfigIO = fileConfigIO) {
     const loaded = this.readConfig();
@@ -171,11 +144,6 @@ export class ConfigStore {
   }
 
   // ── Reads ──────────────────────────────────────────────────────
-
-  /** Whether a session-level showCost override is active. */
-  get hasSessionShowCost(): boolean {
-    return this.sessionShowCost !== undefined;
-  }
 
   /** Health of the source used for this session's durable config. */
   get health(): ConfigHealth {
@@ -189,22 +157,11 @@ export class ConfigStore {
 
   get agent(): ResolvedAgentSettings {
     const a = this.config.agent;
-    const widgetMaxLines = Math.max(2, a.widgetMaxLines!); // guaranteed by loadConfig default merge
-    const widgetMaxLinesCompact = Math.max(2, a.widgetMaxLinesCompact ?? Math.floor(widgetMaxLines / 2));
 
     return {
       defaultModel: a.default ?? null,
       forceBackground: a.forceBackground === true,
-      showCost: this.sessionShowCost ?? (a.showCost === true),
       graceTurns: a.graceTurns ?? 6,
-      widgetMaxLines,
-      widgetMaxLinesCompact,
-      widgetCompact: a.widgetCompact === true,
-      widgetShortcut: a.widgetShortcut === true,
-      widgetShowModelThinking: a.widgetShowModelThinking !== false,
-      widgetShowStartTime: a.widgetShowStartTime !== false,
-      widgetDescLengthFull: a.widgetDescLengthFull ?? 50,
-      widgetDescLengthCompact: a.widgetDescLengthCompact ?? 30,
       systemPromptMode: VALID_SYSTEM_PROMPT_MODES.has(a.systemPromptMode as string) ? (a.systemPromptMode as SystemPromptMode) : "replace",
       includeContextFiles: a.includeContextFiles ?? true,
       defaultThinking: parseThinkingLevel(a.defaultThinking),
@@ -213,12 +170,6 @@ export class ConfigStore {
       loadExtensionsImplicitly: a.loadExtensionsImplicitly !== false,
       disableDefaultAgents: a.disableDefaultAgents === true,
       orchestrationPrompt: a.orchestrationPrompt !== false,
-      showTools: a.showTools !== false,
-      showTurns: a.showTurns !== false,
-      showInput: a.showInput !== false,
-      showOutput: a.showOutput !== false,
-      showContext: a.showContext !== false,
-      showTime: a.showTime !== false,
       outputThinkingBufferSize: a.outputThinkingBufferSize ?? 0,
       finishedRetentionMinutes: a.finishedRetentionMinutes ?? 60,
       maxNestingDepth: normalizeMaxNestingDepth(a.maxNestingDepth),
@@ -280,7 +231,7 @@ export class ConfigStore {
       || Object.keys(this.config.ecoThinkingOverrides ?? {}).length > 0;
   }
 
-  /** Raw agent config incl. dynamic per-type model keys (for menu display). */
+  /** Raw agent config including dynamic per-type model keys. */
   agentConfigSnapshot(): Readonly<SubagentsConfig["agent"]> {
     return this.config.agent;
   }
@@ -430,7 +381,6 @@ export class ConfigStore {
         }
         this.config.agent = preserved as SubagentsConfig["agent"];
         this.persist();
-        this.syncWidgetSettings();
       },
       clearAllThinkingOverrides: (): void => {
         this.config.thinkingOverrides = {};
@@ -454,18 +404,10 @@ export class ConfigStore {
         this.config.ecoModelOverrides = {};
         this.config.ecoThinkingOverrides = {};
         this.persist();
-        this.syncWidgetSettings();
       },
       setForceBackground: (enabled: boolean): void => {
         this.config.agent.forceBackground = enabled;
         this.persist();
-      },
-      setShowCost: (enabled: boolean): void => {
-        this.config.agent.showCost = enabled;
-        this.persist();
-        this.sessionShowCost = undefined;
-        this.#widget?.setShowCost(enabled);
-        this.syncWidgetStatsVisibility();
       },
       setGraceTurns: (n: number): void => {
         this.config.agent.graceTurns = n;
@@ -511,12 +453,6 @@ export class ConfigStore {
         this.config.agent.orchestrationPrompt = enabled;
         this.persist();
       },
-      setShowTools: (enabled: boolean) => this.setAgentVisibility("showTools", enabled),
-      setShowTurns: (enabled: boolean) => this.setAgentVisibility("showTurns", enabled),
-      setShowInput: (enabled: boolean) => this.setAgentVisibility("showInput", enabled),
-      setShowOutput: (enabled: boolean) => this.setAgentVisibility("showOutput", enabled),
-      setShowContext: (enabled: boolean) => this.setAgentVisibility("showContext", enabled),
-      setShowTime: (enabled: boolean) => this.setAgentVisibility("showTime", enabled),
       setOutputThinkingBufferSize: (size: number): void => {
         this.config.agent.outputThinkingBufferSize = size;
         this.persist();
@@ -531,54 +467,6 @@ export class ConfigStore {
         this.config.agent.maxNestingDepth = normalizeMaxNestingDepth(depth);
         this.persist();
         this.#manager?.setMaxNestingDepth(this.config.agent.maxNestingDepth);
-      },
-    },
-    widget: {
-      setCompact: (enabled: boolean): void => {
-        this.config.agent.widgetCompact = enabled;
-        this.persist();
-        this.syncWidgetSettings();
-        this.syncCompactModeFromToolsExpanded();
-      },
-      setMaxLines: (lines: number): void => {
-        const maxLines = Math.max(2, lines);
-        this.config.agent.widgetMaxLines = maxLines;
-        if (this.config.agent.widgetMaxLinesCompact === undefined) {
-          this.config.agent.widgetMaxLinesCompact = Math.max(2, Math.floor(maxLines / 2));
-        }
-        this.persist();
-        this.syncWidgetSettings();
-      },
-      setMaxLinesCompact: (lines: number): void => {
-        this.config.agent.widgetMaxLinesCompact = Math.max(2, lines);
-        this.persist();
-        this.syncWidgetSettings();
-      },
-      setDescLengthFull: (n: number): void => {
-        this.config.agent.widgetDescLengthFull = n;
-        this.persist();
-        this.syncWidgetSettings();
-      },
-      setDescLengthCompact: (n: number): void => {
-        this.config.agent.widgetDescLengthCompact = n;
-        this.persist();
-        this.syncWidgetSettings();
-      },
-      setShortcut: (enabled: boolean): void => {
-        this.config.agent.widgetShortcut = enabled;
-        this.persist();
-        this.syncWidgetSettings();
-        this.syncCompactModeFromToolsExpanded();
-      },
-      setShowModelThinking: (enabled: boolean): void => {
-        this.config.agent.widgetShowModelThinking = enabled;
-        this.persist();
-        this.syncWidgetSettings();
-      },
-      setShowStartTime: (enabled: boolean): void => {
-        this.config.agent.widgetShowStartTime = enabled;
-        this.persist();
-        this.syncWidgetSettings();
       },
     },
     concurrency: {
@@ -617,33 +505,8 @@ export class ConfigStore {
         this.sessionThinkingOverrides = {};
         this.sessionEcoOverrides = { models: {}, thinking: {} };
       },
-      /** Set a session showCost override. Not persisted. */
-      setShowCost: (enabled: boolean): void => {
-        this.sessionShowCost = enabled;
-        this.#widget?.setShowCost(enabled);
-        this.syncWidgetStatsVisibility();
-      },
-      /** Clear session showCost override, reverting to config value. */
-      clearShowCost: (): void => {
-        this.sessionShowCost = undefined;
-        this.#widget?.setShowCost(this.config.agent.showCost === true);
-        this.syncWidgetStatsVisibility();
-      },
     },
   };
-
-  // ── ctrl+o compact sync (absorbs syncCompactFromToolsExpanded) ──
-
-  /**
-   * Sync widget compact mode from the known tool-expansion state (ctrl+o),
-   * gated on widgetShortcut. The first known state and later state changes both
-   * apply immediately; force compact overrides this coupling.
-   */
-  notifyToolsExpanded(expanded: boolean): void {
-    const changed = this.lastToolsExpanded !== expanded;
-    this.lastToolsExpanded = expanded;
-    if (changed) this.syncCompactModeFromToolsExpanded();
-  }
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
@@ -658,21 +521,17 @@ export class ConfigStore {
     this.sessionThinkingOverrides = {};
     this.sessionEcoOverrides = { models: {}, thinking: {} };
     this.sessionMode = undefined;
-    this.sessionShowCost = undefined;
-    this.lastToolsExpanded = undefined;
     this.syncAllDeps();
   }
 
-  /** Inject side-effect targets. Re-syncs whatever deps are present (lazy widget/manager). */
+  /** Inject the manager used by configuration side effects. */
   setDeps(deps: ConfigStoreDeps): void {
-    if (deps.widget !== undefined) this.#widget = deps.widget;
     if (deps.manager !== undefined) this.#manager = deps.manager;
     this.syncAllDeps();
   }
 
-  /** Drop deps at session_shutdown. The widget/manager are disposed by the composition root. */
+  /** Drop the manager dependency at session_shutdown. */
   dispose(): void {
-    this.#widget = undefined;
     this.#manager = undefined;
   }
 
@@ -729,65 +588,12 @@ export class ConfigStore {
       : { config: loaded, health: "healthy", canRepair: false };
   }
 
-  /** Apply the last known tool-expansion state while shortcut coupling is active. */
-  private syncCompactModeFromToolsExpanded(): void {
-    if (this.config.agent.widgetShortcut === true
-      && this.config.agent.widgetCompact !== true
-      && this.lastToolsExpanded !== undefined) {
-      this.#widget?.setCompactMode(!this.lastToolsExpanded);
-    }
-  }
-
-  /** Push widget display settings (compact, shortcut, max lines) to the widget. */
-  private syncWidgetSettings(): void {
-    const w = this.#widget;
-    if (!w) return;
-    const a = this.agent;
-    w.setForceCompact(a.widgetCompact);
-    w.setWidgetShortcut(a.widgetShortcut);
-    w.setShowModelThinking(a.widgetShowModelThinking);
-    w.setShowStartTime(a.widgetShowStartTime);
-    w.setMaxLines(a.widgetMaxLines);
-    w.setMaxLinesCompact(a.widgetMaxLinesCompact);
-    w.setDescLengthFull(a.widgetDescLengthFull);
-    w.setDescLengthCompact(a.widgetDescLengthCompact);
-  }
-
-  /** Push stats visibility flags to the widget. */
-  private syncWidgetStatsVisibility(): void {
-    const w = this.#widget;
-    if (!w) return;
-    const a = this.agent;
-    w.setStatsVisibility({
-      showTools: a.showTools,
-      showTurns: a.showTurns,
-      showInput: a.showInput,
-      showOutput: a.showOutput,
-      showContext: a.showContext,
-      showCost: a.showCost,
-      showTime: a.showTime,
-    });
-  }
-
-  /** Update a widget stats visibility flag: mutate config → persist → sync widget. */
-  private setAgentVisibility(key: "showTools" | "showTurns" | "showInput" | "showOutput" | "showContext" | "showTime", value: boolean): void {
-    this.config.agent[key] = value;
-    this.persist();
-    this.syncWidgetStatsVisibility();
-  }
-
   private applyConcurrency(): void {
     this.#manager?.setConcurrency(this.config.concurrency);
   }
 
-  /** Full re-sync of all present deps. Used by reload/setDeps. */
+  /** Full re-sync of the manager dependency. Used by reload/setDeps. */
   private syncAllDeps(): void {
-    if (this.#widget) {
-      this.#widget.setShowCost(this.agent.showCost);
-      this.syncWidgetSettings();
-      this.syncCompactModeFromToolsExpanded();
-      this.syncWidgetStatsVisibility();
-    }
     this.applyConcurrency();
     this.#manager?.setRetentionMinutes(this.agent.finishedRetentionMinutes);
     this.#manager?.setMaxNestingDepth(this.agent.maxNestingDepth);

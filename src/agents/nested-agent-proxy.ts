@@ -1,7 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { executeNestedAgentTool } from "./tool-execution.js";
-import { renderAgentToolCall, renderAgentToolResult } from "../ui/renderer.js";
 import type { SubagentRuntimeContext } from "../shell.js";
 
 /**
@@ -27,8 +26,5 @@ export function createNestedAgentProxy(runtime: SubagentRuntimeContext): ToolDef
       onUpdate: any,
       ctx: ExtensionContext,
     ) => executeNestedAgentTool(runtime, toolCallId, params, signal, onUpdate, ctx),
-    renderCall: (args: Record<string, unknown>, theme: any) => renderAgentToolCall(args, theme),
-    renderResult: (result: any, options: any, theme: any) =>
-      renderAgentToolResult(result, options, theme, runtime.settings.agent.showCost),
   } as unknown as ToolDefinition;
 }

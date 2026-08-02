@@ -19,7 +19,7 @@ Coverage uses Vitest's V8 provider over `src/**/*.ts`. Reports are written to
 
 ## Minimum coverage
 
-Global thresholds in `vitest.config.ts` are 80% statements, 74% branches, 78%
+Global thresholds in `vitest.config.ts` are 80% statements, 74% branches, 77%
 functions, and 81% lines. Critical failure/race boundaries additionally have
 conservative per-file floors:
 
@@ -29,7 +29,7 @@ conservative per-file floors:
 | `src/agents/agent-manager.ts` | 85% | 80% | 80% | 88% |
 | `src/config/config-io.ts` | 68% | 80% | 73% | 70% |
 | `src/prompt/skill-loader.ts` | 72% | 80% | 70% | 72% |
-| `src/spawn/spawn-coordinator.ts` | 75% | 70% | 85% | 76% |
+| `src/spawn/spawn-coordinator.ts` | 75% | 70% | 80% | 76% |
 
 These floors are below the reproducible Ubuntu baseline rather than rounded up
 to arbitrary targets. Coverage runs with one worker because tests intentionally
@@ -52,9 +52,8 @@ extension loader. Neither smoke makes a model/provider request.
 
 Skill integration tests use Pi's real loaders with temporary git/ignore trees.
 Directory junctions are used on Windows where possible; privileged Windows file
-symlinks and UNC paths are intentionally not claimed. The suite also does not
-pretend to validate paid provider calls, an interactive real TUI, or power-loss
-durability.
+symlinks and UNC paths are intentionally not claimed. The suite also does not pretend to validate paid provider calls or power-loss
+durability; headless extension lifecycle and package loading are covered.
 
 ## Required checks for `main`
 

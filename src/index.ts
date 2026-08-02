@@ -1,7 +1,7 @@
 /**
  * index.ts — Local subagents extension entry point.
  *
- * Registers tools, commands, and event listeners at init time.
+ * Registers the four tools and root lifecycle listeners at init time.
  *
  * Stealth tool registration:
  *   - All tools register at extension init (not runtime)
@@ -11,16 +11,13 @@
  *
  * Config:
  *   - Loaded from ~/.pi/agent/subagents-lean.json at session_start
- *   - ConfigStore owns config + session overrides + persistence + side effects
- *   - Tool execution and menus read/write through store
- *
- * Commands:
- *   - /agents: Management menu (agent settings, concurrency, running agents, debug)
+ *   - ConfigStore owns config + session overrides + persistence + runtime side effects
  *
  * Events:
  *   - tool_call: Inject effective model/thinking into Agent tool calls
- *   - session_start: Load config, register agents, initialise manager
- *   - session_shutdown: Abort all, dispose manager
+ *   - before_agent_start: Refresh the parent catalog and orchestration prompt
+ *   - session_start: Load config, register agents, initialise root services
+ *   - session_shutdown: Abort all, dispose root services
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

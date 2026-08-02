@@ -1,14 +1,13 @@
 # Composition root over module-level shared state
 
-Shared runtime state (config, session overrides, the activity store, the manager,
-widget, pi instance, and session context) lives on a single composition-root
-**shell** object that PI's fixed-signature callbacks capture by closure, rather
-than as module-level mutable `let`/`Map` bindings exported from `state.ts`.
-Per-session services (config store, agent manager, spawn coordinator, widget)
-are constructed at `session_start` and mounted onto the shell; `session_shutdown`
-disposes them. Owned domain state moves into the module that owns the concern:
-config into the ConfigStore, the activity store and **Nudge** into the spawn
-coordinator.
+Shared runtime state (config, session overrides, the manager, coordinator, pi
+instance, and session context) lives on a single composition-root **shell**
+object that PI's fixed-signature callbacks capture by closure, rather than as
+module-level mutable `let`/`Map` bindings. Per-session services (config store,
+agent manager, and spawn coordinator) are constructed at `session_start` and
+mounted onto the shell; `session_shutdown` disposes them. Owned domain state
+moves into the module that owns the concern: config into the ConfigStore and
+background delivery into the spawn coordinator.
 
 ## Why
 
@@ -18,12 +17,9 @@ as plain closures with signatures it dictates; they cannot take extra
 parameters, so dependencies must be reachable from inside them somehow. A shell
 captured by closure is the cleanest way and reaches every callback.
 
-Second, `state.ts`'s own header warns that the PI runtime does not propagate
-ESM live-binding reassignments, so `manager` and `widget` already use holder
-objects rather than `let` re-exports. But `__config` *was* a `let` re-export
-reassigned on every `setConfig()` — the exact stale-reference footgun the header
-describes. A shell with fields removes live-binding reassignment entirely; the
-closure always reads the current field.
+Second, the old state module warned that the PI runtime does not propagate ESM
+live-binding reassignments. A shell with fields removes that stale-reference
+footgun entirely; the closure always reads the current field.
 
 Third, the module-level globals forced every test of a tool execute handler to
 mock 15+ modules, because the handlers' real dependencies (config, manager,

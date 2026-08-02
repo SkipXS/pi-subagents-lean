@@ -17,12 +17,11 @@ vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
   getStore: () => ({
     createSubagentRuntimeSettings: () => ({
-      agent: { graceTurns: 6, forceBackground: false, showCost: false, maxNestingDepth: 2 },
+      agent: { graceTurns: 6, forceBackground: false, maxNestingDepth: 2 },
       modelFor: (_type: string, parent: string, config?: { model?: string }) => config?.model ?? parent,
       thinkingSettingFor: () => ({ value: undefined }),
     }),
   }),
-  getWidget: () => undefined,
   getPiInstance: () => undefined,
   getSessionCtx: () => undefined,
 }));

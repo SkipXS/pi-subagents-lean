@@ -41,12 +41,6 @@ vi.mock("../src/agents/usage.js", () => ({
   getSessionUsageSnapshot: vi.fn(),
 }));
 
-vi.mock("../src/ui/renderer.js", () => ({
-  renderAgentToolCall: vi.fn(),
-  renderAgentToolResult: vi.fn(),
-  renderSubagentResult: vi.fn(),
-}));
-vi.mock("../src/ui/menu/menus.js", () => ({ showAgentsMainMenu: vi.fn() }));
 vi.mock("../src/agents/agent-status.js", () => ({ executeAgentStatusTool: vi.fn() }));
 
 import { registerTools } from "../src/registration.js";
@@ -56,8 +50,6 @@ describe("registered Agent cancellation contract", () => {
     const tools: Array<Record<string, any>> = [];
     const pi = {
       registerTool: vi.fn((tool: Record<string, any>) => tools.push(tool)),
-      registerMessageRenderer: vi.fn(),
-      registerCommand: vi.fn(),
     };
     registerTools(pi as any);
     const execute = tools.find((tool) => tool.name === "Agent")?.execute;

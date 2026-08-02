@@ -152,31 +152,58 @@ describe("config I/O paths", () => {
     });
   });
 
-  it("defaults and preserves widget visibility and orchestration settings", async () => {
+  it("tolerates and drops legacy UI fields while retaining functional settings", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      agent: {
+        default: null,
+        forceBackground: false,
+        widgetShowModelThinking: false,
+        widgetShowStartTime: false,
+        showCost: true,
+        defaultMaxTurns: 40,
+        orchestrationPrompt: false,
+      },
+      concurrency: { default: 4 },
+    }));
+    vi.resetModules();
+    const { loadConfig } = await import("../../src/config/config-io.ts");
+    const config = loadConfig().config;
+    expect(config.agent).not.toHaveProperty("widgetShowModelThinking");
+    expect(config.agent).not.toHaveProperty("widgetShowStartTime");
+    expect(config.agent).not.toHaveProperty("showCost");
+    expect(config.agent).not.toHaveProperty("defaultMaxTurns");
+    expect(config.agent.orchestrationPrompt).toBe(false);
+  });
+
+  it("does not recreate legacy UI keys when a write callback touches them", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({
       agent: { default: null, forceBackground: false },
       concurrency: { default: 4 },
     }));
     vi.resetModules();
-    let { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().config.agent).toMatchObject({
-      widgetShowModelThinking: true,
-      widgetShowStartTime: true,
-      orchestrationPrompt: true,
-    });
 
-    mockReadFileSync.mockReturnValue(JSON.stringify({
-      agent: { default: null, forceBackground: false, widgetShowModelThinking: false, widgetShowStartTime: false, orchestrationPrompt: false },
-      concurrency: { default: 4 },
-    }));
-    vi.resetModules();
-    ({ loadConfig } = await import("../../src/config/config-io.ts"));
-    expect(loadConfig().config.agent).toMatchObject({
-      widgetShowModelThinking: false,
-      widgetShowStartTime: false,
-      orchestrationPrompt: false,
+    const { updateConfigAtomic } = await import("../../src/config/config-io.ts");
+    const result = updateConfigAtomic((config) => {
+      (config.agent as Record<string, unknown>).widgetCompact = true;
+      (config.agent as Record<string, unknown>).defaultMaxTurns = 40;
+      config.agent.forceBackground = true;
     });
+    expect(result.config.agent.forceBackground).toBe(true);
+    expect(result.config.agent).not.toHaveProperty("widgetCompact");
+    expect(result.config.agent).not.toHaveProperty("defaultMaxTurns");
+    const configWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
+    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("widgetCompact");
+    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("defaultMaxTurns");
+  });
+
+  it("rejects repair when neither a primary nor backup config exists", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    vi.resetModules();
+
+    const { repairConfig } = await import("../../src/config/config-io.ts");
+    expect(() => repairConfig()).toThrow("Cannot repair config");
   });
 
   it("uses Pi's agent directory for renamed config and custom prompts when HOME is unset", async () => {
