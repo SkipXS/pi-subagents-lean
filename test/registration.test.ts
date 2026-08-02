@@ -249,7 +249,7 @@ describe("Agent tool registration", () => {
     expect(JSON.parse(JSON.stringify(tool.parameters))).toEqual({
       type: "object",
       additionalProperties: false,
-      required: ["agent_id", "prompt"],
+      required: ["agent_id", "prompt", "run_in_background"],
       properties: {
         agent_id: { type: "string" },
         prompt: { type: "string" },
