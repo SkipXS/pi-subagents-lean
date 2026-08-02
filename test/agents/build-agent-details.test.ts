@@ -39,7 +39,6 @@ describe("buildAgentDetails", () => {
         description: "Build something",
       },
       execution: {},
-      hierarchy: { depth: 1, childIds: [], delegateTo: [], maxChildAgents: 0, agentCatalog: new Map() },
       stats: {
         lifetimeUsage: { input: 100, output: 200, cacheWrite: 50, cost: 0.01 },
         toolUses: 5,
@@ -66,7 +65,7 @@ describe("buildAgentDetails", () => {
 
   // --- Baseline: no options (minimal) ---
 
-  it("accepts legacy AgentRecord shapes without hierarchy", () => {
+  it("accepts flat AgentRecord shapes", () => {
     const record: AgentRecord = {
       id: "legacy-id",
       lifecycle: { status: "completed", startedAt: 1000, completedAt: 2000 },
@@ -83,7 +82,6 @@ describe("buildAgentDetails", () => {
     expect(buildAgentDetails(record, { includeStatus: true })).toMatchObject({
       type: "builder",
       description: "Legacy record",
-      depth: 1,
     });
   });
 
@@ -107,16 +105,6 @@ describe("buildAgentDetails", () => {
   });
 
   // --- includeStats ---
-
-  it("exposes parent/depth/waiting-child hierarchy in result details", () => {
-    const record = makeRecord({
-      hierarchy: { depth: 2, parentId: "parent-id", childIds: ["child-id"], waitingOnChildId: "child-id", delegateTo: [], maxChildAgents: 0, agentCatalog: new Map() },
-    });
-    const details = buildAgentDetails(record, { includeStatus: true });
-    expect(details.depth).toBe(2);
-    expect(details.parentId).toBe("parent-id");
-    expect(details.waitingOnChildId).toBe("child-id");
-  });
 
   it("includes stats fields when includeStats is true", () => {
     const record = makeRecord();

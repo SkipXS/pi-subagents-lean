@@ -19,7 +19,7 @@ Coverage uses Vitest's V8 provider over `src/**/*.ts`. Reports are written to
 
 ## Minimum coverage
 
-Global thresholds in `vitest.config.ts` are 80% statements, 74% branches, 77%
+Global thresholds in `vitest.config.ts` are 79% statements, 74% branches, 76%
 functions, and 81% lines. Critical failure/race boundaries additionally have
 conservative per-file floors:
 

@@ -17,12 +17,7 @@ import { getCoordinator, getManager } from "../shell.js";
 function formatAgent(record: AgentRecord): string {
   const shortId = record.id.slice(0, SHORT_ID_LENGTH);
   const delivery = record.delivery ? ` delivery:${record.delivery.state}` : "";
-  const hierarchy = record.hierarchy
-    ? `${record.hierarchy.parentId ? ` parent:${record.hierarchy.parentId.slice(0, SHORT_ID_LENGTH)}` : ""}`
-      + ` depth:${record.hierarchy.depth}`
-      + `${record.hierarchy.waitingOnChildId ? ` waiting:${record.hierarchy.waitingOnChildId.slice(0, SHORT_ID_LENGTH)}` : ""}`
-    : "";
-  return `${shortId} (${record.display.type}) ${record.lifecycle.status}${hierarchy}${delivery}`;
+  return `${shortId} (${record.display.type}) ${record.lifecycle.status}${delivery}`;
 }
 
 /**

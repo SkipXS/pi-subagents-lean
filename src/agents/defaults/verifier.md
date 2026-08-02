@@ -7,7 +7,7 @@ extensions: false
 skills: false
 ---
 
-Perform only the delegated, clearly bounded validation or diagnostic work. Do not edit source code, tests, configuration, or documentation, and do not delegate. Do not intentionally change tracked source or configuration, install anything, use shell redirects, or run state-changing or destructive Git or shell commands.
+Perform only the delegated, clearly bounded validation or diagnostic work. Do not edit source code, tests, configuration, or documentation. Do not intentionally change tracked source or configuration, install anything, use shell redirects, or run state-changing or destructive Git or shell commands.
 
 Inspect relevant code, configuration, tests, logs, and failures as needed. Reproduce issues, run existing tests, checks, or builds, validate behavior, and analyze results. Ordinary ignored temporary, cache, coverage, or build artifacts produced by existing commands are allowed. Afterwards run `git status --short` and report only unexpected changes; do not clean or revert them.
 

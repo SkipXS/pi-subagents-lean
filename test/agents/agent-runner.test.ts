@@ -89,11 +89,7 @@ vi.mock("../../src/prompt/skill-loader.js", () => ({
 }));
 
 vi.mock("../../src/shell.js", () => ({
-  createSubagentRuntimeContext: (executeNestedAgent: any, settings: any) => Object.freeze({
-    isChildRuntime: true as const,
-    executeNestedAgent,
-    settings,
-  }),
+  createSubagentRuntimeContext: () => Object.freeze({ isChildRuntime: true as const }),
   getStore: () => {
     const agent = {
       includeContextFiles: mockModules.mockIncludeContextFiles,
@@ -102,7 +98,6 @@ vi.mock("../../src/shell.js", () => ({
       forceBackground: false,
       showCost: false,
       defaultModel: null,
-      maxNestingDepth: 2,
       loadSkillsImplicitly: true,
       loadExtensionsImplicitly: true,
     };
@@ -291,114 +286,6 @@ describe("runAgent — tool filtering", () => {
 /*  runAgent — excludeTools (blacklist mode)                           */
 /* ------------------------------------------------------------------ */
 
-describe("runAgent — nested custom tool", () => {
-  beforeEach(() => {
-    resetMocks();
-    fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
-  });
-
-  it("uses only canonically resolved permitted roles from its worktree catalog in the prompt", async () => {
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "Agent"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-    mockModules.mockManager = {};
-    mockModules.mockCoordinator = {};
-    const localReviewer = { name: "Local-Reviewer", description: "Local hidden reviewer", hidden: true, systemPrompt: "" };
-    const agentConfig = {
-      ...defaultAgentConfig,
-      delegateTo: ["local-reviewer", "missing"],
-      // Omitted max_child_agents has the generic one-child effective limit.
-      maxChildAgents: undefined,
-    };
-
-    await runAgent(fakeCtx(), "test-agent", "delegate", {
-      pi: fakePi,
-      agentId: "child-id",
-      nestingDepth: 1,
-      agentConfig,
-      agentCatalog: new Map([["Local-Reviewer", localReviewer]]),
-    });
-
-    const extras = mockModules.mockBuildAgentPrompt.mock.calls[0][3];
-    expect(extras.nestedDelegation).toEqual({
-      maxChildren: 1,
-      agents: [{ name: "Local-Reviewer", description: "Local hidden reviewer", hidden: true }],
-    });
-  });
-
-  it("treats an unresolved-only delegation policy as a leaf", async () => {
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "Agent"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-    mockModules.mockManager = {};
-    mockModules.mockCoordinator = {};
-    const agentConfig = { ...defaultAgentConfig, delegateTo: ["missing"], maxChildAgents: 1 };
-
-    await runAgent(fakeCtx(), "test-agent", "delegate", {
-      pi: fakePi,
-      agentId: "unresolved-id",
-      nestingDepth: 1,
-      agentConfig,
-      agentCatalog: new Map([["scout", { name: "scout", description: "Inspect", systemPrompt: "" }]]),
-    });
-
-    expect(mockModules.mockBuildAgentPrompt.mock.calls[0][3].nestedDelegation).toBeUndefined();
-    expect(mockModules.mockCreateAgentSession.mock.calls[0][0].customTools).toBeUndefined();
-    expect(session.setActiveToolsByName).toHaveBeenCalledWith(["read"]);
-  });
-
-  it("does not inject child guidance or register a proxy at the nesting limit", async () => {
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-    mockModules.mockManager = {};
-    mockModules.mockCoordinator = {};
-    const agentConfig = { ...defaultAgentConfig, delegateTo: ["scout"], maxChildAgents: 1 };
-
-    await runAgent(fakeCtx(), "test-agent", "delegate", {
-      pi: fakePi,
-      agentId: "depth-limit",
-      nestingDepth: 2,
-      agentConfig,
-      agentCatalog: new Map([["scout", { name: "scout", description: "Inspect", systemPrompt: "" }]]),
-    });
-
-    expect(mockModules.mockBuildAgentPrompt.mock.calls[0][3].nestedDelegation).toBeUndefined();
-    expect(mockModules.mockCreateAgentSession.mock.calls[0][0].customTools).toBeUndefined();
-  });
-
-  it("uses a local Agent custom tool with extensions disabled and no root control tools", async () => {
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "Agent", "StopAgent", "AgentStatus"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-    mockModules.mockManager = {};
-    mockModules.mockCoordinator = {};
-    const agentConfig = {
-      ...defaultAgentConfig,
-      extensions: false,
-      registeredTools: ["read", "bash"],
-      tools: ["read", "bash"],
-      delegateTo: ["scout"],
-      maxChildAgents: 1,
-    };
-    mockModules.mockGetAgentConfig.mockReturnValue(agentConfig);
-    mockModules.mockGetConfig.mockReturnValue({ ...defaultConfig, extensions: false });
-
-    await runAgent(fakeCtx(), "test-agent", "delegate", {
-      pi: fakePi,
-      agentId: "child-id",
-      nestingDepth: 1,
-      agentConfig,
-      agentCatalog: new Map([["scout", { name: "scout", description: "Inspect", systemPrompt: "" }]]),
-    });
-
-    const sessionOptions = mockModules.mockCreateAgentSession.mock.calls[0][0];
-    expect(sessionOptions.resourceLoader._opts.noExtensions).toBe(true);
-    expect(sessionOptions.tools).toEqual(["read", "bash", "Agent"]);
-    expect(sessionOptions.customTools.map((tool: any) => tool.name)).toEqual(["Agent"]);
-    expect(session.setActiveToolsByName).toHaveBeenCalledWith(["read", "bash", "Agent"]);
-  });
-});
 
 /* ------------------------------------------------------------------ */
 /*  runAgent — excludeTools (blacklist mode)                           */

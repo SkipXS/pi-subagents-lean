@@ -9,14 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **AgentContinue tool.** Continue a finished agent's session with a new prompt: the execution reuses the retained session, model, working directory, output log, and the original `max_turns`/`grace_turns` limits, and consumes a normal global concurrency slot without incrementing the accepted-agent count. Foreground calls await their execution; `run_in_background` acknowledges immediately and delivers exactly one per-execution completion notification. Each execution is retained in the record as its own summary (`executions`) with per-execution usage/cost/turn deltas, while lifetime totals stay cumulative.
-- **Eco mode.** `/agents` now controls session-only or persisted Default/Eco mode, shows a themed `🍃 Eco` footer status, and provides per-agent Eco model/thinking settings plus `eco_model`/`eco_thinking` frontmatter. Eco fields resolve independently, fail closed for configured unavailable models, and are snapshotted across queued and nested execution.
-- **Bounded nested delegation.** Delegating roles can expose a sanitized, worktree-local child catalog through a foreground-only `Agent` proxy. Parent/depth/waiting-child hierarchy is available in status details, and stopped children return cancellation rather than partial success.
+- **Eco mode.** Default/Eco model and thinking settings resolve independently, fail closed for configured unavailable models, and are snapshotted for queued root execution.
+- **Flat root-agent execution.** `Agent`, `AgentContinue`, `StopAgent`, and `AgentStatus` now operate only on root records. Subagent sessions remain ALS-isolated but receive no `Agent` custom proxy or root control tool.
 
 ### Changed
 - **Finished-agent retention default raised to 60 minutes** (config fallback, manager default, and docs); the `finishedRetentionMinutes` setting remains configurable from 1 minute up.
 - **Deprecated shell compatibility.** `enterSubagentSpawn`, `exitSubagentSpawn`, and `isInsideSubagentSpawn` are again exported for source-path consumers. They only preserve inert extension registration; AsyncLocalStorage remains authoritative for child isolation and root shell guards.
-- **AgentRecord source compatibility.** `hierarchy` is optional for records created before nested delegation; manager-created records retain it internally.
-- **Nesting settings and manager enforcement.** `maxNestingDepth` defaults to 2 and normalizes only to 1 or 2; depth 2 is the hard runtime maximum. The manager centrally enforces captured-catalog permission, depth, budget, and active-child checks for every nested spawn. The bundled `implementer` may create up to four direct children; other delegators without an explicit limit default to one child.
+- **Legacy configuration compatibility.** Removed UI and delegation fields are tolerated while loading and are omitted from new configuration writes.
 
 ### Fixed
 - **`AgentContinue` schema now satisfies strict-mode providers.** Codex rejects tool schemas whose `required` array omits any property, so `run_in_background` is now a mandatory boolean (`Type.Boolean()` instead of `Type.Optional`) — the executor still treats `false`/missing as foreground, so behavior is unchanged.

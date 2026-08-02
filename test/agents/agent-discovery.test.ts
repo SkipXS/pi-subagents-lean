@@ -20,7 +20,6 @@ import {
 } from "../../src/agents/agent-discovery.ts";
 import type { AgentConfigFromMd } from "../../src/agents/agent-discovery.ts";
 import { DEFAULT_AGENTS } from "../../src/agents/default-agents.ts";
-import { getEffectiveMaxChildAgents } from "../../src/agents/types.ts";
 import { makeAgentMd, tempDirWithFiles } from "../fixtures.ts";
 
 /* ------------------------------------------------------------------ */
@@ -126,8 +125,9 @@ This is the system prompt body.
     expect(result.eco_thinking).toBe("low");
     expect(result.max_turns).toBe(50);
     expect(result.max_tokens).toBe(2048);
-    expect(result.delegate_to).toEqual(["scout", "reviewer"]);
-    expect(result.max_child_agents).toBe(2);
+    // Deprecated delegation frontmatter is tolerated but ignored.
+    expect(toAgentConfig(result)).not.toHaveProperty("delegateTo");
+    expect(toAgentConfig(result)).not.toHaveProperty("maxChildAgents");
     expect(result.hidden).toBe(false);
     expect(result.systemPrompt).toBe("This is the system prompt body.");
     expect(result.source).toBe("user");
@@ -150,8 +150,6 @@ Just a body.
     expect(result.thinking).toBeUndefined();
     expect(result.max_turns).toBeUndefined();
     expect(result.max_tokens).toBeUndefined();
-    expect(result.delegate_to).toBeUndefined();
-    expect(result.max_child_agents).toBeUndefined();
     expect(result.hidden).toBeUndefined();
     expect(result.systemPrompt).toBe("Just a body.");
     expect(result.source).toBe("project");
@@ -244,25 +242,6 @@ body
     expect(result.max_tokens).toBe(1024);
   });
 
-  it("parses explicit empty delegation lists", () => {
-    const result = parseAgentFile("---\nname: agent\ndelegate_to: []\n---\nbody", "user");
-    expect(result.delegate_to).toEqual([]);
-  });
-
-  it("normalizes max_child_agents to a non-negative integer", () => {
-    const result = parseAgentFile("---\nname: agent\ndelegate_to: scout, verifier\nmax_child_agents: -2.8\n---\nbody", "user");
-    expect(result.delegate_to).toEqual(["scout", "verifier"]);
-    // Raw parsing preserves the value; conversion to AgentConfig enforces it.
-    expect(result.max_child_agents).toBe(-2.8);
-    expect(toAgentConfig(result).maxChildAgents).toBe(0);
-  });
-
-  it("uses the generic effective child-limit defaults", () => {
-    expect(getEffectiveMaxChildAgents({ delegateTo: ["scout"] })).toBe(1);
-    expect(getEffectiveMaxChildAgents({})).toBe(0);
-    expect(getEffectiveMaxChildAgents({ delegateTo: [], maxChildAgents: 9 })).toBe(0);
-    expect(DEFAULT_AGENTS.get("implementer")?.maxChildAgents).toBe(4);
-  });
 
   it("ignores unknown frontmatter fields", () => {
     const content = `---
@@ -400,11 +379,7 @@ describe("scanAgentFilesInDir", () => {
 /* ------------------------------------------------------------------ */
 
 describe("mergeAgents", () => {
-  it("preserves a lower-precedence child limit when an override omits it", () => {
-    const override = parseAgentFile("---\nname: implementer\ndelegate_to: [scout]\n---\n", "project");
-    const result = mergeAgents(DEFAULT_AGENTS, [], [], [override]);
-    expect(result.get("implementer")).toMatchObject({ delegateTo: ["scout"], maxChildAgents: 4 });
-  });
+
 
   it("merges Eco model and thinking fields independently across agent layers", () => {
     const defaults = new Map<string, any>([["scout", {

@@ -9,7 +9,7 @@ const expectedNonModelKeys = [
   "default", "forceBackground", "graceTurns", "systemPromptMode", "includeContextFiles",
   "defaultThinking", "defaultMaxTurns", "loadSkillsImplicitly", "loadExtensionsImplicitly",
   "disableDefaultAgents", "orchestrationPrompt", "outputThinkingBufferSize",
-  "finishedRetentionMinutes", "maxNestingDepth",
+  "finishedRetentionMinutes",
 ];
 
 describe("bundled agent and config contracts", () => {
@@ -20,11 +20,11 @@ describe("bundled agent and config contracts", () => {
     expect(CONFIG_AGENT_NON_MODEL_KEYS).not.toContain("defaultAgent");
   });
 
-  it("limits the implementer to one correction before parent escalation", () => {
+  it("keeps the implementer focused and non-delegating", () => {
     const prompt = DEFAULT_AGENTS.get("implementer")!.systemPrompt;
-    expect(prompt).toContain("After one focused correction round");
-    expect(prompt).toContain("if any material issue remains in that subsystem");
-    expect(prompt).toContain("let the parent decide takeover or a new owner");
+    expect(prompt).toContain("focused tests");
+    expect(prompt).not.toContain("delegate_to");
+    expect(prompt).not.toContain("nested");
   });
 
   it("parses every bundled Markdown file to its canonical unique name and a usable prompt", () => {

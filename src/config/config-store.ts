@@ -31,7 +31,6 @@ import { parseThinkingLevel } from "../utils.js";
 import {
   VALID_SYSTEM_PROMPT_MODES,
   DEFAULT_CONCURRENCY,
-  normalizeMaxNestingDepth,
   loadConfig,
   saveConfigAtomic,
   updateConfigAtomic,
@@ -71,7 +70,7 @@ export interface ResolvedAgentSettings {
   readonly includeContextFiles: boolean;
   /** Default thinking level for spawned agents. Undefined = inherit from agent config. */
   readonly defaultThinking: ThinkingLevel | undefined;
-  /** Default max turns for spawned agents. Undefined = unlimited. */
+  /** Legacy manual-UI value retained for tolerant reads; root tools ignore it. */
   readonly defaultMaxTurns: number | undefined;
   /** Global default for skills loading: true (load all) or false (none). */
   readonly loadSkillsImplicitly: boolean;
@@ -85,13 +84,11 @@ export interface ResolvedAgentSettings {
   readonly outputThinkingBufferSize: number;
   /** Minutes to retain finished agents before cleanup eviction. */
   readonly finishedRetentionMinutes: number;
-  /** Maximum subagent depth; valid values are 1 or 2. */
-  readonly maxNestingDepth: number;
 }
 
 /** Side-effect targets, injected after construction. */
 /**
- * Detached settings available to a child agent runtime. This deliberately
+ * Detached settings captured for one accepted root execution. This deliberately
  * contains values and pure resolvers only: it is not a ConfigStore view and
  * cannot reach persistence, dependencies, or session mutation methods.
  */
@@ -137,7 +134,7 @@ export class ConfigStore {
 
   constructor(private readonly io: ConfigIO = fileConfigIO) {
     const loaded = this.readConfig();
-    this.config = loaded.config;
+    this.config = stripRemovedAgentFields(loaded.config);
     this.persistedConfig = structuredClone(this.config);
     this.configHealth = loaded.health;
     this.repairAvailable = loaded.canRepair;
@@ -172,7 +169,6 @@ export class ConfigStore {
       orchestrationPrompt: a.orchestrationPrompt !== false,
       outputThinkingBufferSize: a.outputThinkingBufferSize ?? 0,
       finishedRetentionMinutes: a.finishedRetentionMinutes ?? 60,
-      maxNestingDepth: normalizeMaxNestingDepth(a.maxNestingDepth),
     };
   }
 
@@ -463,11 +459,6 @@ export class ConfigStore {
         this.persist();
         this.#manager?.setRetentionMinutes(n);
       },
-      setMaxNestingDepth: (depth: number): void => {
-        this.config.agent.maxNestingDepth = normalizeMaxNestingDepth(depth);
-        this.persist();
-        this.#manager?.setMaxNestingDepth(this.config.agent.maxNestingDepth);
-      },
     },
     concurrency: {
       setDefault: (n: number): void => {
@@ -513,7 +504,7 @@ export class ConfigStore {
   /** Re-read disk, reset session overrides + toggle state, re-sync deps. Called at session_start. */
   reload(): void {
     const loaded = this.readConfig();
-    this.config = loaded.config;
+    this.config = stripRemovedAgentFields(loaded.config);
     this.persistedConfig = structuredClone(this.config);
     this.configHealth = loaded.health;
     this.repairAvailable = loaded.canRepair;
@@ -543,8 +534,8 @@ export class ConfigStore {
       throw new Error("Config repair is unavailable for this persistence adapter.");
     }
     const repaired = this.io.repair();
-    this.config = structuredClone(repaired.config);
-    this.persistedConfig = structuredClone(repaired.config);
+    this.config = stripRemovedAgentFields(repaired.config);
+    this.persistedConfig = structuredClone(this.config);
     this.configHealth = repaired.health;
     this.repairAvailable = repaired.canRepair;
     this.syncAllDeps();
@@ -552,18 +543,21 @@ export class ConfigStore {
 
   /** Save current config, restoring the last durable state if the write fails. */
   private persist(): void {
-    const before = structuredClone(this.persistedConfig);
-    const desired = structuredClone(this.config);
+    const before = stripRemovedAgentFields(this.persistedConfig);
+    const desired = stripRemovedAgentFields(this.config);
     try {
       if (this.io.update) {
         const saved = this.io.update((latest) => applyConfigDelta(latest, before, desired));
-        this.config = structuredClone(saved.config);
-        this.persistedConfig = structuredClone(saved.config);
+        const sanitized = stripRemovedAgentFields(saved.config);
+        this.config = structuredClone(sanitized);
+        this.persistedConfig = structuredClone(sanitized);
         this.configHealth = saved.health;
         this.repairAvailable = saved.canRepair;
       } else {
-        this.io.save(desired);
-        this.persistedConfig = structuredClone(desired);
+        const sanitized = stripRemovedAgentFields(desired);
+        this.io.save(sanitized);
+        this.config = structuredClone(sanitized);
+        this.persistedConfig = structuredClone(sanitized);
       }
     } catch (err) {
       // Keep the last durable in-memory snapshot, but re-read health: the
@@ -596,13 +590,25 @@ export class ConfigStore {
   private syncAllDeps(): void {
     this.applyConcurrency();
     this.#manager?.setRetentionMinutes(this.agent.finishedRetentionMinutes);
-    this.#manager?.setMaxNestingDepth(this.agent.maxNestingDepth);
   }
 }
 
 /** Apply only this store mutation's changed fields to a freshly locked snapshot. */
+const REMOVED_AGENT_FIELDS = [
+  "maxNestingDepth", "max_nesting_depth", "delegate_to", "delegateTo", "max_child_agents", "maxChildAgents",
+] as const;
+
+function stripRemovedAgentFields(config: SubagentsConfig): SubagentsConfig {
+  const sanitized = structuredClone(config);
+  const agent = sanitized.agent as Record<string, unknown>;
+  for (const field of REMOVED_AGENT_FIELDS) delete agent[field];
+  return sanitized;
+}
+
 function applyConfigDelta(latest: SubagentsConfig, before: SubagentsConfig, desired: SubagentsConfig): void {
-  applyObjectDelta(latest.agent as Record<string, unknown>, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
+  const latestAgent = latest.agent as Record<string, unknown>;
+  for (const field of REMOVED_AGENT_FIELDS) delete latestAgent[field];
+  applyObjectDelta(latestAgent, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
   applyObjectDelta(latest.concurrency as Record<string, unknown>, before.concurrency as Record<string, unknown>, desired.concurrency as Record<string, unknown>);
   if (!Object.is(before.mode, desired.mode)) {
     if (desired.mode === undefined) delete latest.mode;

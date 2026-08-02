@@ -4,8 +4,7 @@
  * Covers the strict continuation gate (completed + settled + usable session),
  * the global concurrency slot consumption, per-execution generation/delivery/
  * usage deltas, StopAgent handling of queued/running continuations, output-log
- * append semantics, ID resolution, and the root-only / nested rejection
- * contract.
+ * append semantics, ID resolution, and the root-only contract.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -67,7 +66,6 @@ import type { OnAgentComplete } from "../../src/agents/agent-manager.js";
 import { registerAgents } from "../../src/agents/agent-types.js";
 import {
   createSubagentRuntimeContext,
-  getStore,
   runWithSubagentRuntime,
 } from "../../src/shell.js";
 import { buildAgentDetails } from "../../src/agents/tool-execution.js";
@@ -84,7 +82,7 @@ describe("AgentManager.continueAgent", () => {
     mockModules.fsMock.appendFileSync.mockClear();
     registerAgents(new Map([
       ["scout", { name: "scout", description: "", systemPrompt: "" }],
-      ["implementer", { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 }],
+      ["implementer", { name: "implementer", description: "", systemPrompt: "" }],
     ]));
     onComplete = vi.fn<OnAgentComplete>();
   });
@@ -616,31 +614,12 @@ describe("AgentManager.continueAgent", () => {
     expect(record.stats.executions![1]).toMatchObject({ status: "error", error: "turn failed" });
   });
 
-  it("rejects continuation of a nested agent", async () => {
-    manager = new AgentManager(onComplete);
-    const parentRun = makeResolvablePromise();
-    mockModules.mockRunAgent.mockReturnValueOnce(parentRun.promise).mockResolvedValueOnce(mockRunResult());
-    const parentId = manager.spawn(fakePi(), fakeCtx(), "implementer", "parent", {
-      description: "parent",
-      agentConfig: { name: "implementer", description: "", systemPrompt: "", delegateTo: ["scout"], maxChildAgents: 1 },
-    });
-    const childId = manager.spawnNested(parentId, fakePi(), fakeCtx(), "scout", "child", {
-      description: "child",
-      agentConfig: { name: "scout", description: "", systemPrompt: "" },
-    });
-    await manager.getRecord(childId)!.execution.promise;
-
-    expect(() => manager.continueAgent(childId, "nope", {}))
-      .toThrow("Nested agents cannot be continued");
-    parentRun.resolve(mockRunResult());
-    await manager.getRecord(parentId)!.execution.promise;
-  });
 
   it("rejects root spawning and continuation from a child runtime", async () => {
     manager = new AgentManager(onComplete);
     const { id } = await spawnCompletedAgent("initial task");
     await runWithSubagentRuntime(
-      createSubagentRuntimeContext(async () => ({ content: [] }), getStore().createSubagentRuntimeSettings()),
+      createSubagentRuntimeContext(),
       async () => {
         expect(() => manager.spawn(fakePi(), fakeCtx(), "scout", "nope", { description: "nope" }))
           .toThrow("Root agent spawning is unavailable from a child runtime");
@@ -1072,16 +1051,6 @@ describe("AgentManager.continueAgent", () => {
     manager = new AgentManager(onComplete);
     manager.setRetentionMinutes(0);
     manager.setConcurrency({ default: 0 });
-    manager.setMaxNestingDepth(Number.NaN);
-
-    expect(manager.preflightNested("missing", "scout")).toEqual({
-      ok: false,
-      error: "Nested agent parent is no longer running",
-    });
-    expect(() => manager.spawnNested("missing", fakePi(), fakeCtx(), "scout", "child", {
-      description: "child",
-      isBackground: true,
-    })).toThrow("Nested agents must run in the foreground");
     expect(manager.abort("missing", "agent")).toBe(false);
 
     const session = mockAgentSession();

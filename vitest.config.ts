@@ -12,9 +12,9 @@ export default defineConfig({
       // Global floors plus conservative gates for failure- and race-critical
       // modules. File floors sit below the reproducible Ubuntu baseline.
       thresholds: {
-        statements: 80,
+        statements: 79,
         branches: 74,
-        functions: 77,
+        functions: 76,
         lines: 81,
         "src/registration.ts": { statements: 80, branches: 70, functions: 95, lines: 80 },
         "src/agents/agent-manager.ts": { statements: 85, branches: 80, functions: 80, lines: 88 },

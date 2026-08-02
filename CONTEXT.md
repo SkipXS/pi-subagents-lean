@@ -1,6 +1,6 @@
 # pi-subagents-lean
 
-A lightweight pi extension that lets the parent model spawn autonomous subagents for focused tasks. This repository is the renamed `SkipXS/pi-subagents-lean` successor to `AlexParamonov/pi-subagents-lite`, itself derived from `tintinweb/pi-subagents`. Its scope intentionally excludes scheduling and join modes; bounded, foreground-only nested delegation is supported for explicitly configured roles.
+A lightweight pi extension that lets the parent model spawn autonomous subagents for focused tasks. This repository is the renamed `SkipXS/pi-subagents-lean` successor to `AlexParamonov/pi-subagents-lite`, itself derived from `tintinweb/pi-subagents`. Its scope intentionally excludes scheduling and join modes and uses a flat root-agent model.
 
 ## Language
 
@@ -8,7 +8,7 @@ A lightweight pi extension that lets the parent model spawn autonomous subagents
 
 **Subagent**
 
-An autonomous agent with an isolated session, spawned from the parent conversation through the `Agent` tool.
+An autonomous agent with an isolated session, spawned from the parent conversation through the `Agent` tool. A subagent cannot access the extension's root control tools and cannot start another agent.
 
 **Parent**
 
@@ -20,11 +20,11 @@ A named configuration defining a subagent's instructions, display name, tools, e
 
 **Agent Markdown**
 
-A `.md` agent definition with YAML frontmatter and a system-prompt body. Definitions are discovered from bundled defaults, the user directory, trusted shared/project directories, and an explicitly selected trusted working tree.
+A `.md` agent definition with flat frontmatter and a system-prompt body. Definitions are discovered from bundled defaults, the user directory, trusted shared/project directories, and an explicitly selected trusted working tree.
 
 **Orchestration prompt**
 
-A compact, bounded, parent-only system-prompt block generated from visible agent definitions before each parent turn. It provides delegation guidance and the current agent catalog without changing the fixed tool schema.
+A compact, bounded, parent-only system-prompt block generated from visible agent definitions before each parent turn. It provides routing guidance and the current agent catalog without changing the fixed tool schema.
 
 **Schema-first tool**
 
@@ -42,7 +42,7 @@ A thinking-level selection resolved through the same precedence chain as the mod
 
 **Eco mode**
 
-A session-only or persisted operating mode selected through configuration rather than a custom UI. Eco model and thinking fields resolve independently and fall back to the fully resolved Default-mode fields. Root acceptance snapshots the mode/settings for queued work and all descendants; a configured unavailable or unauthenticated Eco model fails closed.
+A session-only or persisted operating mode selected through configuration rather than a custom UI. Eco model and thinking fields resolve independently and fall back to the fully resolved Default-mode fields. Root acceptance snapshots the mode/settings for queued work.
 
 **Soft turn limit**
 
@@ -74,15 +74,15 @@ A spawn that blocks its `Agent` tool call until the subagent finishes and then r
 
 **Background subagent**
 
-A spawn that acknowledges immediately, occupies or waits for a global concurrency slot, and delivers its result automatically when complete.
+A spawn that acknowledges immediately, occupies or waits for a global concurrency slot, and delivers its result exactly once through the normal parent message path.
 
 **Nudge**
 
-A completion message delivered to the parent after a background subagent reaches a terminal state. Closely timed nudges are batched.
+A completion message delivered to the parent after a background subagent reaches a terminal state. Closely timed nudges are batched, while each execution retains its own exactly-once delivery claim.
 
 **Agent record**
 
-The parent-owned runtime record containing lifecycle state, display metadata, execution handles, accumulated usage, final result or error, and hierarchy metadata (parent, depth, direct children, and any child currently awaited).
+The parent-owned flat runtime record containing lifecycle state, display metadata, execution handles, accumulated usage, final result or error, and retained continuation history.
 
 **Output log**
 
@@ -90,17 +90,15 @@ An append-only, human-readable transcript under the system temporary directory. 
 
 ### Interface
 
-The extension exposes only the `Agent`, `AgentContinue`, `StopAgent`, and
-`AgentStatus` tools. There is no custom terminal UI; host-standard output,
-status, and the append-only output log are the diagnostic surfaces.
+The extension exposes only the `Agent`, `AgentContinue`, `StopAgent`, and `AgentStatus` tools. There is no custom terminal UI; host-standard output, status, and the append-only output log are the diagnostic surfaces.
 
 ## Relationships
 
-- The **parent** spawns a **subagent** from one **agent type** using the accepted Default/Eco mode snapshot.
+- The **parent** starts independent root **subagents** from named **agent types** using the accepted Default/Eco mode snapshot.
 - **Agent Markdown** supplies custom or overriding agent-type configuration.
 - The **orchestration prompt** advertises visible agent types only to the parent.
 - A subagent may run at a validated **working tree path** and use its trusted **working tree overlay**.
-- Foreground results return inline; background results arrive through a **nudge**.
-- The **agent record** owns lifecycle, hierarchy, usage data, and retained results returned through the tools.
-- An explicitly configured **subagent** may foreground-delegate to its permitted child roles within the configured depth: root children are depth 1 and only their children may be depth 2. It inherits its CWD/worktree, may have only one active child, and receives no child `StopAgent` or `AgentStatus` tools. The manager centrally enforces the captured catalog, permission, depth, budget, and active-child checks.
+- Foreground results return inline; background results arrive through one **nudge**.
+- Root records are scheduled by one global queue and concurrency limit. `AgentContinue` reuses a retained completed root session and consumes a normal slot.
+- AsyncLocalStorage isolates each subagent session while it is created and while extensions are bound. No subagent receives an `Agent` custom tool or any root control tool.
 - The **soft turn limit** triggers wrap-up guidance; **grace turns** bound the remaining execution.

@@ -15,7 +15,6 @@ function defaultConfig(): SubagentsConfig {
       orchestrationPrompt: true,
       outputThinkingBufferSize: 0,
       finishedRetentionMinutes: 60,
-      maxNestingDepth: 2,
     },
     thinkingOverrides: {},
     ecoModelOverrides: {},
@@ -53,17 +52,14 @@ function managerStub(): {
   manager: AgentManager;
   concurrencies: unknown[];
   retentions: number[];
-  nestingDepths: number[];
 } {
   const concurrencies: unknown[] = [];
   const retentions: number[] = [];
-  const nestingDepths: number[] = [];
   const manager = {
     setConcurrency: (config: unknown) => concurrencies.push(config),
     setRetentionMinutes: (minutes: number) => retentions.push(minutes),
-    setMaxNestingDepth: (depth: number) => nestingDepths.push(depth),
   } as unknown as AgentManager;
-  return { manager, concurrencies, retentions, nestingDepths };
+  return { manager, concurrencies, retentions };
 }
 
 describe("ConfigStore runtime settings", () => {
@@ -149,10 +145,30 @@ describe("ConfigStore runtime settings", () => {
       includeContextFiles: true,
       outputThinkingBufferSize: 0,
       finishedRetentionMinutes: 60,
-      maxNestingDepth: 2,
     });
     expect(settings).not.toHaveProperty("widgetMaxLines");
     expect(settings).not.toHaveProperty("showCost");
+  });
+
+  it("does not recreate removed delegation fields through dynamic writes", () => {
+    const { io, current } = memIO({
+      agent: {
+        default: null,
+        forceBackground: false,
+        delegate_to: ["scout"] as any,
+        max_child_agents: 2,
+        maxNestingDepth: 2,
+      },
+    });
+    const store = new ConfigStore(io);
+
+    store.mutate.agent.setModelOverride("delegate_to", "reviewer");
+    store.mutate.agent.setModelOverride("max_child_agents", "4");
+    store.mutate.agent.setModelOverride("maxNestingDepth", "2");
+
+    expect(current().agent).not.toHaveProperty("delegate_to");
+    expect(current().agent).not.toHaveProperty("max_child_agents");
+    expect(current().agent).not.toHaveProperty("maxNestingDepth");
   });
 });
 
@@ -256,22 +272,19 @@ describe("ConfigStore persistence and manager effects", () => {
     expect(current().concurrency).toEqual({ default: 8 });
   });
 
-  it("updates concurrency, retention, and nesting through the manager", () => {
+  it("updates concurrency and retention through the manager", () => {
     const { io, current } = memIO();
-    const { manager, concurrencies, retentions, nestingDepths } = managerStub();
+    const { manager, concurrencies, retentions } = managerStub();
     const store = new ConfigStore(io);
     store.setDeps({ manager });
     concurrencies.length = 0;
     retentions.length = 0;
-    nestingDepths.length = 0;
 
     store.mutate.concurrency.setDefault(2);
     store.mutate.agent.setFinishedRetentionMinutes(0);
-    store.mutate.agent.setMaxNestingDepth(99);
 
     expect(concurrencies.at(-1)).toEqual({ default: 2 });
     expect(retentions.at(-1)).toBe(1);
-    expect(nestingDepths.at(-1)).toBe(2);
     expect(current().agent.finishedRetentionMinutes).toBe(1);
   });
 

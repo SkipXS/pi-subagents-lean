@@ -5,11 +5,10 @@ import { getStatusNote } from "../status-note.js";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentExecutionSummary, AgentRecord, AgentStatus, SpawnConfig } from "../types.js";
-import type { AgentConfig } from "../agents/types.js";
 import type { AgentManager, SpawnOptions } from "../agents/agent-manager.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
-import { resolveTypeInCatalog, snapshotRegisteredAgentCatalog } from "../agents/agent-types.js";
-import { buildAgentDetails, createNestedAgentExecutor } from "../agents/tool-execution.js";
+import { getAgentConfig, resolveType, snapshotAgentConfig } from "../agents/agent-types.js";
+import { buildAgentDetails } from "../agents/tool-execution.js";
 
 /**
  * spawn-coordinator.ts — Spawn-and-track coordination for subagents.
@@ -102,21 +101,6 @@ interface BackgroundDeliveryEntry {
 }
 
 /** Copy array-valued fields so queued work cannot observe later config mutation. */
-function snapshotAgentConfig(config: AgentConfig | undefined): AgentConfig | undefined {
-  if (!config) return undefined;
-  return {
-    ...config,
-    registeredTools: config.registeredTools && [...config.registeredTools],
-    tools: Array.isArray(config.tools) ? [...config.tools] : config.tools,
-    excludeTools: config.excludeTools && [...config.excludeTools],
-    extensions: Array.isArray(config.extensions) ? [...config.extensions] : config.extensions,
-    excludeExtensions: config.excludeExtensions && [...config.excludeExtensions],
-    skills: Array.isArray(config.skills) ? [...config.skills] : config.skills,
-    preloadSkills: Array.isArray(config.preloadSkills) ? [...config.preloadSkills] : config.preloadSkills,
-    delegateTo: config.delegateTo && [...config.delegateTo],
-  };
-}
-
 function isTerminal(record: AgentRecord): boolean {
   return record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
 }
@@ -149,54 +133,19 @@ export class SpawnCoordinator {
     return this.spawnInternal(pi, ctx, intent);
   }
 
-  /** Spawn a foreground child through the root manager's slot handoff. */
-  async spawnNested(
-    parentId: string,
-    pi: ExtensionAPI,
-    ctx: ExtensionContext,
-    intent: SpawnIntent,
-  ): Promise<SpawnResult> {
-    if (intent.runInBackground) throw new Error("Nested agents must run in the foreground");
-    // Resolve against the manager-owned parent snapshot before preparing model
-    // settings. spawnNested rechecks this immediately before it starts work.
-    const preflight = this.manager.preflightNested(parentId, intent.type);
-    if (!preflight.ok) throw new Error(preflight.error);
-    return this.spawnInternal(pi, ctx, {
-      ...intent,
-      type: preflight.type,
-      agentConfig: preflight.agentConfig,
-      // AgentManager owns and rechecks the parent catalog/worktree at the
-      // nested boundary. Do not pass a public parent projection back to it.
-    }, parentId);
-  }
-
   private async spawnInternal(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
     intent: SpawnIntent,
-    parentId?: string,
   ): Promise<SpawnResult> {
-    // A nested coordinator call already runs in its parent's isolated context.
-    // Otherwise capture settings before manager execution can enter ALS.
-    const inheritedRuntime = getSubagentRuntimeContext();
-    let runtimeSettings = inheritedRuntime?.settings ?? intent.runtimeSettingsSnapshot;
-    if (!runtimeSettings) {
-      // Never fall through to the root store from a malformed child context.
-      if (inheritedRuntime) throw new Error("Child runtime is missing detached settings");
-      runtimeSettings = getStore().createSubagentRuntimeSettings();
-    }
+    const runtimeSettings = intent.runtimeSettingsSnapshot ?? getStore().createSubagentRuntimeSettings();
 
     const model = intent.model ?? ctx.model;
     const thinkingLevel = normalizeThinkingLevel(model, intent.thinkingLevel ?? ctx.thinkingLevel);
     const modelKey = intent.modelKey ?? (model ? `${model.provider}/${model.id}` : undefined);
-    // Capture the complete catalog when a root spawn is accepted. A trusted
-    // worktree caller supplies its overlay; all other roots snapshot the
-    // current registered catalog before any queued execution can begin.
-    const agentCatalog = intent.agentCatalog ?? snapshotRegisteredAgentCatalog();
-    const canonicalType = resolveTypeInCatalog(agentCatalog, intent.type);
-    const agentConfig = snapshotAgentConfig(
-      intent.agentConfig ?? (canonicalType ? agentCatalog.get(canonicalType) : undefined),
-    );
+    const canonicalType = resolveType(intent.type) ?? intent.type;
+    const selectedConfig = intent.agentConfig ?? getAgentConfig(canonicalType);
+    const agentConfig = selectedConfig ? snapshotAgentConfig(selectedConfig) : undefined;
     const { type, prompt, runInBackground, invocation, signal, runtimeSettingsSnapshot: _runtimeSettingsSnapshot, ...config } = intent;
     const spawnOptions: SpawnOptions = {
       ...config,
@@ -205,18 +154,12 @@ export class SpawnCoordinator {
       modelKey,
       thinkingLevel,
       agentConfig,
-      agentCatalog,
       invocation: { ...invocation, mode: runtimeSettings.mode, thinkingLevel },
       isBackground: runInBackground,
-      // This factory closes over trusted coordinator state and detached
-      // settings before the manager enters a child AsyncLocalStorage context.
-      nestedExecutorFactory: (parentId) => createNestedAgentExecutor(parentId, pi, this.manager, this, runtimeSettings),
       runtimeSettings,
     };
 
-    const agentId = parentId
-      ? this.manager.spawnNested(parentId, pi, ctx, type, prompt, spawnOptions)
-      : this.manager.spawn(pi, ctx, type, prompt, spawnOptions);
+    const agentId = this.manager.spawn(pi, ctx, type, prompt, spawnOptions);
     const record = this.manager.getRecord(agentId)!;
     if (runInBackground) {
       // The initial spawn is execution 0; its completion carries the same id.

@@ -164,17 +164,7 @@ export function snapshotAgentConfig(config: AgentConfig): AgentConfig {
     excludeExtensions: config.excludeExtensions && [...config.excludeExtensions],
     skills: Array.isArray(config.skills) ? [...config.skills] : config.skills,
     preloadSkills: Array.isArray(config.preloadSkills) ? [...config.preloadSkills] : config.preloadSkills,
-    delegateTo: config.delegateTo && [...config.delegateTo],
   };
-}
-
-/**
- * Return a detached, invocation-safe copy of the current registered catalog.
- * Callers retain this rather than consulting the mutable session registry after
- * a spawn has been accepted.
- */
-export function snapshotRegisteredAgentCatalog(): ReadonlyMap<string, AgentConfig> {
-  return new Map([...agents].map(([name, config]) => [name, snapshotAgentConfig(config)]));
 }
 
 /** Resolve a type name case-insensitively. Also matches displayName. Returns the canonical key or undefined. */
@@ -207,7 +197,7 @@ export function getAllTypes(): string[] {
   return [...agents.keys()];
 }
 
-/** Root-only control tools; eligible child runtimes receive a local Agent proxy instead. */
+/** Agent is a root-session control tool and is never registered in agent sessions. */
 export const EXCLUDED_TOOL_NAMES = ["Agent"];
 
 /**
@@ -270,17 +260,15 @@ export function resolveVisibleTools(opts: {
   excludeTools?: string[];
   extToolMap?: Map<string, string[]>;
   notify?: (msg: string) => void;
-  /** Only child runtimes may expose their local Agent proxy. */
-  allowNestedAgent?: boolean;
 }): string[] | null {
-  const { activeTools, tools, excludeTools, extToolMap, notify, allowNestedAgent = false } = opts;
-  const excludedTools = allowNestedAgent ? [] : EXCLUDED_TOOL_NAMES;
+  const { activeTools, tools, excludeTools, extToolMap, notify } = opts;
+  const excludedTools = EXCLUDED_TOOL_NAMES;
 
   // Blacklist mode: excludeTools set and tools not set as whitelist
   if (excludeTools && !Array.isArray(tools)) {
     const excludeSet = resolveToolEntries(excludeTools, extToolMap, notify);
     const filtered = activeTools.filter(t =>
-      !excludedTools.includes(t) && ((allowNestedAgent && t === "Agent") || !excludeSet.has(t))
+      !excludedTools.includes(t) && !excludeSet.has(t)
     );
     return filtered.length !== activeTools.length ? filtered : null;
   }
@@ -308,7 +296,7 @@ export function resolveVisibleTools(opts: {
     const visibleSet = new Set<string>();
     for (const t of activeTools) {
       if (excludedTools.includes(t)) continue;
-      if ((allowNestedAgent && t === "Agent") || allowedTools.has(t)) {
+      if (allowedTools.has(t)) {
         visibleSet.add(t);
       }
     }
@@ -327,9 +315,7 @@ export function resolveVisibleTools(opts: {
   }
 
   if (tools === false) {
-    // Delegation is a runtime control capability rather than a configured
-    // work tool. An eligible child with tools disabled retains only Agent.
-    return allowNestedAgent ? activeTools.filter(t => t === "Agent") : [];
+    return [];
   }
 
   // tools: true or undefined — all tools visible (except excluded)
@@ -352,11 +338,9 @@ export function resolveSessionAllowedTools(opts: {
   registeredTools: string[];
   tools?: true | string[] | false;
   extToolMap?: Map<string, string[]>;
-  /** Only child runtimes may register their local Agent proxy. */
-  allowNestedAgent?: boolean;
 }): string[] {
-  const excludedTools = opts.allowNestedAgent ? [] : EXCLUDED_TOOL_NAMES;
-  if (opts.tools === false) return opts.allowNestedAgent ? ["Agent"] : [];
+  const excludedTools = EXCLUDED_TOOL_NAMES;
+  if (opts.tools === false) return [];
 
   // tools is a whitelist: the gate is exactly its expansion. Builtins and
   // extension tools are gated alike (a builtin not listed is NOT registered),
@@ -364,9 +348,6 @@ export function resolveSessionAllowedTools(opts: {
   // registeredTools is not a base here.
   if (Array.isArray(opts.tools)) {
     const allowed = resolveToolEntries(opts.tools, opts.extToolMap);
-    // The locally registered child proxy is a runtime capability, not a
-    // parent-configured extension tool. Keep it available for eligible roles.
-    if (opts.allowNestedAgent) allowed.add("Agent");
     return [...allowed].filter(t => !excludedTools.includes(t));
   }
 
@@ -377,11 +358,7 @@ export function resolveSessionAllowedTools(opts: {
   for (const t of extTools) {
     if (!excludedTools.includes(t)) names.add(t);
   }
-  // customTools are subject to Pi's same session allowlist gate. The local
-  // nested Agent proxy is not part of registeredTools, so explicitly admit it
-  // for an eligible child even under tools: true or an omitted tools policy.
-  if (opts.allowNestedAgent) names.add("Agent");
-  return [...names];
+  return [...names].filter(t => !excludedTools.includes(t));
 }
 
 /** Get built-in tool names for a type (case-insensitive). */

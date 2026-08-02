@@ -17,7 +17,6 @@ const state = vi.hoisted(() => ({
       disableDefaultAgents: false,
       orchestrationPrompt: true,
       outputThinkingBufferSize: 0,
-      maxNestingDepth: 2,
     },
     concurrency: { default: 4 },
     reload: vi.fn(),

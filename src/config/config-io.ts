@@ -16,15 +16,12 @@ const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lean.json");
 
 export const CUSTOM_PROMPT_PATH = path.join(CONFIG_DIR, "subagents-lean-prompt.md");
 export const DEFAULT_GRACE_TURNS = 6;
-/** Initial subagents are depth 1; the default permits one nested layer. */
-export const DEFAULT_MAX_NESTING_DEPTH = 2;
-export const MAX_NESTING_DEPTH = 2;
 export const VALID_SYSTEM_PROMPT_MODES = new Set<string>(["replace", "inherit", "custom"]);
 export const DEFAULT_CONCURRENCY: SubagentsConfig["concurrency"] = { default: 4 };
 /** Persisted configuration changes fail promptly rather than block on lock contention. */
 export const CONFIG_LOCK_TIMEOUT_MS = 0;
 
-const LEGACY_UI_AGENT_KEYS = [
+const REMOVED_AGENT_KEYS = [
   "showCost",
   "showTools",
   "showTurns",
@@ -41,6 +38,12 @@ const LEGACY_UI_AGENT_KEYS = [
   "widgetShortcut",
   "widgetShowModelThinking",
   "widgetShowStartTime",
+  "maxNestingDepth",
+  "max_nesting_depth",
+  "delegate_to",
+  "delegateTo",
+  "max_child_agents",
+  "maxChildAgents",
 ] as const;
 
 const DEFAULT_AGENT: SubagentsConfig["agent"] = {
@@ -53,7 +56,6 @@ const DEFAULT_AGENT: SubagentsConfig["agent"] = {
   orchestrationPrompt: true,
   outputThinkingBufferSize: 0,
   finishedRetentionMinutes: 60,
-  maxNestingDepth: DEFAULT_MAX_NESTING_DEPTH,
 };
 
 export type ConfigHealth = "healthy" | "using-backup" | "unrecoverable";
@@ -280,13 +282,12 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
     default: raw.concurrency?.default ?? DEFAULT_CONCURRENCY.default,
   };
   const rawAgent = { ...(raw.agent ?? {}) } as Record<string, unknown>;
-  for (const key of LEGACY_UI_AGENT_KEYS) delete rawAgent[key];
+  for (const key of REMOVED_AGENT_KEYS) delete rawAgent[key];
   const agent = { ...DEFAULT_AGENT, ...rawAgent } as SubagentsConfig["agent"];
   if (!Object.hasOwn(rawAgent, "scout") && typeof rawAgent.Explore === "string") agent.scout = rawAgent.Explore;
   const defaultThinking = parseThinkingLevel(agent.defaultThinking);
   if (defaultThinking === undefined) delete agent.defaultThinking;
   else agent.defaultThinking = defaultThinking;
-  agent.maxNestingDepth = normalizeMaxNestingDepth(agent.maxNestingDepth);
   const mode = raw.mode === "eco" ? "eco" : raw.mode === "default" ? "default" : undefined;
   const ecoModelOverrides = Object.fromEntries(
     Object.entries(raw.ecoModelOverrides ?? {})
@@ -305,16 +306,6 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
     ecoThinkingOverrides,
     concurrency,
   };
-}
-
-/** Keep nesting bounded: 1 permits root children only; 2 permits one child layer. */
-export function normalizeMaxNestingDepth(value: unknown): number {
-  const n = typeof value === "number"
-    ? value
-    : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
-  return Number.isFinite(n)
-    ? Math.min(MAX_NESTING_DEPTH, Math.max(1, Math.floor(n)))
-    : DEFAULT_MAX_NESTING_DEPTH;
 }
 
 function replaceConfig(target: SubagentsConfig, source: SubagentsConfig): void {
