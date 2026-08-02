@@ -178,10 +178,10 @@ export interface AgentLifecycle {
   completedAt?: number;
   stoppedBy?: StopInitiator;
   /**
-   * Whether the result was delivered to the LLM, or has no remaining delivery path
-   * (for example, its parent tool call was already aborted). cleanup() preserves
-   * terminal records until this is set so a background result isn't evicted before
-   * its nudge can be delivered.
+   * Whether the result was delivered to the LLM, or has no remaining delivery
+   * path (for example, its parent tool call was already aborted). This is
+   * delivery telemetry only; cleanup() keeps the existing hard terminal-age
+   * retention policy and does not gate eviction on this flag.
    */
   resultConsumed?: boolean;
   /**

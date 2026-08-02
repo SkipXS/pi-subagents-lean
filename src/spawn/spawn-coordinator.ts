@@ -79,8 +79,8 @@ interface BackgroundPayload {
  * public projection of the latest execution.
  */
 interface BackgroundDeliveryEntry {
-  /** Manager-assigned execution id (agent id for legacy record-level tracking). */
-  key: string;
+  /** Manager-assigned execution id; every claim is execution-scoped. */
+  executionId: string;
   agentId: string;
   payload?: BackgroundPayload;
   signal?: AbortSignal;
@@ -161,26 +161,19 @@ export class SpawnCoordinator {
 
     const agentId = this.manager.spawn(pi, ctx, type, prompt, spawnOptions);
     const record = this.manager.getRecord(agentId)!;
-    if (runInBackground) {
-      // The initial spawn is execution 0; its completion carries the same id.
-      // Records without an execution summary (legacy doubles) fall back to a
-      // record-level claim keyed by the agent id.
-      this.claimBackgroundDelivery(record, record.stats.executions?.[0]?.id, signal);
+    const executionId = record.stats.executions?.[0]?.id;
+    if (runInBackground && executionId) {
+      // The initial spawn is execution 0. Claims are deliberately keyed only
+      // by the manager-issued execution id.
+      this.claimBackgroundDelivery(record, executionId, signal);
     }
 
     if (isTerminal(record)) {
-      // An already-aborted parent can complete synchronously, before coordinator
-      // tracking is registered. It has no remaining route for a result.
+      // A synchronous terminal start can complete before the claim above was
+      // installed. Reconcile that terminal execution after claiming it so the
+      // completion still gets exactly one delivery attempt.
       if (runInBackground) {
-        const entry = this.latestDelivery(agentId);
-        if (signal?.aborted || !entry) {
-          if (entry) this.abandonBackgroundDelivery(entry, record);
-        } else {
-          // Defensive terminal acceptance without an abort: deliver directly.
-          entry.completed = true;
-          entry.payload ??= this.capturePayload(record, record.lifecycle.status);
-          this.scheduleEntry(entry);
-        }
+        this.reconcileBackgroundClaim(record, executionId);
       } else {
         record.lifecycle.resultConsumed = true;
       }
@@ -222,6 +215,10 @@ export class SpawnCoordinator {
       record.delivery = { state: "pending", attempts: 0 };
       record.lifecycle.resultConsumed = false;
       this.claimBackgroundDelivery(record, executionId, intent.signal);
+      // The manager can finish a synchronous startup before this claim exists.
+      // Reconcile the terminal summary against the fresh execution claim; the
+      // per-execution guard makes a callback/timer race exactly-once.
+      this.reconcileBackgroundClaim(record, executionId);
       // Background callers never await this promise (a queued stop rejects
       // it), so observe the rejection here as well as at the manager.
       promise.catch(() => {});
@@ -258,11 +255,11 @@ export class SpawnCoordinator {
   }
 
   /** Called by AgentManager's completion callback, once per executed turn. */
-  onAgentComplete(record: AgentRecord, execution?: AgentExecutionSummary): void {
+  onAgentComplete(record: AgentRecord, execution: AgentExecutionSummary): void {
     // Every background execution gets exactly one automatic delivery attempt,
     // keyed by its own execution id so repeated continuations can never reuse
     // a stale claim or read a later execution's mutable result.
-    if (execution?.mode === "background") {
+    if (execution.mode === "background") {
       const entry = this.backgroundDeliveries.get(execution.id);
       if (!entry || entry.completed) return;
       entry.completed = true;
@@ -274,17 +271,14 @@ export class SpawnCoordinator {
       this.scheduleEntry(entry);
       return;
     }
-    // Legacy record-level path for completions without an execution summary
-    // (queued stops, startup failures, pre-continue records).
-    const legacy = this.latestDelivery(record.id);
-    if (!legacy || legacy.completed) return;
-    legacy.completed = true;
-    legacy.payload ??= this.capturePayload(record, record.lifecycle.status);
-    if (this.disposed || legacy.signal?.aborted) {
-      this.abandonBackgroundDelivery(legacy, record);
-      return;
-    }
-    this.scheduleEntry(legacy);
+  }
+
+  /** Reconcile a claim installed after a synchronous terminal completion. */
+  private reconcileBackgroundClaim(record: AgentRecord, executionId?: string): void {
+    if (!executionId) return;
+    const execution = record.stats.executions?.find((candidate) => candidate.id === executionId);
+    if (!execution || execution.status === "running" || execution.status === "queued") return;
+    this.onAgentComplete(record, execution);
   }
 
   /** Whether a retained terminal delivery failure is available for retry. */
@@ -324,9 +318,9 @@ export class SpawnCoordinator {
   }
 
   /** Register one background execution's delivery claim at acceptance. */
-  private claimBackgroundDelivery(record: AgentRecord, executionId: string | undefined, signal?: AbortSignal): void {
+  private claimBackgroundDelivery(record: AgentRecord, executionId: string, signal?: AbortSignal): void {
     const entry: BackgroundDeliveryEntry = {
-      key: executionId ?? record.id,
+      executionId,
       agentId: record.id,
       signal,
       state: "pending",
@@ -337,8 +331,8 @@ export class SpawnCoordinator {
       inProgress: false,
       timer: null,
     };
-    this.backgroundDeliveries.set(entry.key, entry);
-    this.latestDeliveryKeys.set(record.id, entry.key);
+    this.backgroundDeliveries.set(entry.executionId, entry);
+    this.latestDeliveryKeys.set(record.id, entry.executionId);
     record.delivery ??= { state: "pending", attempts: 0 };
     this.trackBackgroundParentAbort(entry, record);
   }
@@ -387,7 +381,7 @@ export class SpawnCoordinator {
     entry.inProgress = false;
     if (clearParent) {
       this.removeParentAbortListener(entry);
-      this.backgroundDeliveries.delete(entry.key);
+      this.backgroundDeliveries.delete(entry.executionId);
     }
   }
 
@@ -403,7 +397,7 @@ export class SpawnCoordinator {
   }
 
   private isLatestDelivery(agentId: string, entry: BackgroundDeliveryEntry): boolean {
-    return this.latestDeliveryKeys.get(agentId) === entry.key;
+    return this.latestDeliveryKeys.get(agentId) === entry.executionId;
   }
 
   /** Mirror one execution's delivery state onto the record projection. */
@@ -487,7 +481,7 @@ export class SpawnCoordinator {
       // is not an LLM/provider delivery confirmation.
       entry.state = "accepted";
       // deliveredText records an actual handoff only — never completion.
-      const execution = record.stats.executions?.find((e) => e.id === entry.key);
+      const execution = record.stats.executions?.find((e) => e.id === entry.executionId);
       if (execution) execution.deliveredText = payload.result;
       // Only the latest execution owns the record's consumption flag.
       if (this.isLatestDelivery(record.id, entry)) record.lifecycle.resultConsumed = true;
