@@ -104,7 +104,7 @@ describe.sequential("Pi extension contract", () => {
       await expect(runner.getToolDefinition("AgentContinue")!.execute(
         "contract-continue", { agent_id: "missing", prompt: "wrap up" }, undefined, undefined, publicContext,
       )).rejects.toThrow("root session is ready");
-      expect(runner.getMessageRenderer("subagent-result")).toBeUndefined();
+      expect(runner.getMessageRenderer("subagent-result")).toEqual(expect.any(Function));
       expect(runner.hasUI()).toBe(false);
       expect(runner.hasHandlers("tool_call")).toBe(true);
       expect(runner.hasHandlers("before_agent_start")).toBe(true);

@@ -4,11 +4,13 @@ import {
   AgentCallDetailsComponent,
   formatAgentCallText,
   formatAgentContinueCallText,
+  formatAgentUsageLine,
   formatStopAgentCallText,
   renderAgentCall,
   renderAgentContinueCall,
   renderAgentResult,
   renderStopAgentCall,
+  renderSubagentResult,
   visibleWidth,
 } from "../../src/agents/agent-renderer.js";
 
@@ -26,6 +28,19 @@ function context(args: unknown = {}): any {
 function visibleLines(component: { render(width: number): string[] }, width = 200): string[] {
   return component.render(width).map((line) => line.replace(/\s+$/u, ""));
 }
+
+const completeUsageDetails = {
+  input: 6_800,
+  output: 487,
+  cacheRead: 8_200,
+  cacheWrite: 0,
+  latestCacheHitRate: 83.4,
+  cost: 0.053,
+  contextPercent: 2.1,
+  contextWindow: 272_000,
+  autoCompactionEnabled: true,
+  usingSubscription: true,
+};
 
 describe("Agent call renderer", () => {
   it("formats AgentContinue with the requested ID before hydration", () => {
@@ -158,6 +173,85 @@ describe("Agent call renderer", () => {
       const codePoint = character.codePointAt(0) ?? 0;
       return codePoint === 0x0a || (codePoint > 0x1f && codePoint !== 0x7f && !(codePoint >= 0x80 && codePoint <= 0x9f));
     })).toBe(true);
+  });
+
+  it("renders the compact Pi usage line after a completed foreground result", () => {
+    const result = {
+      content: [{ type: "text", text: "agent output" }],
+      details: completeUsageDetails,
+    };
+    const component = renderAgentResult(result, { isPartial: false }, theme, context());
+
+    expect(visibleLines(component)).toEqual([
+      "agent output",
+      "↑6.8k ↓487 R8.2k CH83.4% $0.053 (sub) 2.1%/272k (auto)",
+    ]);
+    expect(result.content).toEqual([{ type: "text", text: "agent output" }]);
+    expect(formatAgentUsageLine({ ...completeUsageDetails, cacheWrite: 1_536 }))
+      .toBe("↑6.8k ↓487 R8.2k W1.5k CH83.4% $0.053 (sub) 2.1%/272k (auto)");
+  });
+
+  it("uses ? for a null context sample and waits for the completed result", () => {
+    const details = { ...completeUsageDetails, contextPercent: null, autoCompactionEnabled: false };
+    const ctx = context();
+    const partial = renderAgentResult(
+      { content: [{ type: "text", text: "streaming" }], details },
+      { isPartial: true },
+      theme,
+      ctx,
+    );
+    expect(visibleLines(partial)).toEqual(["streaming"]);
+
+    const complete = renderAgentResult(
+      { content: [{ type: "text", text: "done" }], details },
+      { isPartial: false },
+      theme,
+      ctx,
+    );
+    expect(visibleLines(complete)).toEqual([
+      "done",
+      "↑6.8k ↓487 R8.2k CH83.4% $0.053 (sub) ?/272k",
+    ]);
+  });
+
+  it("does not render usage for start/control results without stats", () => {
+    const component = renderAgentResult(
+      {
+        content: [{ type: "text", text: "Agent running" }],
+        details: {
+          [AGENT_RENDER_DETAILS_KEY]: {
+            role: "scout",
+            prompt: "search",
+          },
+        },
+      },
+      { isPartial: false },
+      theme,
+      context(),
+    );
+
+    expect(visibleLines(component)).toEqual(["Agent running"]);
+    expect(formatAgentUsageLine(undefined)).toBeUndefined();
+    expect(formatAgentUsageLine({ role: "scout", prompt: "search" })).toBeUndefined();
+  });
+
+  it("uses the same footer renderer for background subagent-result messages", () => {
+    const content = "[Subagent \"scout\" abc completed]\n\nbackground output";
+    const message = {
+      customType: "subagent-result",
+      content,
+      display: true,
+      details: completeUsageDetails,
+    };
+    const component = renderSubagentResult(message, { expanded: false, outputPad: 1 }, theme);
+
+    expect(visibleLines(component)).toEqual([
+      "[Subagent \"scout\" abc completed]",
+      "",
+      "background output",
+      "↑6.8k ↓487 R8.2k CH83.4% $0.053 (sub) 2.1%/272k (auto)",
+    ]);
+    expect(message.content).toBe(content);
   });
 
   it("hydrates canonical role, actual provider/id, normalized thinking, and prompt from result details", () => {

@@ -6,6 +6,8 @@
  * below owns only the plaintext wrapping needed by this row.
  */
 
+import { formatCost, formatTokens } from "./usage.js";
+
 /**
  * Private result-details field used only by the Agent tool renderer.
  *
@@ -14,6 +16,9 @@
  * rebuild its display without process-global state.
  */
 export const AGENT_RENDER_DETAILS_KEY = "__pi_subagents_lean_agent_render" as const;
+
+/** Custom message type used for completed background-agent deliveries. */
+export const SUBAGENT_RESULT_CUSTOM_TYPE = "subagent-result" as const;
 
 /** Public tool names that have a custom agent-call renderer. */
 export type AgentRenderToolName = "Agent" | "AgentContinue" | "StopAgent";
@@ -48,6 +53,11 @@ export interface AgentRendererContext {
 }
 
 interface AgentResultLike {
+  content?: unknown;
+  details?: unknown;
+}
+
+interface AgentMessageLike {
   content?: unknown;
   details?: unknown;
 }
@@ -177,6 +187,89 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+const USAGE_DETAIL_KEYS = [
+  "input",
+  "output",
+  "cacheRead",
+  "cacheWrite",
+  "latestCacheHitRate",
+  "cost",
+  "contextPercent",
+  "contextWindow",
+  "autoCompactionEnabled",
+  "usingSubscription",
+] as const;
+
+function nonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * Format the compact usage footer shared by foreground results and background
+ * completion messages. Details are untrusted because persisted tool results
+ * can outlive the code that produced them.
+ */
+export function formatAgentUsageLine(details: unknown): string | undefined {
+  if (!isRecord(details)) return undefined;
+
+  try {
+    if (!USAGE_DETAIL_KEYS.some((key) => Object.prototype.hasOwnProperty.call(details, key))) {
+      return undefined;
+    }
+
+    const input = nonNegativeFiniteNumber(details.input);
+    const output = nonNegativeFiniteNumber(details.output);
+    const cacheRead = nonNegativeFiniteNumber(details.cacheRead);
+    const cacheWrite = nonNegativeFiniteNumber(details.cacheWrite);
+    const latestCacheHitRate = nonNegativeFiniteNumber(details.latestCacheHitRate);
+    const cost = nonNegativeFiniteNumber(details.cost);
+    const contextPercent = details.contextPercent === null
+      ? null
+      : nonNegativeFiniteNumber(details.contextPercent);
+    const contextWindow = nonNegativeFiniteNumber(details.contextWindow);
+    const autoCompactionEnabled = details.autoCompactionEnabled === true;
+    const usingSubscription = details.usingSubscription === true;
+
+    // A malformed stats-shaped details object should be as harmless as a
+    // details object without stats. Valid zeroes still count as stats because
+    // buildAgentDetails intentionally exposes them for completed zero-cost
+    // executions.
+    const hasStatsValue = [
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      latestCacheHitRate,
+      cost,
+      contextPercent,
+      contextWindow,
+    ].some((value) => value !== undefined);
+    if (!hasStatsValue) return undefined;
+
+    const parts: string[] = [];
+    if (input !== undefined && input > 0) parts.push(`↑${formatTokens(input)}`);
+    if (output !== undefined && output > 0) parts.push(`↓${formatTokens(output)}`);
+    if (cacheRead !== undefined && cacheRead > 0) parts.push(`R${formatTokens(cacheRead)}`);
+    if (cacheWrite !== undefined && cacheWrite > 0) parts.push(`W${formatTokens(cacheWrite)}`);
+    if ((cacheRead ?? 0) > 0 || (cacheWrite ?? 0) > 0) {
+      if (latestCacheHitRate !== undefined) parts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+    }
+    if ((cost !== undefined && cost > 0) || usingSubscription) {
+      parts.push(`${formatCost(cost ?? 0)}${usingSubscription ? " (sub)" : ""}`);
+    }
+
+    const contextPercentText = contextPercent === null || contextPercent === undefined
+      ? "?"
+      : `${contextPercent.toFixed(1)}%`;
+    const contextWindowText = contextWindow === undefined ? "?" : formatTokens(contextWindow);
+    const autoIndicator = autoCompactionEnabled ? " (auto)" : "";
+    parts.push(`${contextPercentText}/${contextWindowText}${autoIndicator}`);
+    return parts.join(" ");
+  } catch {
+    return undefined;
+  }
 }
 
 function metadataFromUnknown(value: unknown): AgentCallRenderMetadata | undefined {
@@ -378,13 +471,39 @@ export function renderStopAgentCall(
   return renderAgentControlCall("StopAgent", args, theme, context);
 }
 
-function textResult(result: AgentResultLike): string {
-  if (!Array.isArray(result.content)) return "";
-  return result.content
+function textContent(content: unknown): string {
+  if (typeof content === "string") return escapeTerminalText(content, true);
+  if (!Array.isArray(content)) return "";
+  return content
     .filter((part): part is { type?: unknown; text?: unknown } => isRecord(part))
     .filter((part) => part.type === "text" && typeof part.text === "string")
     .map((part) => escapeTerminalText(part.text as string, true))
     .join("\n");
+}
+
+function textResult(result: AgentResultLike): string {
+  return textContent(result.content);
+}
+
+function resultTextWithUsage(
+  text: string,
+  details: unknown,
+  completed: boolean,
+): string {
+  if (!completed) return text;
+  const usage = formatAgentUsageLine(details);
+  return usage ? `${text}${text.length > 0 ? "\n" : ""}${usage}` : text;
+}
+
+/** Render a completed background notification with the same result footer. */
+export function renderSubagentResult(
+  message: AgentMessageLike,
+  _options: { expanded?: boolean; outputPad?: number },
+  _theme: unknown,
+): PlaintextComponent {
+  const component = new AgentCallDetailsComponent();
+  component.setText(resultTextWithUsage(textContent(message.content), message.details, true));
+  return component;
 }
 
 /**
@@ -394,7 +513,7 @@ function textResult(result: AgentResultLike): string {
  */
 export function renderAgentResult(
   result: AgentResultLike,
-  _options: { expanded?: boolean; isPartial?: boolean },
+  options: { expanded?: boolean; isPartial?: boolean },
   _theme: unknown,
   context: AgentRendererContext,
 ): PlaintextComponent {
@@ -434,6 +553,10 @@ export function renderAgentResult(
   const component = context.lastComponent instanceof AgentCallDetailsComponent
     ? context.lastComponent
     : new AgentCallDetailsComponent();
-  component.setText(textResult(safeResult));
+  component.setText(resultTextWithUsage(
+    textResult(safeResult),
+    safeResult.details,
+    options.isPartial !== true,
+  ));
   return component;
 }
