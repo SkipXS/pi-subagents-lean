@@ -1,5 +1,6 @@
 import {
   type AgentCallRenderMetadata,
+  type AgentRenderToolName,
   getAgentCallRenderMetadata,
   withAgentCallRenderMetadata,
 } from "./agent-renderer.js";
@@ -22,11 +23,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isRenderableToolName(value: unknown): value is AgentRenderToolName {
+  return value === "Agent" || value === "AgentContinue" || value === "StopAgent";
+}
+
 function sameMetadata(a: AgentCallRenderMetadata | undefined, b: AgentCallRenderMetadata): boolean {
   return a?.role === b.role
     && a?.model === b.model
     && a?.thinking === b.thinking
-    && a?.prompt === b.prompt;
+    && a?.prompt === b.prompt
+    && a?.agentId === b.agentId;
 }
 
 /**
@@ -50,9 +56,9 @@ export class AgentRenderMetadataBridge {
     this.active = false;
   }
 
-  /** Begin one Agent row; other tools never enter this bridge. */
+  /** Begin one rendered agent-family row; AgentStatus stays outside the bridge. */
   start(toolCallId: string, toolName: string): void {
-    if (!this.active || toolName !== "Agent" || !toolCallId) return;
+    if (!this.active || !isRenderableToolName(toolName) || !toolCallId) return;
     this.entries.set(toolCallId, {});
   }
 
@@ -69,6 +75,9 @@ export class AgentRenderMetadataBridge {
       model: metadata.model ?? previous?.model,
       thinking: metadata.thinking ?? previous?.thinking,
       prompt: metadata.prompt ?? previous?.prompt ?? "",
+      ...(metadata.agentId ?? previous?.agentId
+        ? { agentId: metadata.agentId ?? previous?.agentId }
+        : {}),
     };
     if (!sameMetadata(previous, merged)) entry.metadata = merged;
     this.entries.set(toolCallId, entry);
@@ -80,7 +89,7 @@ export class AgentRenderMetadataBridge {
     toolName: string,
     partialResult: unknown,
   ): void {
-    if (!this.active || toolName !== "Agent" || !toolCallId) return;
+    if (!this.active || !isRenderableToolName(toolName) || !toolCallId) return;
     const metadata = isRecord(partialResult)
       ? getAgentCallRenderMetadata(partialResult.details)
       : undefined;
@@ -104,7 +113,7 @@ export class AgentRenderMetadataBridge {
    * field is added when throwing/abort handling discarded it.
    */
   onToolResult(event: ToolResultEventLike): { details: Record<string, unknown> } | undefined {
-    if (!this.active || event.toolName !== "Agent" || typeof event.toolCallId !== "string") return undefined;
+    if (!this.active || !isRenderableToolName(event.toolName) || typeof event.toolCallId !== "string") return undefined;
     const eventMetadata = getAgentCallRenderMetadata(event.details);
     if (eventMetadata) this.update(event.toolCallId, eventMetadata);
 
@@ -124,6 +133,10 @@ export class AgentRenderMetadataBridge {
    */
   onMessageEnd(event: MessageEndEventLike): { message: Record<string, unknown> } | undefined {
     if (!this.active || !isRecord(event.message) || event.message.role !== "toolResult") return undefined;
+    // Hosts differ on whether toolName is repeated on the persisted message.
+    // If it is present, keep AgentStatus and every unrelated tool out of the
+    // bridge; otherwise the pending id remains the authoritative association.
+    if (typeof event.message.toolName === "string" && !isRenderableToolName(event.message.toolName)) return undefined;
     const toolCallId = event.message.toolCallId;
     if (typeof toolCallId !== "string") return undefined;
 

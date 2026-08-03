@@ -45,7 +45,7 @@ describe("tool registration", () => {
     expect(api.api.registerTool).toHaveBeenCalledTimes(4);
   });
 
-  it("keeps the fixed Agent schema and registers only the Agent renderer", () => {
+  it("keeps the fixed Agent schema and registers the Agent-family renderers", () => {
     const api = createApi();
     registerTools(api.api as any);
     const tool = api.tools[0]!;
@@ -65,10 +65,12 @@ describe("tool registration", () => {
     });
     expect(tool.renderCall).toEqual(expect.any(Function));
     expect(tool.renderResult).toEqual(expect.any(Function));
-    for (const otherTool of api.tools.slice(1)) {
-      expect(otherTool).not.toHaveProperty("renderCall");
-      expect(otherTool).not.toHaveProperty("renderResult");
-    }
+    expect(api.tools[1]!.renderCall).toEqual(expect.any(Function));
+    expect(api.tools[1]!.renderResult).toEqual(expect.any(Function));
+    expect(api.tools[2]!.renderCall).toEqual(expect.any(Function));
+    expect(api.tools[2]!.renderResult).toEqual(expect.any(Function));
+    expect(api.tools[3]).not.toHaveProperty("renderCall");
+    expect(api.tools[3]).not.toHaveProperty("renderResult");
   });
 
   it("keeps AgentContinue strict-mode requirements", () => {

@@ -15,7 +15,11 @@
  */
 export const AGENT_RENDER_DETAILS_KEY = "__pi_subagents_lean_agent_render" as const;
 
-/** Metadata needed to render one Agent tool call. */
+/** Public tool names that have a custom agent-call renderer. */
+export type AgentRenderToolName = "Agent" | "AgentContinue" | "StopAgent";
+export type AgentControlRenderToolName = Exclude<AgentRenderToolName, "Agent">;
+
+/** Metadata needed to render one Agent-family tool call. */
 export interface AgentCallRenderMetadata {
   /** Canonical catalog key, not the caller's display-name alias. */
   role: string;
@@ -23,8 +27,10 @@ export interface AgentCallRenderMetadata {
   model?: string;
   /** Pi-normalized thinking level. */
   thinking?: string;
-  /** The complete prompt passed to the agent. */
+  /** The complete prompt passed to the agent, when the tool has one. */
   prompt: string;
+  /** Canonical full root-agent id for AgentContinue/StopAgent rows. */
+  agentId?: string;
 }
 
 /** Pi's structural component contract, kept local to avoid a TUI import. */
@@ -184,6 +190,7 @@ function metadataFromUnknown(value: unknown): AgentCallRenderMetadata | undefine
     ...(nonEmptyString(value.model) !== undefined ? { model: value.model as string } : {}),
     ...(nonEmptyString(value.thinking) !== undefined ? { thinking: value.thinking as string } : {}),
     prompt,
+    ...(nonEmptyString(value.agentId) !== undefined ? { agentId: value.agentId as string } : {}),
   };
 }
 
@@ -191,7 +198,8 @@ function metadataEqual(a: AgentCallRenderMetadata | undefined, b: AgentCallRende
   return a?.role === b.role
     && a?.model === b.model
     && a?.thinking === b.thinking
-    && a?.prompt === b.prompt;
+    && a?.prompt === b.prompt
+    && a?.agentId === b.agentId;
 }
 
 function stateFor(context: AgentRendererContext): AgentRendererState {
@@ -229,6 +237,9 @@ function mergeMetadata(
     model: incoming.model ?? previous?.model,
     thinking: incoming.thinking ?? previous?.thinking,
     prompt: incoming.prompt ?? previous?.prompt ?? "",
+    ...(incoming.agentId ?? previous?.agentId
+      ? { agentId: incoming.agentId ?? previous?.agentId }
+      : {}),
   };
 }
 
@@ -265,8 +276,65 @@ export function formatAgentCallText(
   return `Rolle: ${role} | Modell: ${model} | Thinking: ${thinking}${prompt.length > 0 ? `\n${prompt}` : ""}`;
 }
 
+/**
+ * Build the shared control-tool header. The raw agent_id is deliberately used
+ * until an executor resolves a prefix to the record's canonical full id.
+ */
+export function formatAgentControlCallText(
+  toolName: AgentControlRenderToolName,
+  metadata: Partial<AgentCallRenderMetadata> | undefined,
+  rawArgs?: unknown,
+): string {
+  const args = isRecord(rawArgs) ? rawArgs : undefined;
+  const agentId = escapeTerminalText(metadata?.agentId || (nonEmptyString(args?.agent_id) ?? "—"));
+  const role = escapeTerminalText(metadata?.role || "—");
+  const model = escapeTerminalText(metadata?.model || "—");
+  const thinking = escapeTerminalText(metadata?.thinking || "—");
+  const prompt = toolName === "AgentContinue"
+    ? escapeTerminalText(
+      metadata?.prompt ?? (typeof args?.prompt === "string" ? args.prompt : ""),
+      true,
+    )
+    : "";
+  return `Agent ID: ${agentId} | Rolle: ${role} | Modell: ${model} | Thinking: ${thinking}${prompt.length > 0 ? `\n${prompt}` : ""}`;
+}
+
+/** Convenience formatter for the AgentContinue row. */
+export function formatAgentContinueCallText(
+  metadata: Partial<AgentCallRenderMetadata> | undefined,
+  rawArgs?: unknown,
+): string {
+  return formatAgentControlCallText("AgentContinue", metadata, rawArgs);
+}
+
+/** Convenience formatter for the StopAgent row. */
+export function formatStopAgentCallText(
+  metadata: Partial<AgentCallRenderMetadata> | undefined,
+  rawArgs?: unknown,
+): string {
+  return formatAgentControlCallText("StopAgent", metadata, rawArgs);
+}
+
 function rendererState(context: AgentRendererContext): AgentRendererState {
   return stateFor(context);
+}
+
+function renderCallWithFormatter(
+  args: unknown,
+  context: AgentRendererContext,
+  format: (metadata: Partial<AgentCallRenderMetadata> | undefined, args: unknown) => string,
+): PlaintextComponent {
+  const state = rendererState(context);
+  const component = context.lastComponent instanceof AgentCallDetailsComponent
+    ? context.lastComponent
+    : new AgentCallDetailsComponent();
+  component.setText(format(state.metadata, args));
+
+  // Remember which metadata generation was rendered by the call slot. This is
+  // used only to make synchronous invalidate implementations idempotent.
+  state.callVersion = state.version;
+  writeState(context, state);
+  return component;
 }
 
 /** Render the Agent call header and complete prompt. */
@@ -275,17 +343,39 @@ export function renderAgentCall(
   _theme: unknown,
   context: AgentRendererContext,
 ): PlaintextComponent {
-  const state = rendererState(context);
-  const component = context.lastComponent instanceof AgentCallDetailsComponent
-    ? context.lastComponent
-    : new AgentCallDetailsComponent();
-  component.setText(formatAgentCallText(state.metadata, args));
+  return renderCallWithFormatter(args, context, formatAgentCallText);
+}
 
-  // Remember which metadata generation was rendered by the call slot. This is
-  // used only to make synchronous invalidate implementations idempotent.
-  state.callVersion = state.version;
-  writeState(context, state);
-  return component;
+/** Render either root control tool with the shared ID/role/model header. */
+export function renderAgentControlCall(
+  toolName: AgentControlRenderToolName,
+  args: unknown,
+  _theme: unknown,
+  context: AgentRendererContext,
+): PlaintextComponent {
+  return renderCallWithFormatter(
+    args,
+    context,
+    (metadata, rawArgs) => formatAgentControlCallText(toolName, metadata, rawArgs),
+  );
+}
+
+/** Convenience renderer for AgentContinue. */
+export function renderAgentContinueCall(
+  args: unknown,
+  theme: unknown,
+  context: AgentRendererContext,
+): PlaintextComponent {
+  return renderAgentControlCall("AgentContinue", args, theme, context);
+}
+
+/** Convenience renderer for StopAgent. */
+export function renderStopAgentCall(
+  args: unknown,
+  theme: unknown,
+  context: AgentRendererContext,
+): PlaintextComponent {
+  return renderAgentControlCall("StopAgent", args, theme, context);
 }
 
 function textResult(result: AgentResultLike): string {

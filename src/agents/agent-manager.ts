@@ -237,13 +237,21 @@ export class AgentManager {
     const now = Date.now();
     const status: AgentStatus = queued ? "queued" : "running";
     const executionId = randomUUID().slice(0, AGENT_ID_PREFIX_LENGTH);
+    const modelKey = options.modelKey
+      ?? (options.model ? `${options.model.provider}/${options.model.id}` : undefined);
+    const invocation = options.invocation || modelKey !== undefined
+      ? {
+        ...(options.invocation ?? {}),
+        ...(modelKey !== undefined ? { modelKey } : {}),
+      }
+      : undefined;
     const record: AgentRecord = {
       id,
       lifecycle: { status, startedAt: now, settled: false },
       display: {
         type: canonicalType,
         description: options.description,
-        invocation: options.invocation,
+        invocation,
         worktreePath: options.worktreePath,
         worktreeLabel: options.worktreeLabel,
       },

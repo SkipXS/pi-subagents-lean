@@ -12,11 +12,15 @@ const metadata: AgentCallRenderMetadata = {
   prompt: "inspect everything",
 };
 
-function message(toolCallId: string, details: unknown): Record<string, unknown> {
+function message(
+  toolCallId: string,
+  details: unknown,
+  toolName: "Agent" | "AgentContinue" | "StopAgent" = "Agent",
+): Record<string, unknown> {
   return {
     role: "toolResult",
     toolCallId,
-    toolName: "Agent",
+    toolName,
     content: [{ type: "text", text: "failure" }],
     details,
     isError: true,
@@ -80,6 +84,38 @@ describe("Agent render metadata bridge", () => {
     bridge.onMessageEnd({ message: message("a", a?.details) });
     expect(bridge.pendingCount()).toBe(1);
     bridge.onMessageEnd({ message: message("b", b?.details) });
+    expect(bridge.pendingCount()).toBe(0);
+  });
+
+  it("supports parallel AgentContinue/StopAgent rows while ignoring AgentStatus", () => {
+    const bridge = new AgentRenderMetadataBridge();
+    bridge.startSession();
+    bridge.start("continue", "AgentContinue");
+    bridge.start("stop", "StopAgent");
+    bridge.start("status", "AgentStatus");
+    bridge.update("continue", { ...metadata, agentId: "full-continue", prompt: "follow up" });
+    bridge.update("stop", { ...metadata, agentId: "full-stop", prompt: "" });
+
+    expect(bridge.pendingCount()).toBe(2);
+    expect(bridge.metadataFor("continue")).toMatchObject({ agentId: "full-continue", prompt: "follow up" });
+    expect(bridge.metadataFor("stop")).toMatchObject({ agentId: "full-stop", prompt: "" });
+    expect(bridge.metadataFor("status")).toBeUndefined();
+
+    const continued = bridge.onToolResult({
+      toolName: "AgentContinue",
+      toolCallId: "continue",
+      details: { downstream: true },
+    });
+    const stopped = bridge.onToolResult({
+      toolName: "StopAgent",
+      toolCallId: "stop",
+      details: { downstream: true },
+    });
+    expect(continued?.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({ agentId: "full-continue" });
+    expect(stopped?.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({ agentId: "full-stop" });
+
+    bridge.onMessageEnd({ message: message("continue", continued?.details, "AgentContinue") });
+    bridge.onMessageEnd({ message: message("stop", stopped?.details, "StopAgent") });
     expect(bridge.pendingCount()).toBe(0);
   });
 

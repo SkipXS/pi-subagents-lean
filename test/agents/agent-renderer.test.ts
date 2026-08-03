@@ -3,8 +3,12 @@ import {
   AGENT_RENDER_DETAILS_KEY,
   AgentCallDetailsComponent,
   formatAgentCallText,
+  formatAgentContinueCallText,
+  formatStopAgentCallText,
   renderAgentCall,
+  renderAgentContinueCall,
   renderAgentResult,
+  renderStopAgentCall,
   visibleWidth,
 } from "../../src/agents/agent-renderer.js";
 
@@ -24,6 +28,66 @@ function visibleLines(component: { render(width: number): string[] }, width = 20
 }
 
 describe("Agent call renderer", () => {
+  it("formats AgentContinue with the requested ID before hydration", () => {
+    const prompt = "First line\nSecond line with Unicode: 日本語 🚀\nFinal line";
+    const ctx = context({ agent_id: "abc12345", prompt });
+
+    const component = renderAgentContinueCall(ctx.args, theme, ctx);
+
+    expect(visibleLines(component)).toEqual([
+      "Agent ID: abc12345 | Rolle: — | Modell: — | Thinking: —",
+      "First line",
+      "Second line with Unicode: 日本語 🚀",
+      "Final line",
+    ]);
+    expect(formatAgentContinueCallText(undefined, ctx.args)).toBe(
+      `Agent ID: abc12345 | Rolle: — | Modell: — | Thinking: —\n${prompt}`,
+    );
+  });
+
+  it("formats StopAgent without a prompt line", () => {
+    const ctx = context({ agent_id: "prefix" });
+    const component = renderStopAgentCall(ctx.args, theme, ctx);
+
+    expect(visibleLines(component)).toEqual([
+      "Agent ID: prefix | Rolle: — | Modell: — | Thinking: —",
+    ]);
+    expect(formatStopAgentCallText(undefined, ctx.args)).toBe(
+      "Agent ID: prefix | Rolle: — | Modell: — | Thinking: —",
+    );
+  });
+
+  it("uses the canonical full ID and record metadata after control-row hydration", () => {
+    const prompt = "continue with all findings";
+    const ctx = context({ agent_id: "abc12345", prompt });
+    const initial = renderAgentContinueCall(ctx.args, theme, ctx);
+    ctx.lastComponent = initial;
+
+    renderAgentResult(
+      {
+        content: [{ type: "text", text: "continued" }],
+        details: {
+          [AGENT_RENDER_DETAILS_KEY]: {
+            agentId: "abc1234567890full",
+            role: "reviewer",
+            model: "anthropic/claude-sonnet-4",
+            thinking: "high",
+            prompt,
+          },
+        },
+      },
+      { isPartial: true, expanded: false },
+      theme,
+      { ...ctx, lastComponent: undefined },
+    );
+
+    const hydrated = renderAgentContinueCall(ctx.args, theme, { ...ctx, lastComponent: initial });
+    expect(visibleLines(hydrated)).toEqual([
+      "Agent ID: abc1234567890full | Rolle: reviewer | Modell: anthropic/claude-sonnet-4 | Thinking: high",
+      prompt,
+    ]);
+  });
+
   it("uses the exact two-part format and preserves the full multiline prompt", () => {
     const prompt = "First line\nSecond line with Unicode: 日本語 🚀\nFinal line";
     const ctx = context({ agent: "reviewer", prompt });

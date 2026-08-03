@@ -148,7 +148,11 @@ export class SpawnCoordinator {
       modelKey,
       thinkingLevel,
       agentConfig,
-      invocation: { ...invocation, thinkingLevel },
+      invocation: {
+        ...invocation,
+        ...(modelKey !== undefined ? { modelKey } : {}),
+        thinkingLevel,
+      },
       isBackground: runInBackground,
       runtimeSettings,
     };
