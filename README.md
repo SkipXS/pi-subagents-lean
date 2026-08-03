@@ -78,6 +78,11 @@ persistent/session settings; those values are applied internally and are not
 caller-controlled spawn overrides. Turn and token limits come from the agent
 definition. Every `Agent` call is a root launch owned by the parent session.
 
+In Pi's interactive tool rows, `Agent` displays the canonical role, resolved
+`provider/model-id`, normalized thinking level, and the complete prompt. The
+row is hydrated after asynchronous resolution; `AgentContinue` keeps Pi's
+standard renderer.
+
 ### `AgentContinue`
 
 `AgentContinue({ agent_id, prompt, run_in_background })` continues a

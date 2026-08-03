@@ -1,0 +1,349 @@
+/**
+ * Renderer support for the public Agent tool.
+ *
+ * This module deliberately has no TUI-package dependency. Pi accepts any
+ * structural component with render()/invalidate(), so the small component
+ * below owns only the plaintext wrapping needed by this row.
+ */
+
+/**
+ * Private result-details field used only by the Agent tool renderer.
+ *
+ * The field is deliberately namespaced and nested so that the public Agent
+ * result details keep their existing shape while a restored tool row can
+ * rebuild its display without process-global state.
+ */
+export const AGENT_RENDER_DETAILS_KEY = "__pi_subagents_lean_agent_render" as const;
+
+/** Metadata needed to render one Agent tool call. */
+export interface AgentCallRenderMetadata {
+  /** Canonical catalog key, not the caller's display-name alias. */
+  role: string;
+  /** Resolved provider/model id, for example `openai/gpt-4o`. */
+  model?: string;
+  /** Pi-normalized thinking level. */
+  thinking?: string;
+  /** The complete prompt passed to the agent. */
+  prompt: string;
+}
+
+/** Pi's structural component contract, kept local to avoid a TUI import. */
+export interface PlaintextComponent {
+  render(width: number): string[];
+  invalidate(): void;
+}
+
+/** The subset of Pi's row-local renderer context used by this renderer. */
+export interface AgentRendererContext {
+  args: unknown;
+  state: Record<string, unknown>;
+  lastComponent: PlaintextComponent | undefined;
+  invalidate: () => void;
+}
+
+interface AgentResultLike {
+  content?: unknown;
+  details?: unknown;
+}
+
+interface AgentRendererState {
+  metadata?: AgentCallRenderMetadata;
+  version: number;
+  callVersion: number;
+}
+
+const graphemeSegmenter = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+  ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+  : undefined;
+
+function graphemes(value: string): string[] {
+  if (!graphemeSegmenter) return Array.from(value);
+  return Array.from(graphemeSegmenter.segment(value), (part) => part.segment);
+}
+
+function graphemeWidth(grapheme: string): number {
+  // Printable ASCII is always one cell. Treat every other grapheme cluster as
+  // two cells: this intentionally overestimates combining-only and narrow
+  // Unicode clusters, but never underestimates flags, keycaps, ZWJ emoji, or
+  // East Asian characters. A conservative row is preferable to emitting a
+  // line wider than Pi's viewport.
+  return /^[\x20-\x7e]$/.test(grapheme) ? 1 : 2;
+}
+
+/** Calculate a conservative terminal-cell width for normal, ANSI-free text. */
+export function visibleWidth(value: string): number {
+  return graphemes(value).reduce((total, grapheme) => total + graphemeWidth(grapheme), 0);
+}
+
+/** Wrap without truncating, retaining every grapheme and explicit newline. */
+function wrapPlaintext(value: string, width: number): string[] {
+  const safeWidth = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
+  const lines: string[] = [];
+
+  for (const logicalLine of value.split("\n")) {
+    if (logicalLine.length === 0) {
+      lines.push("");
+      continue;
+    }
+
+    let line = "";
+    let lineWidth = 0;
+    for (const grapheme of graphemes(logicalLine)) {
+      const nextWidth = graphemeWidth(grapheme);
+      if (line && lineWidth + nextWidth > safeWidth) {
+        lines.push(line);
+        line = "";
+        lineWidth = 0;
+      }
+      line += grapheme;
+      lineWidth += nextWidth;
+    }
+    lines.push(line);
+  }
+
+  return lines.length > 0 ? lines : [""];
+}
+
+/**
+ * Make arbitrary tool-controlled text safe for terminal output.
+ *
+ * Newline is retained only when it is the prompt's intentional line boundary;
+ * every other C0/C1 control, ESC, and DEL becomes a visible \xNN/\t/\r form.
+ * Escaping ESC also breaks OSC/CSI sequences, including 8-bit OSC/CSI forms.
+ */
+export function escapeTerminalText(value: string, preserveNewlines = false): string {
+  let escaped = "";
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (preserveNewlines && codePoint === 0x0a) {
+      escaped += "\n";
+    } else if (codePoint === 0x09) {
+      escaped += "\\t";
+    } else if (codePoint === 0x0d) {
+      escaped += "\\r";
+    } else if (codePoint <= 0x1f || codePoint === 0x7f || (codePoint >= 0x80 && codePoint <= 0x9f)) {
+      escaped += `\\x${codePoint.toString(16).padStart(2, "0")}`;
+    } else {
+      escaped += character;
+    }
+  }
+  return escaped;
+}
+
+/** A small stateful plaintext component with conservative Unicode wrapping. */
+export class AgentCallDetailsComponent implements PlaintextComponent {
+  private value = "";
+  private cachedWidth: number | undefined;
+  private cachedValue: string | undefined;
+  private cachedLines: string[] | undefined;
+
+  /** Update the component only when its content really changed. */
+  setText(value: string): boolean {
+    const safeValue = escapeTerminalText(value, true);
+    if (this.value === safeValue) return false;
+    this.value = safeValue;
+    this.invalidate();
+    return true;
+  }
+
+  render(width: number): string[] {
+    const safeWidth = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
+    if (this.cachedLines && this.cachedValue === this.value && this.cachedWidth === safeWidth) {
+      return this.cachedLines;
+    }
+    const lines = wrapPlaintext(this.value, safeWidth);
+    this.cachedValue = this.value;
+    this.cachedWidth = safeWidth;
+    this.cachedLines = lines;
+    return lines;
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedValue = undefined;
+    this.cachedLines = undefined;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function metadataFromUnknown(value: unknown): AgentCallRenderMetadata | undefined {
+  if (!isRecord(value)) return undefined;
+  const role = nonEmptyString(value.role);
+  const prompt = typeof value.prompt === "string" ? value.prompt : undefined;
+  if (!role || prompt === undefined) return undefined;
+
+  return {
+    role,
+    ...(nonEmptyString(value.model) !== undefined ? { model: value.model as string } : {}),
+    ...(nonEmptyString(value.thinking) !== undefined ? { thinking: value.thinking as string } : {}),
+    prompt,
+  };
+}
+
+function metadataEqual(a: AgentCallRenderMetadata | undefined, b: AgentCallRenderMetadata): boolean {
+  return a?.role === b.role
+    && a?.model === b.model
+    && a?.thinking === b.thinking
+    && a?.prompt === b.prompt;
+}
+
+function stateFor(context: AgentRendererContext): AgentRendererState {
+  const state = context.state;
+  const stored = metadataFromUnknown(state[AGENT_RENDER_DETAILS_KEY]);
+  const versionValue = state[`${AGENT_RENDER_DETAILS_KEY}:version`];
+  const callVersionValue = state[`${AGENT_RENDER_DETAILS_KEY}:call-version`];
+  return {
+    metadata: stored,
+    version: typeof versionValue === "number" && Number.isSafeInteger(versionValue) ? versionValue : 0,
+    callVersion: typeof callVersionValue === "number" && Number.isSafeInteger(callVersionValue)
+      ? callVersionValue
+      : -1,
+  };
+}
+
+function writeState(context: AgentRendererContext, state: AgentRendererState): void {
+  // Pi supplies a mutable row-local object. Keep this helper defensive for
+  // direct/headless callers that pass an unusual context object.
+  try {
+    if (state.metadata) context.state[AGENT_RENDER_DETAILS_KEY] = state.metadata;
+    context.state[`${AGENT_RENDER_DETAILS_KEY}:version`] = state.version;
+    context.state[`${AGENT_RENDER_DETAILS_KEY}:call-version`] = state.callVersion;
+  } catch {
+    // Rendering must never make an otherwise valid Agent result fail.
+  }
+}
+
+function mergeMetadata(
+  previous: AgentCallRenderMetadata | undefined,
+  incoming: AgentCallRenderMetadata,
+): AgentCallRenderMetadata {
+  return {
+    role: incoming.role || previous?.role || "—",
+    model: incoming.model ?? previous?.model,
+    thinking: incoming.thinking ?? previous?.thinking,
+    prompt: incoming.prompt ?? previous?.prompt ?? "",
+  };
+}
+
+/** Read renderer metadata from a tool result without trusting arbitrary details. */
+export function getAgentCallRenderMetadata(details: unknown): AgentCallRenderMetadata | undefined {
+  if (!isRecord(details)) return undefined;
+  return metadataFromUnknown(details[AGENT_RENDER_DETAILS_KEY]);
+}
+
+/** Add renderer-only metadata while preserving every existing details field. */
+export function withAgentCallRenderMetadata(
+  details: Record<string, unknown> | undefined,
+  metadata: AgentCallRenderMetadata,
+): Record<string, unknown> {
+  return {
+    ...(details ?? {}),
+    [AGENT_RENDER_DETAILS_KEY]: { ...metadata },
+  };
+}
+
+/** Build the exact unstyled call text requested by the Agent row display. */
+export function formatAgentCallText(
+  metadata: Partial<AgentCallRenderMetadata> | undefined,
+  rawArgs?: unknown,
+): string {
+  const args = isRecord(rawArgs) ? rawArgs : undefined;
+  const role = escapeTerminalText(metadata?.role || (nonEmptyString(args?.agent) ?? "—"));
+  const model = escapeTerminalText(metadata?.model || "—");
+  const thinking = escapeTerminalText(metadata?.thinking || "—");
+  const prompt = escapeTerminalText(
+    metadata?.prompt ?? (typeof args?.prompt === "string" ? args.prompt : ""),
+    true,
+  );
+  return `Rolle: ${role} | Modell: ${model} | Thinking: ${thinking}${prompt.length > 0 ? `\n${prompt}` : ""}`;
+}
+
+function rendererState(context: AgentRendererContext): AgentRendererState {
+  return stateFor(context);
+}
+
+/** Render the Agent call header and complete prompt. */
+export function renderAgentCall(
+  args: unknown,
+  _theme: unknown,
+  context: AgentRendererContext,
+): PlaintextComponent {
+  const state = rendererState(context);
+  const component = context.lastComponent instanceof AgentCallDetailsComponent
+    ? context.lastComponent
+    : new AgentCallDetailsComponent();
+  component.setText(formatAgentCallText(state.metadata, args));
+
+  // Remember which metadata generation was rendered by the call slot. This is
+  // used only to make synchronous invalidate implementations idempotent.
+  state.callVersion = state.version;
+  writeState(context, state);
+  return component;
+}
+
+function textResult(result: AgentResultLike): string {
+  if (!Array.isArray(result.content)) return "";
+  return result.content
+    .filter((part): part is { type?: unknown; text?: unknown } => isRecord(part))
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => escapeTerminalText(part.text as string, true))
+    .join("\n");
+}
+
+/**
+ * Hydrate row-local state from partial/final details and keep Pi's text result
+ * rendering intact. The invalidate request is guarded by value equality, so a
+ * repeated partial update or final hydration cannot trigger a loop.
+ */
+export function renderAgentResult(
+  result: AgentResultLike,
+  _options: { expanded?: boolean; isPartial?: boolean },
+  _theme: unknown,
+  context: AgentRendererContext,
+): PlaintextComponent {
+  const safeResult = isRecord(result) ? result as AgentResultLike : {};
+  const state = rendererState(context);
+  const incoming = getAgentCallRenderMetadata(safeResult.details);
+  let synchronouslyRedrawn = false;
+
+  if (incoming) {
+    const merged = mergeMetadata(state.metadata, incoming);
+    if (!metadataEqual(state.metadata, merged)) {
+      state.metadata = merged;
+      state.version++;
+      writeState(context, state);
+
+      // Pi 0.82.1 calls renderCall before renderResult. Ask for one more row
+      // render after metadata arrives so the header immediately switches from
+      // raw/dashes to the resolved invocation. The equality guard above makes
+      // this idempotent for repeated partial/final results.
+      try {
+        context.invalidate();
+        // ToolExecutionComponent.invalidate() redraws synchronously in Pi
+        // 0.82.1. If that happened, the nested render already installed the
+        // actual result component; returning an empty component avoids adding
+        // the same result a second time in the outer redraw. Async/headless
+        // invalidate implementations do not advance this marker and retain
+        // the normal text result below.
+        synchronouslyRedrawn = context.state[`${AGENT_RENDER_DETAILS_KEY}:call-version`] === state.version;
+      } catch {
+        // A renderer must remain safe when used by a minimal/headless caller.
+      }
+    }
+  }
+
+  if (synchronouslyRedrawn) return new AgentCallDetailsComponent();
+
+  const component = context.lastComponent instanceof AgentCallDetailsComponent
+    ? context.lastComponent
+    : new AgentCallDetailsComponent();
+  component.setText(textResult(safeResult));
+  return component;
+}

@@ -71,6 +71,8 @@ vi.mock("../src/shell.js", () => ({
 }));
 
 import { setupEventListeners } from "../src/events.js";
+import { AgentRenderMetadataBridge } from "../src/agents/agent-render-bridge.js";
+import { AGENT_RENDER_DETAILS_KEY } from "../src/agents/agent-renderer.js";
 
 function createContext(): ExtensionContext {
   return {
@@ -99,9 +101,38 @@ describe("headless extension session lifecycle", () => {
     setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
 
     expect([...listeners.keys()]).toEqual([
+      "tool_execution_start", "tool_execution_update", "tool_result", "message_end",
       "tool_call", "before_agent_start", "session_start", "session_shutdown",
     ]);
-    expect(listeners.has("tool_execution_start")).toBe(false);
+    expect(listeners.has("tool_execution_start")).toBe(true);
+  });
+
+  it("bridges resolved Agent metadata through update, tool_result, and message_end", () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    const bridge = new AgentRenderMetadataBridge();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any, bridge);
+    const metadata = { role: "reviewer", model: "openai/gpt-4o", thinking: "high", prompt: "inspect" };
+
+    listeners.get("tool_execution_start")!({ toolCallId: "bridge-id", toolName: "Agent", args: {} });
+    listeners.get("tool_execution_update")!({
+      toolCallId: "bridge-id",
+      toolName: "Agent",
+      args: {},
+      partialResult: { content: [], details: { [AGENT_RENDER_DETAILS_KEY]: metadata } },
+    });
+    const hookResult = listeners.get("tool_result")!({
+      toolName: "Agent",
+      toolCallId: "bridge-id",
+      details: {},
+      content: [{ type: "text", text: "failed" }],
+      isError: true,
+    });
+    expect(hookResult.details[AGENT_RENDER_DETAILS_KEY]).toEqual(metadata);
+    expect(listeners.get("message_end")!({
+      message: { role: "toolResult", toolCallId: "bridge-id", toolName: "Agent", details: hookResult.details },
+    })).toBeUndefined();
+    expect(bridge.pendingCount()).toBe(0);
+    bridge.clear();
   });
 
   it("creates and disposes root services on session start/shutdown", async () => {

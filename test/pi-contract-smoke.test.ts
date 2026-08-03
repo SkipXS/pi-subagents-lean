@@ -90,6 +90,11 @@ describe.sequential("Pi extension contract", () => {
         expect(definition.description).toEqual(expect.any(String));
         expect(definition.description.length).toBeGreaterThan(0);
       }
+      const contractAbort = new AbortController();
+      contractAbort.abort();
+      await expect(runner.getToolDefinition("Agent")!.execute(
+        "contract-agent", { agent: "scout", prompt: "do not start" }, contractAbort.signal, undefined, publicContext,
+      )).rejects.toThrow("Agent execution cancelled");
       await expect(runner.getToolDefinition("AgentStatus")!.execute(
         "contract-status", {}, undefined, undefined, publicContext,
       )).rejects.toThrow("root session is ready");
@@ -103,7 +108,10 @@ describe.sequential("Pi extension contract", () => {
       expect(runner.hasUI()).toBe(false);
       expect(runner.hasHandlers("tool_call")).toBe(true);
       expect(runner.hasHandlers("before_agent_start")).toBe(true);
-      expect(runner.hasHandlers("tool_execution_start")).toBe(false);
+      expect(runner.hasHandlers("tool_execution_start")).toBe(true);
+      expect(runner.hasHandlers("tool_execution_update")).toBe(true);
+      expect(runner.hasHandlers("tool_result")).toBe(true);
+      expect(runner.hasHandlers("message_end")).toBe(true);
       expect(runner.hasHandlers("session_start")).toBe(true);
       expect(runner.hasHandlers("session_shutdown")).toBe(true);
 
