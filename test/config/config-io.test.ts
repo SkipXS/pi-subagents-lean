@@ -74,12 +74,22 @@ describe("config I/O paths", () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({
       agent: {
-        default: null,
-        forceBackground: false,
+        default: "provider/default",
+        forceBackground: true,
+        systemPromptMode: "inherit",
+        includeContextFiles: false,
+        defaultThinking: "high",
+        loadSkillsImplicitly: false,
+        loadExtensionsImplicitly: false,
+        disableDefaultAgents: true,
+        orchestrationPrompt: false,
+        finishedRetentionMinutes: 15,
         dynamicModel: "provider/model",
         dynamicNull: null,
         dynamicNumber: 42,
         dynamicBoolean: true,
+        dynamicArray: ["not", "a", "model"],
+        dynamicObject: { not: "a model" },
       },
       concurrency: { default: 4 },
     }));
@@ -87,17 +97,46 @@ describe("config I/O paths", () => {
 
     const { loadConfig, saveConfigAtomic } = await import("../../src/config/config-io.ts");
     const config = loadConfig().config;
-    expect(config.agent.dynamicModel).toBe("provider/model");
-    expect(config.agent.dynamicNull).toBeNull();
+    expect(config.agent).toMatchObject({
+      default: "provider/default",
+      forceBackground: true,
+      systemPromptMode: "inherit",
+      includeContextFiles: false,
+      defaultThinking: "high",
+      loadSkillsImplicitly: false,
+      loadExtensionsImplicitly: false,
+      disableDefaultAgents: true,
+      orchestrationPrompt: false,
+      finishedRetentionMinutes: 15,
+      dynamicModel: "provider/model",
+      dynamicNull: null,
+    });
     expect(config.agent).not.toHaveProperty("dynamicNumber");
     expect(config.agent).not.toHaveProperty("dynamicBoolean");
+    expect(config.agent).not.toHaveProperty("dynamicArray");
+    expect(config.agent).not.toHaveProperty("dynamicObject");
 
     saveConfigAtomic(config);
     const configWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
     const savedAgent = JSON.parse(String(configWrite![1])).agent;
-    expect(savedAgent).toMatchObject({ dynamicModel: "provider/model", dynamicNull: null });
+    expect(savedAgent).toMatchObject({
+      default: "provider/default",
+      forceBackground: true,
+      systemPromptMode: "inherit",
+      includeContextFiles: false,
+      defaultThinking: "high",
+      loadSkillsImplicitly: false,
+      loadExtensionsImplicitly: false,
+      disableDefaultAgents: true,
+      orchestrationPrompt: false,
+      finishedRetentionMinutes: 15,
+      dynamicModel: "provider/model",
+      dynamicNull: null,
+    });
     expect(savedAgent).not.toHaveProperty("dynamicNumber");
     expect(savedAgent).not.toHaveProperty("dynamicBoolean");
+    expect(savedAgent).not.toHaveProperty("dynamicArray");
+    expect(savedAgent).not.toHaveProperty("dynamicObject");
   });
 
   it("normalizes legacy provider and model limits out of saved config", async () => {
@@ -216,6 +255,40 @@ describe("config I/O paths", () => {
     expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("delegate_to");
     expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("max_child_agents");
     expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("maxNestingDepth");
+  });
+
+  it("normalizes dynamic values added by a transactional update", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      agent: { default: null, forceBackground: false },
+      concurrency: { default: 4 },
+    }));
+    vi.resetModules();
+
+    const { updateConfigAtomic } = await import("../../src/config/config-io.ts");
+    const result = updateConfigAtomic((config) => {
+      const agent = config.agent as Record<string, unknown>;
+      agent.concurrentModel = "provider/concurrent";
+      agent.concurrentNull = null;
+      agent.concurrentNumber = 42;
+      agent.concurrentBoolean = false;
+      agent.concurrentArray = [];
+      agent.concurrentObject = {};
+    });
+
+    expect(result.config.agent.concurrentModel).toBe("provider/concurrent");
+    expect(result.config.agent.concurrentNull).toBeNull();
+    expect(result.config.agent).not.toHaveProperty("concurrentNumber");
+    expect(result.config.agent).not.toHaveProperty("concurrentBoolean");
+    expect(result.config.agent).not.toHaveProperty("concurrentArray");
+    expect(result.config.agent).not.toHaveProperty("concurrentObject");
+    const configWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
+    const savedAgent = JSON.parse(String(configWrite![1])).agent;
+    expect(savedAgent).toMatchObject({ concurrentModel: "provider/concurrent", concurrentNull: null });
+    expect(savedAgent).not.toHaveProperty("concurrentNumber");
+    expect(savedAgent).not.toHaveProperty("concurrentBoolean");
+    expect(savedAgent).not.toHaveProperty("concurrentArray");
+    expect(savedAgent).not.toHaveProperty("concurrentObject");
   });
 
   it("rejects repair when neither a primary nor backup config exists", async () => {
