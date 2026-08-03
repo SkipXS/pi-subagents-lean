@@ -8,6 +8,8 @@ import {
   renderAgentContinueCall,
   renderAgentResult,
   renderStopAgentCall,
+  renderSubagentResult,
+  SUBAGENT_RESULT_CUSTOM_TYPE,
 } from "./agents/agent-renderer.js";
 
 // Provider-side json_schema enforcement; "prefer" falls back gracefully on
@@ -58,6 +60,12 @@ export function registerTools(
   pi: ExtensionAPI,
   renderBridge?: AgentRenderMetadataBridge,
 ): void {
+  // Background completions are custom messages, so give them the same safe
+  // plaintext/result-footer renderer as foreground Agent-family results.
+  // Optional invocation keeps minimal test/headless doubles compatible while
+  // real Pi always provides the public registration method.
+  pi.registerMessageRenderer?.(SUBAGENT_RESULT_CUSTOM_TYPE, renderSubagentResult);
+
   registerAgentTool(pi, renderBridge);
 
   // AgentContinue remains a strict-schema compatible root continuation tool.

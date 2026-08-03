@@ -22,6 +22,7 @@ function createApi() {
     tools,
     api: {
       registerTool: vi.fn((tool: Record<string, any>) => tools.push(tool)),
+      registerMessageRenderer: vi.fn(),
     },
   };
 }
@@ -35,7 +36,7 @@ beforeEach(() => {
 });
 
 describe("tool registration", () => {
-  it("registers exactly the four public tools and no command or renderer", () => {
+  it("registers exactly the four public tools and the background renderer", () => {
     const api = createApi();
     registerTools(api.api as any);
 
@@ -43,6 +44,7 @@ describe("tool registration", () => {
       "Agent", "AgentContinue", "StopAgent", "AgentStatus",
     ]);
     expect(api.api.registerTool).toHaveBeenCalledTimes(4);
+    expect(api.api.registerMessageRenderer).toHaveBeenCalledWith("subagent-result", expect.any(Function));
   });
 
   it("keeps the fixed Agent schema and registers the Agent-family renderers", () => {
