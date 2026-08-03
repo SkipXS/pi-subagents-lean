@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SubagentsConfig } from "../models/model-precedence.js";
 import { parseThinkingLevel } from "../utils.js";
+import { normalizeAgentEntries } from "./types.js";
 
 const CONFIG_DIR = getAgentDir();
 const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lean.json");
@@ -53,29 +54,6 @@ const DEFAULT_AGENT: SubagentsConfig["agent"] = {
   orchestrationPrompt: true,
   finishedRetentionMinutes: 60,
 };
-
-const PERSISTED_AGENT_SETTING_KEYS = new Set([
-  "default",
-  "forceBackground",
-  "systemPromptMode",
-  "includeContextFiles",
-  "defaultThinking",
-  "loadSkillsImplicitly",
-  "loadExtensionsImplicitly",
-  "disableDefaultAgents",
-  "orchestrationPrompt",
-  "finishedRetentionMinutes",
-]);
-
-/**
- * `agent` combines known scalar settings with an open-ended role → model map.
- * Unknown entries can therefore only be retained when their value is a valid
- * model-map value; numeric, boolean, array, and object values are not dynamic
- * model overrides and are dropped without reserving any role names.
- */
-export function isPersistedAgentEntry(key: string, value: unknown): boolean {
-  return PERSISTED_AGENT_SETTING_KEYS.has(key) || typeof value === "string" || value === null;
-}
 
 export type ConfigHealth = "healthy" | "using-backup" | "unrecoverable";
 
@@ -303,12 +281,12 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
   };
   const rawAgent = { ...(raw.agent ?? {}) } as Record<string, unknown>;
   for (const key of REMOVED_AGENT_KEYS) delete rawAgent[key];
-  const agent = { ...DEFAULT_AGENT } as Record<string, unknown>;
-  for (const [key, value] of Object.entries(rawAgent)) {
-    if (isPersistedAgentEntry(key, value)) agent[key] = value;
-  }
+  const agent = {
+    ...DEFAULT_AGENT,
+    ...normalizeAgentEntries(rawAgent),
+  } as SubagentsConfig["agent"];
   if (!Object.hasOwn(rawAgent, "scout") && typeof rawAgent.Explore === "string") agent.scout = rawAgent.Explore;
-  const typedAgent = agent as SubagentsConfig["agent"];
+  const typedAgent = agent;
   const defaultThinking = parseThinkingLevel(typedAgent.defaultThinking);
   if (defaultThinking === undefined) delete agent.defaultThinking;
   else typedAgent.defaultThinking = defaultThinking;

@@ -21,14 +21,13 @@ import type {
 } from "../models/model-precedence.js";
 import { resolveModelSetting, resolveThinkingSetting } from "../models/model-precedence.js";
 import type { AgentManager } from "../agents/agent-manager.js";
-import { CONFIG_AGENT_NON_MODEL_KEYS } from "./types.js";
+import { CONFIG_AGENT_NON_MODEL_KEYS, normalizeAgentEntries } from "./types.js";
 import type { SystemPromptMode } from "../agents/types.js";
 import type { ThinkingLevel } from "../types.js";
 import { parseThinkingLevel } from "../utils.js";
 import {
   VALID_SYSTEM_PROMPT_MODES,
   DEFAULT_CONCURRENCY,
-  isPersistedAgentEntry,
   loadConfig,
   saveConfigAtomic,
   updateConfigAtomic,
@@ -471,9 +470,7 @@ function stripRemovedAgentFields(config: SubagentsConfig): SubagentsConfig {
   const sanitized = structuredClone(config);
   const agent = sanitized.agent as Record<string, unknown>;
   for (const field of REMOVED_AGENT_FIELDS) delete agent[field];
-  for (const [key, value] of Object.entries(agent)) {
-    if (!isPersistedAgentEntry(key, value)) delete agent[key];
-  }
+  sanitized.agent = normalizeAgentEntries(agent) as SubagentsConfig["agent"];
   const root = sanitized as unknown as Record<string, unknown>;
   delete root.mode;
   delete root.ecoModelOverrides;
@@ -484,14 +481,13 @@ function stripRemovedAgentFields(config: SubagentsConfig): SubagentsConfig {
 function applyConfigDelta(latest: SubagentsConfig, before: SubagentsConfig, desired: SubagentsConfig): void {
   const latestAgent = latest.agent as Record<string, unknown>;
   for (const field of REMOVED_AGENT_FIELDS) delete latestAgent[field];
-  for (const [key, value] of Object.entries(latestAgent)) {
-    if (!isPersistedAgentEntry(key, value)) delete latestAgent[key];
-  }
+  latest.agent = normalizeAgentEntries(latestAgent) as SubagentsConfig["agent"];
+  const normalizedAgent = latest.agent as Record<string, unknown>;
   const latestRoot = latest as unknown as Record<string, unknown>;
   delete latestRoot.mode;
   delete latestRoot.ecoModelOverrides;
   delete latestRoot.ecoThinkingOverrides;
-  applyObjectDelta(latestAgent, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
+  applyObjectDelta(normalizedAgent, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
   applyObjectDelta(latest.concurrency as Record<string, unknown>, before.concurrency as Record<string, unknown>, desired.concurrency as Record<string, unknown>);
   latest.thinkingOverrides ??= {};
   applyObjectDelta(
