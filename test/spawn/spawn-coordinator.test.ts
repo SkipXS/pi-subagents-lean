@@ -69,11 +69,8 @@ vi.mock("../../src/shell.js", () => ({
   getStore: () => ({
     createSubagentRuntimeSettings: () => ({
       agent: { graceTurns: 6, forceBackground: false, showCost: false },
-      mode: "eco",
       modelFor: (_type: string, parent: string, config?: { model?: string }) => config?.model ?? parent,
       thinkingSettingFor: () => ({ value: undefined }),
-      modelSettingForMode: (_type: string, parent: string, config?: { model?: string }) => ({ value: config?.model ?? parent, source: "parent", ecoConfigured: false }),
-      thinkingSettingForMode: () => ({ value: undefined, source: "parent", ecoConfigured: false }),
     }),
   }),
   getPiInstance: () => mockGetPiInstance(),
@@ -305,7 +302,6 @@ describe("SpawnCoordinator", () => {
     expect(options.modelKey).toBe("deepseek/deepseek-reasoner");
     expect(options.thinkingLevel).toBe("high");
     expect(options.invocation.thinkingLevel).toBe("high");
-    expect(options.invocation.mode).toBe("eco");
   });
 
   it("tracks a background execution in its delivery entries", async () => {

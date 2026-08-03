@@ -136,8 +136,6 @@ extensions: false
 skills: false
 model: zai/glm-5.2
 thinking: high
-eco_model: openai/gpt-4o-mini
-eco_thinking: low
 max_turns: 80
 ---
 
@@ -252,8 +250,6 @@ exclude_tools: [tavily/*]
 |---|---|---|---|
 | `model` | `provider/model-id` | resolved precedence | Role-level model candidate. Session and persistent overrides can take precedence; the parent model is the final fallback. |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | resolved precedence | Role-level reasoning candidate; invalid values are ignored. Provider capability normalization may adjust the selected level. |
-| `eco_model` | `provider/model-id` | resolved Default model | Optional Eco-only model candidate. A configured but missing/unauthenticated model fails the spawn instead of falling back. |
-| `eco_thinking` | thinking level | resolved Default thinking | Optional Eco-only reasoning candidate, normalized against the final Eco model independently of `eco_model`. |
 | `max_turns` | number | unlimited | Soft limit. At the limit the agent is instructed to wrap up; it is hard-aborted after `graceTurns` more turns (`0` aborts on the next turn). |
 | `max_tokens` | number | unlimited | Maximum output tokens per model response, passed through as the provider's completion-token limit. |
 
@@ -324,14 +320,6 @@ extension prepares a tool call. A missing frontmatter model or thinking value
 therefore does not necessarily inherit the parent: any higher global or
 per-role setting can win.
 
-Eco mode is selected through the persisted `mode` setting or another host-side
-configuration writer; it remains dateibasiert and has no custom UI dependency.
-Each Eco field resolves
-independently as an explicit value > Eco session role override > saved Eco role
-override > Agent Markdown `eco_*` > the fully resolved Default-mode field. Mode
-and resolved settings are captured when a root spawn is accepted, so queued work
-is unaffected by later changes.
-
 ### System prompt and context
 
 `systemPromptMode` controls the prompt base; the agent Markdown body is always
@@ -370,8 +358,7 @@ and do not require a custom UI.
 
 `~/.pi/agent/subagents-lean.json` is edited directly or by another host-side
 configuration writer. Per-role model overrides are dynamic keys inside `agent`,
-and per-role thinking overrides live in `thinkingOverrides`. Eco mode/settings
-use `mode`, `ecoModelOverrides`, and `ecoThinkingOverrides`.
+and per-role thinking overrides live in `thinkingOverrides`.
 
 ### Execution, catalog, model, and prompt settings
 
@@ -381,9 +368,6 @@ use `mode`, `ecoModelOverrides`, and `ecoThinkingOverrides`.
 | `agent.<role>` | absent | Persisted model override for that role. A string wins at its precedence level; `null` does not select a model. |
 | `agent.defaultThinking` | absent | Persisted global thinking fallback. |
 | `thinkingOverrides.<role>` | absent | Persisted thinking override for that role. |
-| `mode` | absent (`default`) | Default mode for new sessions; `eco` activates Eco resolution immediately. |
-| `ecoModelOverrides.<role>` | absent | Persisted Eco model override for that role. |
-| `ecoThinkingOverrides.<role>` | absent | Persisted Eco thinking override for that role. |
 | `agent.graceTurns` | `6` | Extra turns after a soft limit before hard abort. |
 | `agent.forceBackground` | `false` | Make every root spawn background, even when its call requests foreground. |
 | `concurrency.default` | `4` | Global simultaneous-root-agent limit; excess root spawns queue. |
@@ -407,10 +391,11 @@ nested-delegation fields (`delegate_to`, `max_child_agents`, and
 `maxNestingDepth`) are also accepted for migration compatibility, but have no
 effect and are removed from newly written configuration. The former
 `agent.defaultMaxTurns` field is ignored and dropped during config
-normalization; it never supplies a root turn-limit fallback. Use `max_turns` in
-Agent Markdown for a role limit. `finishedRetentionMinutes` and
-`outputThinkingBufferSize` remain functional because they govern retention and
-output logs, not presentation.
+normalization; it never supplies a root turn-limit fallback. Legacy `mode`,
+`ecoModelOverrides`, and `ecoThinkingOverrides` keys are also tolerated and
+removed from normalized writes. Use `max_turns` in Agent Markdown for a role
+limit. `finishedRetentionMinutes` and `outputThinkingBufferSize` remain
+functional because they govern retention and output logs, not presentation.
 Example configuration:
 
 ```json

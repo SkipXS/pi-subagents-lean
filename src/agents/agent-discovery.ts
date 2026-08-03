@@ -33,8 +33,6 @@ export interface AgentConfigFromMd {
   preload_skills?: string[] | false;
   model?: string;
   thinking?: ThinkingLevel;
-  eco_model?: string;
-  eco_thinking?: ThinkingLevel;
   max_turns?: number;
   max_tokens?: number;
   hidden?: boolean;
@@ -281,8 +279,6 @@ export function parseAgentFile(
     preload_skills: parsePreloadSkills(frontmatter.preload_skills),
     model: parseString(frontmatter, "model"),
     thinking: parseThinkingLevel(parseString(frontmatter, "thinking")),
-    eco_model: parseString(frontmatter, "eco_model"),
-    eco_thinking: parseThinkingLevel(parseString(frontmatter, "eco_thinking")),
     max_turns: parseNumber(frontmatter, "max_turns"),
     max_tokens: parseNumber(frontmatter, "max_tokens"),
     hidden: parseBoolean(frontmatter, "hidden"),
@@ -422,8 +418,6 @@ function fromMd(md: AgentConfigFromMd): Partial<AgentConfig> {
     preloadSkills: md.preload_skills,
     model: md.model,
     thinkingLevel: md.thinking,
-    ecoModel: md.eco_model,
-    ecoThinkingLevel: md.eco_thinking,
     maxTurns: md.max_turns,
     maxTokens: md.max_tokens,
     hidden: md.hidden,

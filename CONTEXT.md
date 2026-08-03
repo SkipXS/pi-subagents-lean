@@ -50,13 +50,6 @@ A thinking-level selection resolved through the same internal precedence chain
 as the model and normalized to the selected model's supported levels. It is not
 a public `Agent`-tool spawn parameter.
 
-**Eco mode**
-
-A session-only or persisted, file-based operating mode selected through
-configuration rather than a custom UI. Eco model and thinking fields resolve
-independently and fall back to the fully resolved Default-mode fields. Root
-acceptance snapshots the mode/settings for queued work.
-
 **Soft turn limit**
 
 The turn count at which a subagent receives an instruction to wrap up and return a final answer.
@@ -123,7 +116,7 @@ append-only output log are the diagnostic surfaces.
 
 ## Relationships
 
-- The **parent** starts independent root **subagents** from named **agent types** using the accepted Default/Eco mode snapshot.
+- The **parent** starts independent root **subagents** from named **agent types** using the accepted model and thinking settings.
 - **Agent Markdown** supplies custom or overriding agent-type configuration.
 - The **orchestration prompt** advertises visible agent types only to the parent.
 - A subagent may run at a validated **working tree path** and use its trusted **working tree overlay**.

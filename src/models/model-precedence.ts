@@ -23,8 +23,6 @@ export type SettingSource =
   | "config-global"
   | "parent";
 
-export type AgentMode = "default" | "eco";
-
 export interface ResolvedSetting<T> {
   value: T;
   source: SettingSource;
@@ -50,12 +48,6 @@ export interface SubagentsConfig {
   };
   /** Persisted per-agent thinking overrides. */
   thinkingOverrides?: Record<string, ThinkingLevel | null | undefined>;
-  /** Persisted default mode for new sessions. Missing means default. */
-  mode?: AgentMode;
-  /** Persisted per-agent Eco model overrides. */
-  ecoModelOverrides?: Record<string, string | null | undefined>;
-  /** Persisted per-agent Eco thinking overrides. */
-  ecoThinkingOverrides?: Record<string, ThinkingLevel | null | undefined>;
   concurrency: {
     /** Global maximum number of agents that may run at once. */
     default: number;
@@ -72,16 +64,6 @@ export interface SessionModelOverrides {
 export interface SessionThinkingOverrides {
   default?: ThinkingLevel;
   [agentType: string]: ThinkingLevel | undefined;
-}
-
-export interface EcoSessionOverrides {
-  models: Record<string, string | undefined>;
-  thinking: Record<string, ThinkingLevel | undefined>;
-}
-
-export interface ResolvedEcoSetting<T> extends ResolvedSetting<T> {
-  /** False means no Eco value was configured and the Default-mode value won. */
-  ecoConfigured: boolean;
 }
 
 export interface ResolveModelOptions {
@@ -156,46 +138,4 @@ export function resolveThinkingSetting(
     { value: persistedDefaultThinking, source: "config-global" },
     { value: parentThinking, source: "parent" },
   ]) ?? { value: undefined, source: "parent" };
-}
-
-/** Resolve one Eco field independently, falling back to its fully resolved Default-mode value. */
-export function resolveEcoModelSetting(options: {
-  subagentType: string;
-  explicitModel?: string;
-  agentConfig?: { ecoModel?: string };
-  config: SubagentsConfig;
-  sessionOverrides?: EcoSessionOverrides;
-  defaultSetting: ResolvedSetting<string>;
-}): ResolvedEcoSetting<string> {
-  const { subagentType, explicitModel, agentConfig, config, sessionOverrides, defaultSetting } = options;
-  const eco = firstDefined<string>([
-    { value: explicitModel, source: "spawn" },
-    { value: sessionOverrides?.models[subagentType], source: "session-agent" },
-    { value: config.ecoModelOverrides?.[subagentType], source: "config-agent" },
-    { value: agentConfig?.ecoModel, source: "agent-md" },
-  ]);
-  return eco
-    ? { ...eco, ecoConfigured: eco.source !== "spawn" }
-    : { ...defaultSetting, ecoConfigured: false };
-}
-
-/** Eco thinking resolves independently from Eco model and is normalized only after the final model is known. */
-export function resolveEcoThinkingSetting(options: {
-  subagentType: string;
-  explicitThinking?: ThinkingLevel;
-  agentConfig?: { ecoThinkingLevel?: ThinkingLevel };
-  config: SubagentsConfig;
-  sessionOverrides?: EcoSessionOverrides;
-  defaultSetting: ResolvedSetting<ThinkingLevel | undefined>;
-}): ResolvedEcoSetting<ThinkingLevel | undefined> {
-  const { subagentType, explicitThinking, agentConfig, config, sessionOverrides, defaultSetting } = options;
-  const eco = firstDefined<ThinkingLevel>([
-    { value: explicitThinking, source: "spawn" },
-    { value: sessionOverrides?.thinking[subagentType], source: "session-agent" },
-    { value: parseThinkingLevel(config.ecoThinkingOverrides?.[subagentType]), source: "config-agent" },
-    { value: agentConfig?.ecoThinkingLevel, source: "agent-md" },
-  ]);
-  return eco
-    ? { ...eco, ecoConfigured: eco.source !== "spawn" }
-    : { ...defaultSetting, ecoConfigured: false };
 }

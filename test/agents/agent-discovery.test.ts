@@ -91,7 +91,7 @@ describe("parseExtensions", () => {
 /* ------------------------------------------------------------------ */
 
 describe("parseAgentFile", () => {
-  it("parses all frontmatter fields into AgentConfigFromMd", () => {
+  it("parses supported frontmatter and ignores legacy fields", () => {
     const content = `---
 name: explorer
 display_name: Explorer Agent
@@ -121,8 +121,10 @@ This is the system prompt body.
     expect(result.extensions).toBe(false); // "none" → false
     expect(result.skills).toBe(true); // "all" → true
     expect(result.thinking).toBe("high");
-    expect(result.eco_model).toBe("openai/gpt-4o-mini");
-    expect(result.eco_thinking).toBe("low");
+    expect(result).not.toHaveProperty("eco_model");
+    expect(result).not.toHaveProperty("eco_thinking");
+    expect(toAgentConfig(result)).not.toHaveProperty("ecoModel");
+    expect(toAgentConfig(result)).not.toHaveProperty("ecoThinkingLevel");
     expect(result.max_turns).toBe(50);
     expect(result.max_tokens).toBe(2048);
     // Deprecated delegation frontmatter is tolerated but ignored.
@@ -381,30 +383,26 @@ describe("scanAgentFilesInDir", () => {
 describe("mergeAgents", () => {
 
 
-  it("merges Eco model and thinking fields independently across agent layers", () => {
+  it("ignores legacy model fields while merging agent definitions", () => {
     const defaults = new Map<string, any>([["scout", {
       name: "scout",
       description: "Default scout",
-      ecoModel: "default/eco",
-      ecoThinkingLevel: "high",
+      model: "default/model",
+      thinkingLevel: "high",
       systemPrompt: "default prompt",
     }]]);
-    const user = parseAgentFile(`---
+    const legacy = parseAgentFile(`---
 name: scout
-eco_model: user/eco
+eco_model: old/model
 eco_thinking: low
 ---
 `, "user");
-    const project = parseAgentFile(`---
-name: scout
-eco_model: project/eco
----
-`, "project");
 
-    const result = mergeAgents(defaults, [user], [], [project]);
-    expect(result.get("scout")).toMatchObject({
-      ecoModel: "project/eco",
-      ecoThinkingLevel: "low",
+    expect(legacy).not.toHaveProperty("eco_model");
+    expect(legacy).not.toHaveProperty("eco_thinking");
+    expect(mergeAgents(defaults, [legacy], [], []).get("scout")).toMatchObject({
+      model: "default/model",
+      thinkingLevel: "high",
     });
   });
 

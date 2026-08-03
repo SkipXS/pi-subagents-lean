@@ -14,15 +14,12 @@
  */
 
 import type {
-  AgentMode,
-  EcoSessionOverrides,
-  ResolvedEcoSetting,
   ResolvedSetting,
   SessionModelOverrides,
   SessionThinkingOverrides,
   SubagentsConfig,
 } from "../models/model-precedence.js";
-import { resolveEcoModelSetting, resolveEcoThinkingSetting, resolveModelSetting, resolveThinkingSetting } from "../models/model-precedence.js";
+import { resolveModelSetting, resolveThinkingSetting } from "../models/model-precedence.js";
 import type { AgentManager } from "../agents/agent-manager.js";
 import { CONFIG_AGENT_NON_MODEL_KEYS } from "./types.js";
 import type { SystemPromptMode } from "../agents/types.js";
@@ -92,24 +89,10 @@ export interface ResolvedAgentSettings {
  */
 export interface SubagentRuntimeSettings {
   readonly agent: Readonly<ResolvedAgentSettings>;
-  /** Added with Eco mode; absent on snapshots captured by older runtimes. */
-  readonly mode?: AgentMode;
-  /** Backwards-compatible Default-mode resolver. */
+  /** Backwards-compatible value-only model resolver. */
   modelFor(type: string, parentModelId: string, agentConfig?: { model?: string }, explicitModel?: string): string;
-  /** Backwards-compatible Default-mode thinking resolver. */
+  /** Backwards-compatible thinking resolver. */
   thinkingSettingFor(type: string, parentThinking: ThinkingLevel | undefined, agentConfig?: { thinkingLevel?: ThinkingLevel }, explicitThinking?: ThinkingLevel): ResolvedSetting<ThinkingLevel | undefined>;
-  modelSettingForMode?(
-    type: string,
-    parentModelId: string,
-    agentConfig?: { model?: string; ecoModel?: string },
-    explicitModel?: string,
-  ): ResolvedEcoSetting<string>;
-  thinkingSettingForMode?(
-    type: string,
-    parentThinking: ThinkingLevel | undefined,
-    agentConfig?: { thinkingLevel?: ThinkingLevel; ecoThinkingLevel?: ThinkingLevel },
-    explicitThinking?: ThinkingLevel,
-  ): ResolvedEcoSetting<ThinkingLevel | undefined>;
 }
 
 export interface ConfigStoreDeps {
@@ -124,8 +107,6 @@ export class ConfigStore {
   private repairAvailable = false;
   private sessionOverrides: SessionModelOverrides = { default: null };
   private sessionThinkingOverrides: SessionThinkingOverrides = {};
-  private sessionEcoOverrides: EcoSessionOverrides = { models: {}, thinking: {} };
-  private sessionMode: AgentMode | undefined;
   // These are shell-owned control collaborators. ECMAScript private fields
   // keep getStore() from becoming an indirect route to them in child runtimes.
   #manager?: AgentManager;
@@ -173,27 +154,6 @@ export class ConfigStore {
     return { default: this.config.concurrency.default };
   }
 
-  get mode(): AgentMode {
-    return this.sessionMode ?? this.config.mode ?? "default";
-  }
-
-  get modeSource(): "session" | "saved" | "default" {
-    return this.sessionMode ? "session" : this.config.mode ? "saved" : "default";
-  }
-
-  ecoModelOverride(type: string): string | undefined {
-    return this.sessionEcoOverrides.models[type] ?? this.config.ecoModelOverrides?.[type] ?? undefined;
-  }
-
-  ecoThinkingOverride(type: string): ThinkingLevel | undefined {
-    return this.sessionEcoOverrides.thinking[type] ?? parseThinkingLevel(this.config.ecoThinkingOverrides?.[type]);
-  }
-
-  sessionEcoModelOverride(type: string): string | undefined { return this.sessionEcoOverrides.models[type]; }
-  sessionEcoThinkingOverride(type: string): ThinkingLevel | undefined { return this.sessionEcoOverrides.thinking[type]; }
-  persistedEcoModelOverride(type: string): string | undefined { return this.config.ecoModelOverrides?.[type] ?? undefined; }
-  persistedEcoThinkingOverride(type: string): ThinkingLevel | undefined { return parseThinkingLevel(this.config.ecoThinkingOverrides?.[type]); }
-
   get sessionDefaultModel(): string | null {
     return this.sessionOverrides.default ?? null;
   }
@@ -217,11 +177,6 @@ export class ConfigStore {
   /** Whether persisted thinking entries exist, including entries for removed agent types. */
   hasPersistedThinkingOverrides(): boolean {
     return Object.keys(this.config.thinkingOverrides ?? {}).length > 0;
-  }
-
-  hasPersistedEcoOverrides(): boolean {
-    return Object.keys(this.config.ecoModelOverrides ?? {}).length > 0
-      || Object.keys(this.config.ecoThinkingOverrides ?? {}).length > 0;
   }
 
   /** Raw agent config including dynamic per-type model keys. */
@@ -249,13 +204,11 @@ export class ConfigStore {
     return this.modelSettingFor(type, parentModelId, agentConfig, explicitModel).value;
   }
 
-  /** Capture immutable mode/settings at the accepted root spawn boundary. */
+  /** Capture immutable model/thinking settings at the accepted root spawn boundary. */
   createSubagentRuntimeSettings(): SubagentRuntimeSettings {
     const config = structuredClone(this.config);
     const sessionOverrides = structuredClone(this.sessionOverrides);
     const sessionThinkingOverrides = structuredClone(this.sessionThinkingOverrides);
-    const ecoOverrides = structuredClone(this.sessionEcoOverrides);
-    const mode = this.mode;
     const agent = Object.freeze({ ...this.agent });
     const defaultModel = (type: string, parentModelId: string, agentConfig?: { model?: string }, explicitModel?: string) => resolveModelSetting({
       subagentType: type, explicitModel, agentConfig, config, parentModelId, sessionOverrides,
@@ -264,38 +217,10 @@ export class ConfigStore {
       subagentType: type, explicitThinking, agentConfig, config, parentThinking, sessionOverrides: sessionThinkingOverrides,
     });
     return Object.freeze({
-      agent, mode,
+      agent,
       modelFor: (type: string, parentModelId: string, agentConfig?: { model?: string }, explicitModel?: string) => defaultModel(type, parentModelId, agentConfig, explicitModel).value,
       thinkingSettingFor: (type: string, parentThinking: ThinkingLevel | undefined, agentConfig?: { thinkingLevel?: ThinkingLevel }, explicitThinking?: ThinkingLevel) => defaultThinking(type, parentThinking, agentConfig, explicitThinking),
-      modelSettingForMode: (type: string, parentModelId: string, agentConfig?: { model?: string; ecoModel?: string }, explicitModel?: string) => {
-        const base = defaultModel(type, parentModelId, agentConfig, explicitModel);
-        return mode === "eco" ? resolveEcoModelSetting({ subagentType: type, explicitModel, agentConfig, config, sessionOverrides: ecoOverrides, defaultSetting: base }) : { ...base, ecoConfigured: false };
-      },
-      thinkingSettingForMode: (type: string, parentThinking: ThinkingLevel | undefined, agentConfig?: { thinkingLevel?: ThinkingLevel; ecoThinkingLevel?: ThinkingLevel }, explicitThinking?: ThinkingLevel) => {
-        const base = defaultThinking(type, parentThinking, agentConfig, explicitThinking);
-        return mode === "eco" ? resolveEcoThinkingSetting({ subagentType: type, explicitThinking, agentConfig, config, sessionOverrides: ecoOverrides, defaultSetting: base }) : { ...base, ecoConfigured: false };
-      },
     });
-  }
-
-  ecoModelSettingFor(type: string, parentModelId: string, agentConfig?: { model?: string; ecoModel?: string }, explicitModel?: string): ResolvedEcoSetting<string> {
-    const base = this.modelSettingFor(type, parentModelId, agentConfig, explicitModel);
-    return resolveEcoModelSetting({ subagentType: type, explicitModel, agentConfig, config: this.config, sessionOverrides: this.sessionEcoOverrides, defaultSetting: base });
-  }
-
-  modelSettingForMode(type: string, parentModelId: string, agentConfig?: { model?: string; ecoModel?: string }, explicitModel?: string): ResolvedEcoSetting<string> {
-    const base = this.modelSettingFor(type, parentModelId, agentConfig, explicitModel);
-    return this.mode === "eco" ? this.ecoModelSettingFor(type, parentModelId, agentConfig, explicitModel) : { ...base, ecoConfigured: false };
-  }
-
-  ecoThinkingSettingFor(type: string, parentThinking: ThinkingLevel | undefined, agentConfig?: { thinkingLevel?: ThinkingLevel; ecoThinkingLevel?: ThinkingLevel }, explicitThinking?: ThinkingLevel): ResolvedEcoSetting<ThinkingLevel | undefined> {
-    const base = this.thinkingSettingFor(type, parentThinking, agentConfig, explicitThinking);
-    return resolveEcoThinkingSetting({ subagentType: type, explicitThinking, agentConfig, config: this.config, sessionOverrides: this.sessionEcoOverrides, defaultSetting: base });
-  }
-
-  thinkingSettingForMode(type: string, parentThinking: ThinkingLevel | undefined, agentConfig?: { thinkingLevel?: ThinkingLevel; ecoThinkingLevel?: ThinkingLevel }, explicitThinking?: ThinkingLevel): ResolvedEcoSetting<ThinkingLevel | undefined> {
-    const base = this.thinkingSettingFor(type, parentThinking, agentConfig, explicitThinking);
-    return this.mode === "eco" ? this.ecoThinkingSettingFor(type, parentThinking, agentConfig, explicitThinking) : { ...base, ecoConfigured: false };
   }
 
   thinkingSettingFor(
@@ -320,29 +245,6 @@ export class ConfigStore {
 
   readonly mutate = {
     agent: {
-      setMode: (mode: AgentMode | undefined): void => {
-        if (mode === undefined) delete this.config.mode;
-        else this.config.mode = mode;
-        this.persist();
-        // A permanent choice takes effect immediately only after the save is durable.
-        this.sessionMode = undefined;
-      },
-      setEcoModelOverride: (type: string, value: string): void => {
-        this.config.ecoModelOverrides = { ...(this.config.ecoModelOverrides ?? {}), [type]: value };
-        this.persist();
-      },
-      clearEcoModelOverride: (type: string): void => {
-        if (this.config.ecoModelOverrides) delete this.config.ecoModelOverrides[type];
-        this.persist();
-      },
-      setEcoThinkingOverride: (type: string, value: ThinkingLevel): void => {
-        this.config.ecoThinkingOverrides = { ...(this.config.ecoThinkingOverrides ?? {}), [type]: value };
-        this.persist();
-      },
-      clearEcoThinkingOverride: (type: string): void => {
-        if (this.config.ecoThinkingOverrides) delete this.config.ecoThinkingOverrides[type];
-        this.persist();
-      },
       setDefaultModel: (value: string | null): void => {
         this.config.agent.default = value;
         this.persist();
@@ -394,8 +296,6 @@ export class ConfigStore {
         delete preserved.defaultThinking;
         this.config.agent = preserved as SubagentsConfig["agent"];
         this.config.thinkingOverrides = {};
-        this.config.ecoModelOverrides = {};
-        this.config.ecoThinkingOverrides = {};
         this.persist();
       },
       setForceBackground: (enabled: boolean): void => {
@@ -462,11 +362,6 @@ export class ConfigStore {
       },
     },
     session: {
-      setMode: (mode: AgentMode | undefined): void => { this.sessionMode = mode; },
-      setEcoModelOverride: (type: string, model: string): void => { this.sessionEcoOverrides.models[type] = model; },
-      clearEcoModelOverride: (type: string): void => { delete this.sessionEcoOverrides.models[type]; },
-      setEcoThinkingOverride: (type: string, level: ThinkingLevel): void => { this.sessionEcoOverrides.thinking[type] = level; },
-      clearEcoThinkingOverride: (type: string): void => { delete this.sessionEcoOverrides.thinking[type]; },
       /** Set a session model override for a type (or "default"). Not persisted. */
       setOverride: (type: string, model: string): void => {
         this.sessionOverrides[type] = model;
@@ -483,7 +378,6 @@ export class ConfigStore {
       clearAll: (): void => {
         this.sessionOverrides = { default: null };
         this.sessionThinkingOverrides = {};
-        this.sessionEcoOverrides = { models: {}, thinking: {} };
       },
     },
   };
@@ -499,8 +393,6 @@ export class ConfigStore {
     this.repairAvailable = loaded.canRepair;
     this.sessionOverrides = { default: null };
     this.sessionThinkingOverrides = {};
-    this.sessionEcoOverrides = { models: {}, thinking: {} };
-    this.sessionMode = undefined;
     this.syncAllDeps();
   }
 
@@ -591,22 +483,22 @@ function stripRemovedAgentFields(config: SubagentsConfig): SubagentsConfig {
   const sanitized = structuredClone(config);
   const agent = sanitized.agent as Record<string, unknown>;
   for (const field of REMOVED_AGENT_FIELDS) delete agent[field];
+  const root = sanitized as unknown as Record<string, unknown>;
+  delete root.mode;
+  delete root.ecoModelOverrides;
+  delete root.ecoThinkingOverrides;
   return sanitized;
 }
 
 function applyConfigDelta(latest: SubagentsConfig, before: SubagentsConfig, desired: SubagentsConfig): void {
   const latestAgent = latest.agent as Record<string, unknown>;
   for (const field of REMOVED_AGENT_FIELDS) delete latestAgent[field];
+  const latestRoot = latest as unknown as Record<string, unknown>;
+  delete latestRoot.mode;
+  delete latestRoot.ecoModelOverrides;
+  delete latestRoot.ecoThinkingOverrides;
   applyObjectDelta(latestAgent, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
   applyObjectDelta(latest.concurrency as Record<string, unknown>, before.concurrency as Record<string, unknown>, desired.concurrency as Record<string, unknown>);
-  if (!Object.is(before.mode, desired.mode)) {
-    if (desired.mode === undefined) delete latest.mode;
-    else latest.mode = desired.mode;
-  }
-  latest.ecoModelOverrides ??= {};
-  applyObjectDelta(latest.ecoModelOverrides as Record<string, unknown>, (before.ecoModelOverrides ?? {}) as Record<string, unknown>, (desired.ecoModelOverrides ?? {}) as Record<string, unknown>);
-  latest.ecoThinkingOverrides ??= {};
-  applyObjectDelta(latest.ecoThinkingOverrides as Record<string, unknown>, (before.ecoThinkingOverrides ?? {}) as Record<string, unknown>, (desired.ecoThinkingOverrides ?? {}) as Record<string, unknown>);
   latest.thinkingOverrides ??= {};
   applyObjectDelta(
     latest.thinkingOverrides as Record<string, unknown>,

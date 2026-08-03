@@ -17,8 +17,6 @@ function defaultConfig(): SubagentsConfig {
       finishedRetentionMinutes: 60,
     },
     thinkingOverrides: {},
-    ecoModelOverrides: {},
-    ecoThinkingOverrides: {},
     concurrency: { default: 4 },
   };
 }
@@ -85,44 +83,27 @@ describe("ConfigStore runtime settings", () => {
     expect(snapshot).not.toHaveProperty("mutate");
   });
 
-  it("retains Eco resolution independently from presentation", () => {
-    const { io, current } = memIO({
-      ecoModelOverrides: { scout: "saved/eco" },
+  it("drops legacy mode and model/thinking keys from injected config writes", () => {
+    const saved: SubagentsConfig[] = [];
+    const legacy = {
+      ...defaultConfig(),
+      mode: "legacy",
+      ecoModelOverrides: { scout: "old/model" },
       ecoThinkingOverrides: { scout: "low" },
+    } as unknown as SubagentsConfig;
+    const store = new ConfigStore({
+      load: () => structuredClone(legacy),
+      save: (config) => saved.push(structuredClone(config)),
     });
-    const store = new ConfigStore(io);
-    expect(store.mode).toBe("default");
-    store.mutate.agent.setMode("eco");
-    store.mutate.session.setEcoModelOverride("scout", "session/eco");
+
     const snapshot = store.createSubagentRuntimeSettings();
+    expect(snapshot).not.toHaveProperty("mode");
+    store.mutate.agent.setGraceTurns(7);
 
-    expect(current().mode).toBe("eco");
-    expect(snapshot.mode).toBe("eco");
-    expect(snapshot.modelSettingForMode!("scout", "parent/model").value).toBe("session/eco");
-    expect(snapshot.thinkingSettingForMode!("scout", "high").value).toBe("low");
-  });
-
-  it("keeps session Eco overrides above persisted values without saving them", () => {
-    const { io, saves } = memIO({
-      ecoModelOverrides: { scout: "saved/eco" },
-      ecoThinkingOverrides: { scout: "low" },
-    });
-    const store = new ConfigStore(io);
-
-    expect(store.hasPersistedEcoOverrides()).toBe(true);
-    expect(store.ecoModelOverride("scout")).toBe("saved/eco");
-    expect(store.ecoThinkingOverride("scout")).toBe("low");
-
-    store.mutate.session.setEcoModelOverride("scout", "session/eco");
-    store.mutate.session.setEcoThinkingOverride("scout", "high");
-    expect(store.ecoModelOverride("scout")).toBe("session/eco");
-    expect(store.ecoThinkingOverride("scout")).toBe("high");
-
-    store.mutate.session.clearEcoModelOverride("scout");
-    store.mutate.session.clearEcoThinkingOverride("scout");
-    expect(store.ecoModelOverride("scout")).toBe("saved/eco");
-    expect(store.ecoThinkingOverride("scout")).toBe("low");
-    expect(saves).toHaveLength(0);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).not.toHaveProperty("mode");
+    expect(saved[0]).not.toHaveProperty("ecoModelOverrides");
+    expect(saved[0]).not.toHaveProperty("ecoThinkingOverrides");
   });
 
   it("resolves scalar defaults without exposing legacy presentation fields", () => {
@@ -318,24 +299,6 @@ describe("ConfigStore persistence and manager effects", () => {
     expect(store.agent.graceTurns).toBe(6);
   });
 
-  it("rolls back Eco overrides to the last durable values when saving fails", () => {
-    const initial = {
-      ...defaultConfig(),
-      ecoModelOverrides: { scout: "saved/eco" },
-      ecoThinkingOverrides: { scout: "medium" as any },
-    };
-    const store = new ConfigStore({
-      load: () => structuredClone(initial),
-      save: () => { throw new Error("disk full"); },
-    });
-
-    expect(() => store.mutate.agent.setEcoModelOverride("scout", "new/eco")).toThrow("disk full");
-    expect(store.ecoModelOverride("scout")).toBe("saved/eco");
-    expect(store.ecoThinkingOverride("scout")).toBe("medium");
-    expect(store.persistedEcoModelOverride("scout")).toBe("saved/eco");
-    expect(store.persistedEcoThinkingOverride("scout")).toBe("medium");
-  });
-
   it("preserves an independent concurrent change during a transactional update", () => {
     let disk = defaultConfig();
     const io: ConfigIO = {
@@ -358,33 +321,6 @@ describe("ConfigStore persistence and manager effects", () => {
     expect(store.agent.forceBackground).toBe(true);
   });
 
-  it("merges concurrent Eco-map changes without dropping either update", () => {
-    let disk: SubagentsConfig = {
-      ...defaultConfig(),
-      ecoModelOverrides: { scout: "old/eco" },
-      ecoThinkingOverrides: { scout: "low" as any },
-    };
-    const io: ConfigIO = {
-      load: () => ({ config: structuredClone(disk), health: "healthy", canRepair: false }),
-      save: () => { throw new Error("legacy save should not run"); },
-      update: (change) => {
-        const latest = structuredClone(disk);
-        latest.ecoModelOverrides = { ...(latest.ecoModelOverrides ?? {}), reviewer: "concurrent/eco" };
-        latest.ecoThinkingOverrides = { ...(latest.ecoThinkingOverrides ?? {}), reviewer: "high" as any };
-        change(latest);
-        disk = structuredClone(latest);
-        return { config: latest, health: "healthy", canRepair: false };
-      },
-    };
-    const store = new ConfigStore(io);
-
-    store.mutate.agent.setEcoModelOverride("scout", "new/eco");
-
-    expect(disk.ecoModelOverrides).toEqual({ scout: "new/eco", reviewer: "concurrent/eco" });
-    expect(disk.ecoThinkingOverrides).toEqual({ scout: "low", reviewer: "high" });
-    expect(store.ecoModelOverride("reviewer")).toBe("concurrent/eco");
-    expect(store.ecoThinkingOverride("reviewer")).toBe("high");
-  });
 });
 
 describe("ConfigStore lifecycle and session overrides", () => {
