@@ -9,14 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Agent control-call renderer.** Interactive `Agent` rows retain their canonical role/model/thinking/prompt display; `AgentContinue` and `StopAgent` now show the canonical full ID, role, resolved `provider/model-id`, normalized thinking, and (for `AgentContinue`) the complete prompt.
-- **AgentContinue tool.** Continue a finished agent's session with a new prompt: the execution reuses the retained session, model, working directory, output log, and the original `max_turns`/`grace_turns` limits, and consumes a normal global concurrency slot without incrementing the accepted-agent count. Foreground calls await their execution; `run_in_background` acknowledges immediately and delivers exactly one per-execution completion notification. Each execution is retained in the record as its own summary (`executions`) with per-execution usage/cost/turn deltas, while lifetime totals stay cumulative.
+- **AgentContinue tool.** Continue a finished agent's session with a new prompt: the execution reuses the retained session, model, working directory, and output log, and consumes a normal global concurrency slot without incrementing the accepted-agent count. Foreground calls await their execution; `run_in_background` acknowledges immediately and delivers exactly one per-execution completion notification. Each execution is retained in the record as its own summary (`executions`) with per-execution usage/cost/compaction deltas, while lifetime totals stay cumulative.
 - **Flat root-agent execution.** `Agent`, `AgentContinue`, `StopAgent`, and `AgentStatus` now operate only on root records. Subagent sessions remain ALS-isolated but receive no `Agent` custom proxy or root control tool.
 
 ### Changed
 - **Finished-agent retention default raised to 60 minutes** (config fallback, manager default, and docs); the `finishedRetentionMinutes` setting remains configurable from 1 minute up.
 - **Deprecated shell compatibility.** `enterSubagentSpawn`, `exitSubagentSpawn`, and `isInsideSubagentSpawn` are again exported for source-path consumers. They only preserve inert extension registration; AsyncLocalStorage remains authoritative for child isolation and root shell guards.
 - **Legacy configuration compatibility.** Removed UI and delegation fields are tolerated while loading and are omitted from new configuration writes.
-- **Phase 5 cleanup.** Removed the obsolete active-session viewer cadence and the ConfigStore/type API for `defaultMaxTurns`; `config-io` continues to drop that legacy key while normalizing old files. Background completion delivery now uses a short per-execution delay and one automatic `sendMessage` attempt; failures remain diagnostic until eviction without a retry path. Documentation, stale fixtures, tests, and internal exports now describe the flat tool-first model.
+- **Phase 5 cleanup.** Removed the obsolete active-session viewer cadence and stale ConfigStore/type APIs. Background completion delivery now uses a short per-execution delay and one automatic `sendMessage` attempt; failures remain diagnostic until eviction without a retry path. Documentation, stale fixtures, tests, and internal exports now describe the flat tool-first model.
 
 ### Fixed
 - **`AgentContinue` schema now satisfies strict-mode providers.** Codex rejects tool schemas whose `required` array omits any property, so `run_in_background` is now a mandatory boolean (`Type.Boolean()` instead of `Type.Optional`) — the executor still treats `false`/missing as foreground, so behavior is unchanged.
@@ -138,12 +138,10 @@ The `1.x` entries below document the inherited `pi-subagents-lite` history. `pi-
 
 ### Added
 - **`disableDefaultAgents` setting.** Hide built-in agents so only custom `.pi/agents/*.md` agents are advertised.
-- **Status notes for non-normal agent outcomes.** Stopped, aborted, and turn-limited agents carry explicit notes for the orchestrator.
 - **KV cache optimization.** System prompt reordered for maximum cache reuse across agents.
 
 ### Changed
 - **Menus unified to pi-style SettingsList/SelectList.** All menus use pi's native components with consistent navigation and submenus.
-- **`steered` status renamed to `turn_limited`.** More accurate naming for agents that wrapped up at their turn budget.
 
 ### Fixed
 - **Disabled agents no longer advertised in tool description.** `enabled: false` agents filtered from the LLM's type list.
@@ -151,4 +149,4 @@ The `1.x` entries below document the inherited `pi-subagents-lite` history. `pi-
 
 ## [1.3.0] and earlier
 
-AgentStatus tool, `worktree_path` parameter, manual spawn menu, cost display, compact mode sync, configurable grace turns, selective extension loading, skill whitelisting, and the foundational subagent spawning system with foreground/background modes, concurrency limits, and the `/agents` menu.
+AgentStatus tool, `worktree_path` parameter, manual spawn menu, cost display, compact mode sync, selective extension loading, skill whitelisting, and the foundational subagent spawning system with foreground/background modes, concurrency limits, and the `/agents` menu.

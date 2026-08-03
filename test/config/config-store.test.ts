@@ -8,12 +8,10 @@ function defaultConfig(): SubagentsConfig {
     agent: {
       default: null,
       forceBackground: false,
-      graceTurns: 6,
       systemPromptMode: "replace",
       includeContextFiles: true,
       disableDefaultAgents: false,
       orchestrationPrompt: true,
-      outputThinkingBufferSize: 0,
       finishedRetentionMinutes: 60,
     },
     thinkingOverrides: {},
@@ -63,7 +61,7 @@ function managerStub(): {
 describe("ConfigStore runtime settings", () => {
   it("captures a frozen, stable child snapshot", () => {
     const { io } = memIO({
-      agent: { ...defaultConfig().agent, default: "persisted/model", graceTurns: 3 },
+      agent: { ...defaultConfig().agent, default: "persisted/model" },
       thinkingOverrides: { scout: "low" as any },
     });
     const store = new ConfigStore(io);
@@ -77,9 +75,9 @@ describe("ConfigStore runtime settings", () => {
     expect(snapshot.thinkingSettingFor("scout", undefined).value).toBe("high");
 
     store.mutate.session.setOverride("scout", "later/model");
-    store.mutate.agent.setGraceTurns(9);
+    store.mutate.agent.setDefaultModel("later/default");
     expect(snapshot.modelFor("scout", "parent/model")).toBe("session/model");
-    expect(snapshot.agent.graceTurns).toBe(3);
+    expect(snapshot.modelFor("reviewer", "parent/model")).toBe("persisted/model");
     expect(snapshot).not.toHaveProperty("mutate");
   });
 
@@ -98,7 +96,7 @@ describe("ConfigStore runtime settings", () => {
 
     const snapshot = store.createSubagentRuntimeSettings();
     expect(snapshot).not.toHaveProperty("mode");
-    store.mutate.agent.setGraceTurns(7);
+    store.mutate.agent.setDefaultModel("new/model");
 
     expect(saved).toHaveLength(1);
     expect(saved[0]).not.toHaveProperty("mode");
@@ -115,22 +113,18 @@ describe("ConfigStore runtime settings", () => {
         // expose or recreate presentation-only fields.
         widgetMaxLines: 20,
         showCost: true,
-        defaultMaxTurns: 40,
       },
     });
     const settings = new ConfigStore(io).agent;
     expect(settings).toMatchObject({
       defaultModel: null,
       forceBackground: false,
-      graceTurns: 6,
       systemPromptMode: "replace",
       includeContextFiles: true,
-      outputThinkingBufferSize: 0,
       finishedRetentionMinutes: 60,
     });
     expect(settings).not.toHaveProperty("widgetMaxLines");
     expect(settings).not.toHaveProperty("showCost");
-    expect(settings).not.toHaveProperty("defaultMaxTurns");
   });
 
   it("does not recreate removed fields through dynamic writes", () => {
@@ -141,20 +135,23 @@ describe("ConfigStore runtime settings", () => {
         delegate_to: ["scout"] as any,
         max_child_agents: 2,
         maxNestingDepth: 2,
-        defaultMaxTurns: 40,
+        dynamicModel: "provider/model",
+        dynamicNumber: 42,
+        dynamicBoolean: true,
       },
     });
     const store = new ConfigStore(io);
 
     store.mutate.agent.setModelOverride("delegate_to", "reviewer");
-    store.mutate.agent.setModelOverride("defaultMaxTurns", "40");
     store.mutate.agent.setModelOverride("max_child_agents", "4");
     store.mutate.agent.setModelOverride("maxNestingDepth", "2");
 
     expect(current().agent).not.toHaveProperty("delegate_to");
     expect(current().agent).not.toHaveProperty("max_child_agents");
     expect(current().agent).not.toHaveProperty("maxNestingDepth");
-    expect(current().agent).not.toHaveProperty("defaultMaxTurns");
+    expect(current().agent.dynamicModel).toBe("provider/model");
+    expect(current().agent).not.toHaveProperty("dynamicNumber");
+    expect(current().agent).not.toHaveProperty("dynamicBoolean");
   });
 });
 
@@ -248,13 +245,11 @@ describe("ConfigStore persistence and manager effects", () => {
     const { io, current, saves } = memIO();
     const store = new ConfigStore(io);
 
-    store.mutate.agent.setGraceTurns(9);
-    store.mutate.agent.setOutputThinkingBufferSize(128);
+    store.mutate.agent.setForceBackground(true);
     store.mutate.concurrency.setDefault(8);
 
-    expect(saves).toHaveLength(3);
-    expect(current().agent.graceTurns).toBe(9);
-    expect(current().agent.outputThinkingBufferSize).toBe(128);
+    expect(saves).toHaveLength(2);
+    expect(current().agent.forceBackground).toBe(true);
     expect(current().concurrency).toEqual({ default: 8 });
   });
 
@@ -295,8 +290,8 @@ describe("ConfigStore persistence and manager effects", () => {
       load: () => structuredClone(config),
       save: () => { throw new Error("disk full"); },
     });
-    expect(() => store.mutate.agent.setGraceTurns(20)).toThrow("disk full");
-    expect(store.agent.graceTurns).toBe(6);
+    expect(() => store.mutate.agent.setForceBackground(true)).toThrow("disk full");
+    expect(store.agent.forceBackground).toBe(false);
   });
 
   it("preserves an independent concurrent change during a transactional update", () => {
@@ -307,6 +302,10 @@ describe("ConfigStore persistence and manager effects", () => {
       update: (change) => {
         const latest = structuredClone(disk);
         latest.agent.forceBackground = true;
+        latest.agent.concurrentModel = "provider/concurrent";
+        latest.agent.concurrentNull = null;
+        latest.agent.concurrentNumber = 42;
+        latest.agent.concurrentBoolean = true;
         change(latest);
         disk = structuredClone(latest);
         return { config: latest, health: "healthy", canRepair: false };
@@ -317,6 +316,10 @@ describe("ConfigStore persistence and manager effects", () => {
     store.mutate.concurrency.setDefault(8);
 
     expect(disk.agent.forceBackground).toBe(true);
+    expect(disk.agent.concurrentModel).toBe("provider/concurrent");
+    expect(disk.agent.concurrentNull).toBeNull();
+    expect(disk.agent).not.toHaveProperty("concurrentNumber");
+    expect(disk.agent).not.toHaveProperty("concurrentBoolean");
     expect(disk.concurrency).toEqual({ default: 8 });
     expect(store.agent.forceBackground).toBe(true);
   });
@@ -344,11 +347,4 @@ describe("ConfigStore lifecycle and session overrides", () => {
     expect(retentions).toEqual([]);
   });
 
-  it("persists output-log buffering without a presentation dependency", () => {
-    const { io, current } = memIO();
-    const store = new ConfigStore(io);
-    store.mutate.agent.setOutputThinkingBufferSize(200);
-    expect(current().agent.outputThinkingBufferSize).toBe(200);
-    expect(store.agent.outputThinkingBufferSize).toBe(200);
-  });
 });

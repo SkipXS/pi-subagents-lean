@@ -141,7 +141,6 @@ Subagent-Sessions dürfen die Extension weiterhin isoliert laden, aber sie erhal
 - atomare Annahme eines Root-Auftrags;
 - Modell-, Thinking-, Tool-, Skill- und Extension-Auflösung;
 - Worktree-Validierung;
-- Turn- und Token-Limits;
 - Usage-Erfassung;
 - Output-Logs;
 - Background-Zustellung über `sendMessage()`;
@@ -227,8 +226,6 @@ Diese Phase ist eine interne Vereinfachung und keine Entfernung des Features.
   Retry-Pfad ist nicht Bestandteil des Vertrags.
 - `refreshActiveSessions`, `SessionRevision` und der alte Viewer-Cadence-Pfad
   samt ausschließlich zugehöriger Tests sind entfernt.
-- `defaultMaxTurns` ist keine ConfigStore- oder Typ-API mehr. `config-io` liest
-  alte Dateien weiterhin tolerant und droppt den Legacy-Key beim Normalisieren.
 - Stale Präsentationskommentare, Testnamen, Fixtures und historische TUI-
   Arbeitsanweisungen sind bereinigt; historische Changelog-Einträge bleiben.
 - Paketinhalt, direkte Abhängigkeiten, Exporte und stale Strings wurden geprüft;

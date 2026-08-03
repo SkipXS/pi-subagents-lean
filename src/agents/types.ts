@@ -32,9 +32,6 @@ export interface AgentConfig {
   preloadSkills?: string[] | false;
   model?: string;
   thinkingLevel?: ThinkingLevel;
-  maxTurns?: number;
-  /** Max output tokens per LLM response. Passed to provider as max_tokens or max_completion_tokens. */
-  maxTokens?: number;
   systemPrompt: string;
 
   /** true = this is an embedded default agent (informational) */
@@ -51,6 +48,5 @@ export interface AgentInvocation {
   /** Resolved provider/model id retained internally for queued control rows. */
   modelKey?: string;
   thinkingLevel?: ThinkingLevel;
-  maxTurns?: number;
   runInBackground?: boolean;
 }

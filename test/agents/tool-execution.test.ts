@@ -38,7 +38,7 @@ const {
   liveStoreAgent,
 } = vi.hoisted(() => ({
   runtimeSettingsSnapshot: { current: undefined as any },
-  liveStoreAgent: { current: { graceTurns: 5, forceBackground: false } },
+  liveStoreAgent: { current: { forceBackground: false } },
   mockValidateWorktreePath: vi.fn(),
   mockRevalidateWorktreePath: vi.fn(async (_pi: unknown, path: string): Promise<WorktreeValidationResult> => ({
     ok: true, resolvedPath: path, worktreeRoot: path, label: "feature",
@@ -48,9 +48,9 @@ const {
   mockDiscoverNewAgents: vi.fn(),
   mockResolveWorktreeAgent: vi.fn((type: string) => ({
     type,
-    config: { maxTurns: 25, thinkingLevel: undefined },
+    config: { thinkingLevel: undefined },
   })),
-  mockResolveAgentCatalog: vi.fn(async () => new Map<string, any>([["general-purpose", { maxTurns: 25, thinkingLevel: undefined }]])),
+  mockResolveAgentCatalog: vi.fn(async () => new Map<string, any>([["general-purpose", { thinkingLevel: undefined }]])),
   mockModelFor: vi.fn((_: string, parentModelId: string, agentConfig?: any) => agentConfig?.model ?? parentModelId),
   mockModelSettingFor: vi.fn((_: string, parentModelId: string, agentConfig?: any, explicitModel?: string) => ({
     value: explicitModel ?? agentConfig?.model ?? parentModelId,
@@ -66,10 +66,8 @@ const {
       agentConfig: intent.agentConfig,
       model: intent.model,
       invocation: intent.invocation,
-      maxTurns: intent.maxTurns,
       thinkingLevel: intent.thinkingLevel,
       modelKey: intent.modelKey,
-      graceTurns: intent.graceTurns,
       worktreePath: intent.worktreePath,
       worktreeLabel: intent.worktreeLabel,
       worktreeParentCwd: intent.worktreeParentCwd,
@@ -97,7 +95,7 @@ vi.mock("../../src/spawn/worktree-validator.js", () => ({
 
 vi.mock("../../src/agents/agent-types.js", () => ({
   resolveType: vi.fn((type: string) => type),
-  getAgentConfig: vi.fn(() => ({ maxTurns: 25, thinkingLevel: undefined })),
+  getAgentConfig: vi.fn(() => ({ thinkingLevel: undefined })),
   discoverNewAgents: mockDiscoverNewAgents,
   resolveWorktreeAgent: mockResolveWorktreeAgent,
   resolveAgentCatalog: mockResolveAgentCatalog,
@@ -163,7 +161,7 @@ import * as utils from "../../src/utils.js";
 
 afterEach(() => {
   runtimeSettingsSnapshot.current = undefined;
-  liveStoreAgent.current = { graceTurns: 5, forceBackground: false };
+  liveStoreAgent.current = { forceBackground: false };
 });
 
 /* ------------------------------------------------------------------ */
@@ -318,7 +316,7 @@ describe("executeAgentTool — explicit agent type", () => {
 
   it("uses a detached runtime snapshot for model and thinking resolution", async () => {
     runtimeSettingsSnapshot.current = {
-      agent: { graceTurns: 5 },
+      agent: {},
       modelFor: vi.fn(() => "legacy/model"),
       thinkingSettingFor: vi.fn(() => ({ value: "low", source: "config-global" })),
     };
@@ -327,7 +325,7 @@ describe("executeAgentTool — explicit agent type", () => {
       id: "legacy-snapshot", result: "done",
       display: { type: "general-purpose", description: "Test agent" },
       lifecycle: { status: "completed", startedAt: 0, completedAt: 1 }, execution: {},
-      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
     });
 
     const result = await executeAgentTool("legacy-snapshot", makeParams(), undefined, undefined, ctx);
@@ -345,7 +343,7 @@ describe("executeAgentTool — explicit agent type", () => {
       display: { type: "general-purpose", description: "Test agent" },
       lifecycle: { status: "completed", startedAt: 0, completedAt: 1 },
       execution: { session: { model, thinkingLevel: "low" } },
-      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
     };
     mockGetRecord.mockReturnValueOnce(record);
     (utils.findModelInRegistry as any).mockReturnValueOnce(model);
@@ -385,7 +383,7 @@ describe("executeAgentTool — explicit agent type", () => {
       id: "agent-settings", result: "done",
       display: { type: "general-purpose", description: "Test agent" },
       lifecycle: { status: "completed", startedAt: 0, completedAt: 1 }, execution: {},
-      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
     };
     mockGetRecord.mockReturnValueOnce(record);
     mockModelFor.mockReturnValueOnce("settings/model");
@@ -441,7 +439,7 @@ describe("executeAgentTool — explicit agent type", () => {
         display: { type: "general-purpose", description: "Test agent" },
         lifecycle: { status, startedAt: 0, completedAt: 1 },
         execution: { promise: Promise.resolve("partial response") },
-        stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+        stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
       });
 
       const result = await executeAgentTool(`terminal-${status}`, makeParams(), undefined, undefined, ctx);
@@ -491,7 +489,6 @@ describe("executeAgentTool — worktree_path validation", () => {
       execution: { promise: Promise.resolve("done") },
       stats: {
         lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-        toolUses: 0,
         compactionCount: 0,
       },
     });
@@ -523,7 +520,6 @@ describe("executeAgentTool — worktree_path validation", () => {
     expect(mockSpawn.mock.calls[0][4].thinkingLevel).toBe("high");
     expect(mockSpawn.mock.calls[0][4].invocation).toMatchObject({
       thinkingLevel: "high",
-      maxTurns: 25,
     });
   });
 
@@ -549,7 +545,6 @@ describe("executeAgentTool — worktree_path validation", () => {
       execution: {},
       stats: {
         lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-        toolUses: 0,
         compactionCount: 0,
       },
     };
@@ -576,7 +571,6 @@ describe("executeAgentTool — worktree_path validation", () => {
       execution: {},
       stats: {
         lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-        toolUses: 0,
         compactionCount: 0,
       },
     };
@@ -619,7 +613,7 @@ describe("executeAgentTool — worktree_path validation", () => {
     });
     ctx.isProjectTrusted = () => true;
     mockResolveAgentCatalog.mockResolvedValueOnce(new Map([[
-      "general-purpose", { model: "openai/gpt-4o", thinkingLevel: "high", maxTurns: 9 },
+      "general-purpose", { model: "openai/gpt-4o", thinkingLevel: "high" },
     ]]));
     const utils = await import("../../src/utils.js");
     (utils.findModelInRegistry as any).mockReturnValueOnce({ provider: "openai", id: "gpt-4o", reasoning: true });
@@ -800,8 +794,6 @@ describe("executeAgentTool — worktree_path validation", () => {
       execution: { promise: Promise.resolve("Agent completed successfully") },
       stats: {
         lifetimeUsage: { input: 100, output: 50, cacheWrite: 0, cost: 0.01 },
-        toolUses: 3,
-        turnCount: 2,
         compactionCount: 0,
       },
     });
@@ -847,7 +839,6 @@ describe("executeAgentTool — worktree_path with background spawn", () => {
       execution: {},
       stats: {
         lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-        toolUses: 0,
         compactionCount: 0,
       },
     });
@@ -881,7 +872,6 @@ describe("executeAgentTool — worktree_path with background spawn", () => {
       execution: {},
       stats: {
         lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-        toolUses: 0,
         compactionCount: 0,
       },
     });
@@ -932,8 +922,6 @@ describe("executeAgentTool — worktree_path discovery integration", () => {
       execution: { promise: Promise.resolve("Agent completed successfully") },
       stats: {
         lifetimeUsage: { input: 100, output: 50, cacheWrite: 0, cost: 0.01 },
-        toolUses: 3,
-        turnCount: 2,
         compactionCount: 0,
       },
     });
@@ -948,7 +936,7 @@ describe("executeAgentTool — worktree_path discovery integration", () => {
     });
     ctx.isProjectTrusted = () => true;
     mockResolveAgentCatalog.mockResolvedValueOnce(new Map([[
-      "feature-reviewer", { maxTurns: 25, thinkingLevel: undefined },
+      "feature-reviewer", { thinkingLevel: undefined },
     ]]));
 
     await executeAgentTool(

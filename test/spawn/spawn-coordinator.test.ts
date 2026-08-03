@@ -51,7 +51,6 @@ vi.mock("../../src/config/config-io.js", () => ({
   loadConfig: vi.fn(() => ({ agent: { default: null, forceBackground: false }, concurrency: { default: 4 } })),
   saveConfigAtomic: vi.fn(),
   DEFAULT_CONFIG: { agent: { default: null, forceBackground: false }, concurrency: { default: 4 } },
-  DEFAULT_GRACE_TURNS: 6,
 }));
 
 // Hoist mock pi so shell mock can return it
@@ -68,7 +67,7 @@ vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
   getStore: () => ({
     createSubagentRuntimeSettings: () => ({
-      agent: { graceTurns: 6, forceBackground: false, showCost: false },
+      agent: { forceBackground: false, showCost: false },
       modelFor: (_type: string, parent: string, config?: { model?: string }) => config?.model ?? parent,
       thinkingSettingFor: () => ({ value: undefined }),
     }),
@@ -89,9 +88,7 @@ function makeMockManager() {
         execution: { promise: Promise.resolve("done") },
         stats: {
           lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-          toolUses: 0,
-          turnCount: 1,
-          maxTurns: options.maxTurns,
+
           compactionCount: 0,
           executions: [{
             id: `${id}-execution`,
@@ -164,7 +161,7 @@ describe("SpawnCoordinator", () => {
       type: "builder",
       prompt: "do something",
       description: "Test spawn",
-      graceTurns: 6,
+
       runInBackground: true,
     });
 
@@ -183,7 +180,7 @@ describe("SpawnCoordinator", () => {
       type: "builder",
       prompt: "do something",
       description: "Test parent abort forwarding",
-      graceTurns: 6,
+
       runInBackground: true,
       signal,
     });
@@ -203,7 +200,7 @@ describe("SpawnCoordinator", () => {
         type: "builder",
         prompt: "do something",
         description: "Already cancelled",
-        graceTurns: 6,
+
         runInBackground: true,
         signal: parent.signal,
       });
@@ -233,8 +230,6 @@ describe("SpawnCoordinator", () => {
       tools: ["read"],
       extensions: ["a-extension"],
       skills: ["a-skill"],
-      maxTurns: 3,
-      maxTokens: 200,
     } as any;
 
     await coordinator.spawn(mockPi, ctx, {
@@ -242,7 +237,7 @@ describe("SpawnCoordinator", () => {
       prompt: "do something",
       description: "Test config snapshot",
       agentConfig: config,
-      graceTurns: 6,
+
       runInBackground: true,
     });
     config.registeredTools.push("bash");
@@ -255,8 +250,6 @@ describe("SpawnCoordinator", () => {
       tools: ["read"],
       extensions: ["a-extension"],
       skills: ["a-skill"],
-      maxTurns: 3,
-      maxTokens: 200,
     }));
     expect(snapshot).not.toBe(config);
   });
@@ -267,7 +260,7 @@ describe("SpawnCoordinator", () => {
       type: "builder",
       prompt: "do something",
       description: "Test foreground",
-      graceTurns: 6,
+
       runInBackground: false,
     });
 
@@ -292,7 +285,7 @@ describe("SpawnCoordinator", () => {
       prompt: "do something",
       description: "Test",
       thinkingLevel: "max",
-      graceTurns: 6,
+
       invocation: { thinkingLevel: "max" },
       runInBackground: true,
     });
@@ -310,7 +303,7 @@ describe("SpawnCoordinator", () => {
       type: "builder",
       prompt: "do something",
       description: "Test bg",
-      graceTurns: 6,
+
       runInBackground: true,
     });
 
@@ -323,7 +316,7 @@ describe("SpawnCoordinator", () => {
       type: "builder",
       prompt: "do something",
       description: "Test fg",
-      graceTurns: 6,
+
       runInBackground: false,
     });
 
@@ -338,7 +331,7 @@ describe("SpawnCoordinator", () => {
         type: "builder",
         prompt: "do something",
         description: "Test",
-        graceTurns: 6,
+
         runInBackground: true,
       });
 
@@ -359,10 +352,10 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const r1 = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task 1", description: "Test 1", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task 1", description: "Test 1", runInBackground: true,
       });
       const r2 = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task 2", description: "Test 2", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task 2", description: "Test 2", runInBackground: true,
       });
 
       r1.record.lifecycle.status = "completed";
@@ -380,7 +373,7 @@ describe("SpawnCoordinator", () => {
     it("ignores an accidental nudge for a running record and delivers once after completion", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Still running", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Still running", runInBackground: true,
       });
 
       coordinator.scheduleNudge(result.agentId);
@@ -409,10 +402,10 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const r1 = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task 1", description: "Test 1", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task 1", description: "Test 1", runInBackground: true,
       });
       const r2 = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task 2", description: "Test 2", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task 2", description: "Test 2", runInBackground: true,
       });
 
       r1.record.lifecycle.status = "completed";
@@ -441,8 +434,6 @@ describe("SpawnCoordinator", () => {
         lifecycle: { status: "running", startedAt: Date.now(), settled: false },
         stats: {
           lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-          toolUses: 0,
-          turnCount: 1,
           compactionCount: 0,
         },
         execution: {},
@@ -501,13 +492,13 @@ describe("SpawnCoordinator", () => {
         responseText: "initial",
         session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() },
         aborted: false,
-        turnLimited: false,
+
       });
       mockExecuteAgentTurn.mockReturnValueOnce({
-        then: (resolve: (result: { responseText: string; aborted: boolean; turnLimited: boolean }) => unknown) => {
+        then: (resolve: (result: { responseText: string; aborted: boolean }) => unknown) => {
           // A conforming thenable may invoke the continuation synchronously;
           // this completes before SpawnCoordinator can install its claim.
-          resolve({ responseText: "sync continuation", aborted: false, turnLimited: false });
+          resolve({ responseText: "sync continuation", aborted: false });
           return { catch: () => undefined };
         },
         catch: () => undefined,
@@ -547,7 +538,7 @@ describe("SpawnCoordinator", () => {
         responseText: "initial",
         session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() },
         aborted: false,
-        turnLimited: false,
+
       });
 
       try {
@@ -567,8 +558,6 @@ describe("SpawnCoordinator", () => {
         expect(result.record.stats.executions?.at(-1)).toMatchObject({
           status: "error",
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
-          turnCount: 0,
-          toolUses: 0,
           compactionCount: 0,
         });
         expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
@@ -676,8 +665,6 @@ describe("SpawnCoordinator", () => {
         result: "bg result",
         stats: {
           lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-          toolUses: 0,
-          turnCount: 1,
           compactionCount: 0,
           executions: [{
             id: "exec-1", mode: "background", status: "running", startedAt: Date.now(),
@@ -709,21 +696,19 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const execution = {
         id: "exec-1", mode: "background", status: "completed", startedAt: 10_000, completedAt: 11_250,
-        turnCount: 2, toolUses: 3, compactionCount: 1,
+        compactionCount: 1,
         usage: { input: 20, output: 6, cacheWrite: 1, cacheRead: 4, cost: 0.02 },
       };
       const record = continuedRecord({
         result: "bg result",
         stats: {
           lifetimeUsage: { input: 50, output: 12, cacheWrite: 4, cost: 0.05 },
-          toolUses: 9,
-          turnCount: 7,
           compactionCount: 3,
           cacheRead: 9,
           executions: [
             {
               id: "exec-0", prompt: "initial", mode: "foreground", status: "completed",
-              startedAt: Date.now(), turnCount: 5, toolUses: 6, compactionCount: 2,
+              startedAt: Date.now(), compactionCount: 2,
               usage: { input: 30, output: 6, cacheWrite: 3, cacheRead: 5, cost: 0.03 },
             },
             execution,
@@ -748,8 +733,6 @@ describe("SpawnCoordinator", () => {
       const details = mockPi.sendMessage.mock.calls[0]![0].details;
       // The continuation delivery exposes the exact execution summary deltas,
       // never the cumulative lifetime totals on the record.
-      expect(details.turnCount).toBe(2);
-      expect(details.toolUses).toBe(3);
       expect(details.input).toBe(20);
       expect(details.output).toBe(6);
       expect(details.cacheRead).toBe(4);
@@ -759,7 +742,7 @@ describe("SpawnCoordinator", () => {
       expect(details.compactionCount).toBe(1);
       expect(details.durationMs).toBe(1250);
       expect(details.currentExecution).toMatchObject({
-        mode: "background", status: "completed", turnCount: 2, toolUses: 3, compactionCount: 1,
+        mode: "background", status: "completed", compactionCount: 1,
       });
       // No execution ids or history leak into delivery details.
       expect((details.currentExecution as Record<string, unknown>).id).toBeUndefined();
@@ -797,15 +780,13 @@ describe("SpawnCoordinator", () => {
           responseText: "done",
           session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() },
           aborted: false,
-          turnLimited: false,
+
         });
         const firstId = realManager.spawn(mockPi, ctx, "builder", "first", { description: "first" });
         await realManager.getRecord(firstId)!.execution.promise;
         const firstRecord = realManager.getRecord(firstId)!;
         firstRecord.stats.lifetimeUsage = { input: 11, output: 22, cacheWrite: 33, cost: 0.44 };
         firstRecord.stats.cacheRead = 55;
-        firstRecord.stats.toolUses = 6;
-        firstRecord.stats.turnCount = 7;
         firstRecord.stats.compactionCount = 8;
 
         const blocker = new Promise<any>(() => {});
@@ -835,8 +816,6 @@ describe("SpawnCoordinator", () => {
         expect(record.stats.executions![1]).toMatchObject({
           status: "stopped",
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
-          turnCount: 0,
-          toolUses: 0,
           compactionCount: 0,
         });
         const deliveryDetails = mockPi.sendMessage.mock.calls[0]![0].details;
@@ -847,11 +826,9 @@ describe("SpawnCoordinator", () => {
           cacheRead: 0,
           cacheWrite: 0,
           cost: 0,
-          turnCount: 0,
-          toolUses: 0,
           compactions: 0,
           compactionCount: 0,
-          currentExecution: { status: "stopped", turnCount: 0, toolUses: 0, compactionCount: 0 },
+          currentExecution: { status: "stopped", compactionCount: 0 },
         });
         expect(deliveryDetails.durationMs).toBeGreaterThanOrEqual(0);
       } finally {
@@ -865,7 +842,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Test", runInBackground: true,
       });
 
       // Simulate completion
@@ -887,7 +864,7 @@ describe("SpawnCoordinator", () => {
     it("delivers a root completion once even when the manager repeats its completion callback", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "duplicate completion", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "duplicate completion", runInBackground: true,
       });
       result.record.lifecycle.status = "completed";
 
@@ -903,7 +880,7 @@ describe("SpawnCoordinator", () => {
       mockIsIdle.mockReturnValue(false);
       const coordinator = new SpawnCoordinator(manager as any);
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Test", runInBackground: true,
       });
 
       result.record.lifecycle.status = "completed";
@@ -933,7 +910,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Test", runInBackground: true,
       });
 
       // Make sendMessage throw (simulates stale pi)
@@ -952,7 +929,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Test", runInBackground: true,
       });
 
       result.record.lifecycle.status = "completed";
@@ -973,7 +950,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Test", runInBackground: true,
       });
       result.record.lifecycle.status = "completed";
       coordinator.scheduleNudge(result.agentId);
@@ -992,7 +969,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Test", runInBackground: true,
       });
 
       // Coordinator no longer stores pi
@@ -1009,7 +986,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Test", runInBackground: true,
       });
 
       // Simulate shell being updated (e.g. after reload)
@@ -1048,7 +1025,6 @@ describe("SpawnCoordinator", () => {
         { status: "error", expected: "error" },
         { status: "aborted", expected: "aborted" },
         { status: "stopped", expected: "stopped" },
-        { status: "turn_limited", expected: "turn_limited" },
       ];
 
       for (const { status, expected } of statuses) {
@@ -1056,7 +1032,7 @@ describe("SpawnCoordinator", () => {
         const coordinator = new SpawnCoordinator(manager as any);
 
         const result = await coordinator.spawn(mockPi, ctx, {
-          type: "builder", prompt: "task", description: "Test", graceTurns: 6, runInBackground: true,
+          type: "builder", prompt: "task", description: "Test", runInBackground: true,
         });
 
         manager.getRecord(result.agentId).lifecycle.status = status;
@@ -1077,7 +1053,7 @@ describe("SpawnCoordinator", () => {
     it("foreground spawn marks the result as consumed before returning", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "do something", description: "Test fg", graceTurns: 6, runInBackground: false,
+        type: "builder", prompt: "do something", description: "Test fg", runInBackground: false,
       });
 
       expect(result.record.lifecycle.resultConsumed).toBe(true);
@@ -1086,7 +1062,7 @@ describe("SpawnCoordinator", () => {
     it("background nudge emission marks the result as consumed", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test bg", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Test bg", runInBackground: true,
       });
       const record = manager.getRecord(result.agentId);
       // Reset any sendMessage impl leaked from other tests so this test exercises
@@ -1107,7 +1083,7 @@ describe("SpawnCoordinator", () => {
     it("marks delivery failed when Pi is unavailable without consuming the result", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "No Pi", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "No Pi", runInBackground: true,
       });
       const record = manager.getRecord(result.agentId);
       mockGetPiInstance.mockReturnValue(null);
@@ -1124,7 +1100,7 @@ describe("SpawnCoordinator", () => {
     it("marks delivery failed and preserves the result when nudge delivery throws", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test bg", graceTurns: 6, runInBackground: true,
+        type: "builder", prompt: "task", description: "Test bg", runInBackground: true,
       });
       const record = manager.getRecord(result.agentId);
 
@@ -1145,7 +1121,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const parent = new AbortController();
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Parent abort after complete", graceTurns: 6,
+        type: "builder", prompt: "task", description: "Parent abort after complete",
         runInBackground: true, signal: parent.signal,
       });
 
@@ -1170,7 +1146,7 @@ describe("SpawnCoordinator", () => {
 
       try {
         const result = await coordinator.spawn(mockPi, ctx, {
-          type: "builder", prompt: "task", description: "Parent abort", graceTurns: 6,
+          type: "builder", prompt: "task", description: "Parent abort",
           runInBackground: true, signal: parent.signal,
         });
         parent.abort();
@@ -1192,7 +1168,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const parent = new AbortController();
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "abort", graceTurns: 6, runInBackground: true, signal: parent.signal,
+        type: "builder", prompt: "task", description: "abort", runInBackground: true, signal: parent.signal,
       });
       result.record.lifecycle.status = "completed";
       notifyCompletion(coordinator, result.record);
@@ -1204,7 +1180,7 @@ describe("SpawnCoordinator", () => {
 
       const acceptedParent = new AbortController();
       const accepted = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "accepted", graceTurns: 6, runInBackground: true, signal: acceptedParent.signal,
+        type: "builder", prompt: "task", description: "accepted", runInBackground: true, signal: acceptedParent.signal,
       });
       accepted.record.lifecycle.status = "completed";
       mockPi.sendMessage.mockReset();
@@ -1220,7 +1196,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const parent = new AbortController();
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "dispose", graceTurns: 6, runInBackground: true, signal: parent.signal,
+        type: "builder", prompt: "task", description: "dispose", runInBackground: true, signal: parent.signal,
       });
       coordinator.dispose();
       result.record.lifecycle.status = "completed";
@@ -1236,7 +1212,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const parent = new AbortController();
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "evict", graceTurns: 6, runInBackground: true, signal: parent.signal,
+        type: "builder", prompt: "task", description: "evict", runInBackground: true, signal: parent.signal,
       });
       result.record.lifecycle.status = "completed";
       mockGetPiInstance.mockReturnValue(null);
@@ -1260,12 +1236,12 @@ describe("SpawnCoordinator", () => {
         responseText: "done",
         session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() },
         aborted: false,
-        turnLimited: false,
+
       });
       mockGetPiInstance.mockReturnValue(null);
 
       const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "manager shutdown", graceTurns: 6, runInBackground: true, signal: parent.signal,
+        type: "builder", prompt: "task", description: "manager shutdown", runInBackground: true, signal: parent.signal,
       });
       await result.record.execution.promise;
       vi.advanceTimersByTime(200);

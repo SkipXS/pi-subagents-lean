@@ -57,7 +57,6 @@ function record(
     stats: {
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
       cacheRead: 0,
-      toolUses: 0,
       compactionCount: 0,
       executions: options.prompt ? [{ prompt: options.prompt, mode: "foreground", status }] : [],
     },

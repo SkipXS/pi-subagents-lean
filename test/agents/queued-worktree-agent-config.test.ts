@@ -17,7 +17,7 @@ vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
   getStore: () => ({
     createSubagentRuntimeSettings: () => ({
-      agent: { graceTurns: 6, forceBackground: false },
+      agent: { forceBackground: false },
       modelFor: (_type: string, parent: string, config?: { model?: string }) => config?.model ?? parent,
       thinkingSettingFor: () => ({ value: undefined }),
     }),
@@ -39,7 +39,6 @@ function runResult() {
     responseText: "done",
     session: { messages: [], dispose: vi.fn() },
     aborted: false,
-    turnLimited: false,
   };
 }
 
@@ -99,7 +98,6 @@ describe("queued worktree agent configuration", () => {
         description: "queued A",
         modelKey: "test/model",
         agentConfig: a!.config,
-        graceTurns: 1,
         runInBackground: true,
       });
 

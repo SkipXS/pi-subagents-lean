@@ -1,8 +1,7 @@
 import type { AgentLifecycle, AgentStatus, StopInitiator } from "./types.js";
 
 const STATUS_NOTES: Partial<Record<AgentStatus, string>> = {
-  aborted: "hit the turn limit before completion; output may be incomplete",
-  turn_limited: "wrapped up at the turn limit — output may be partial",
+  aborted: "aborted before completion; output may be incomplete",
 };
 
 const STOP_NOTES: Record<StopInitiator, string> = {

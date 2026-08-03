@@ -10,7 +10,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import { fakeCtx, fakePi as makeFakePi } from "../fixtures.ts";
 import type { AgentConfig } from "../../src/agents/types.js";
-import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 const fakePi = makeFakePi();
@@ -91,7 +90,6 @@ vi.mock("../../src/shell.js", () => ({
     const agent = {
       includeContextFiles: mockModules.mockIncludeContextFiles,
       systemPromptMode: mockModules.mockSystemPromptMode,
-      graceTurns: 6,
       forceBackground: false,
       showCost: false,
       defaultModel: null,
@@ -1405,255 +1403,6 @@ describe("tools field — extension tool names and ext/all syntax", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  runAgent — grace turns                                            */
-/* ------------------------------------------------------------------ */
-
-describe("runAgent — grace turns", () => {
-  beforeEach(() => {
-    resetMocks();
-    fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
-  });
-
-  /**
-   * Helper: create a mock session with a pending prompt (doesn't resolve
-   * until resolvePrompt() is called). This allows firing turn_end events
-   * while the agent is still running.
-   */
-  function createPendingPromptSession() {
-    const session = createMockSession();
-    let resolvePrompt!: () => void;
-    session.prompt = vi.fn(
-      () => new Promise<void>((r) => {
-        resolvePrompt = r;
-      }),
-    );
-    return { session, resolvePrompt: () => resolvePrompt() };
-  }
-
-  it("uses default grace turns (6) when not specified in options", async () => {
-    const { session, resolvePrompt } = createPendingPromptSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    // maxTurns=1, no graceTurns → default 6 → steer at turn 1, abort at turn 1+6=7
-    const promise = runAgent(fakeCtx(), "test-agent", "do something", {
-      pi: fakePi,
-      maxTurns: 1,
-    });
-
-    // Wait for the session to be created and prompt to be called
-    await vi.waitFor(() => {
-      expect(session.prompt).toHaveBeenCalled();
-    });
-
-    // Fire 6 turns (within default grace period) — should not abort
-    for (let i = 0; i < 6; i++) {
-      session._getListeners().forEach((fn: any) => fn({ type: "turn_end" }));
-    }
-
-    // The steer should have been called at turn 1
-    expect(session.steer).toHaveBeenCalled();
-    // Should not abort within grace period
-    expect(session.abort).not.toHaveBeenCalled();
-
-    // Now fire the 7th turn — should abort (maxTurns=1 + graceTurns=6 = 7)
-    session._getListeners().forEach((fn: any) => fn({ type: "turn_end" }));
-    expect(session.abort).toHaveBeenCalled();
-
-    resolvePrompt();
-    const result = await promise;
-    expect(result.aborted).toBe(true);
-  });
-
-  it("uses custom grace turns from options", async () => {
-    const { session, resolvePrompt } = createPendingPromptSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    // maxTurns=2, graceTurns=3 → steer at turn 2, abort at turn 2+3=5
-    const promise = runAgent(fakeCtx(), "test-agent", "do something", {
-      pi: fakePi,
-      maxTurns: 2,
-      graceTurns: 3,
-    });
-
-    await vi.waitFor(() => {
-      expect(session.prompt).toHaveBeenCalled();
-    });
-
-    // Fire 4 turns (within custom grace period) — should not abort
-    for (let i = 0; i < 4; i++) {
-      session._getListeners().forEach((fn: any) => fn({ type: "turn_end" }));
-    }
-
-    // The steer should have been called at turn 2
-    expect(session.steer).toHaveBeenCalled();
-    expect(session.abort).not.toHaveBeenCalled();
-
-    // Now fire the 5th turn — should abort (maxTurns=2 + graceTurns=3 = 5)
-    session._getListeners().forEach((fn: any) => fn({ type: "turn_end" }));
-    expect(session.abort).toHaveBeenCalled();
-
-    resolvePrompt();
-    const result = await promise;
-    expect(result.aborted).toBe(true);
-  });
-
-  it("graceTurns=0 allows one turn after steer then aborts", async () => {
-    const { session, resolvePrompt } = createPendingPromptSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    // maxTurns=2, graceTurns=0 → steer at turn 2, abort at turn 3
-    // (steer and abort can't fire on same turn due to if/else-if structure)
-    const promise = runAgent(fakeCtx(), "test-agent", "do something", {
-      pi: fakePi,
-      maxTurns: 2,
-      graceTurns: 0,
-    });
-
-    await vi.waitFor(() => {
-      expect(session.prompt).toHaveBeenCalled();
-    });
-
-    // Fire 2 turns — steer fires at turn 2, no abort yet
-    for (let i = 0; i < 2; i++) {
-      session._getListeners().forEach((fn: any) => fn({ type: "turn_end" }));
-    }
-
-    expect(session.steer).toHaveBeenCalled();
-    expect(session.abort).not.toHaveBeenCalled();
-
-    // Fire 1 more turn — abort fires at turn 3 (maxTurns + graceTurns = 2)
-    session._getListeners().forEach((fn: any) => fn({ type: "turn_end" }));
-    expect(session.abort).toHaveBeenCalled();
-
-    resolvePrompt();
-    const result = await promise;
-    expect(result.aborted).toBe(true);
-  });
-
-  it("agent completes gracefully within grace period", async () => {
-    const { session, resolvePrompt } = createPendingPromptSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    // maxTurns=1, graceTurns=5 → steer at turn 1, abort at turn 6
-    const promise = runAgent(fakeCtx(), "test-agent", "do something", {
-      pi: fakePi,
-      maxTurns: 1,
-      graceTurns: 5,
-    });
-
-    await vi.waitFor(() => {
-      expect(session.prompt).toHaveBeenCalled();
-    });
-
-    // Fire 3 turns (within grace period) — should steer but not abort
-    for (let i = 0; i < 3; i++) {
-      session._getListeners().forEach((fn: any) => fn({ type: "turn_end" }));
-    }
-
-    expect(session.steer).toHaveBeenCalled();
-    expect(session.abort).not.toHaveBeenCalled();
-
-    resolvePrompt();
-    const result = await promise;
-    expect(result.aborted).toBe(false);
-    expect(result.turnLimited).toBe(true);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  runAgent — maxTokens: front matter → provider payload             */
-/* ------------------------------------------------------------------ */
-
-describe("runAgent — maxTokens: front matter to provider payload", () => {
-  let session: ReturnType<typeof createMockSession>;
-
-  beforeEach(() => {
-    resetMocks();
-    fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
-
-    session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    session.agent = { onPayload: undefined };
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-  });
-
-  function makeMockModel(overrides = {}): Model<any> {
-    return {
-      id: "test-model",
-      name: "Test Model",
-      provider: "openai",
-      api: "openai-completions",
-      baseUrl: "https://test.api/v1",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128000,
-      maxTokens: 16384,
-      ...overrides,
-    } as Model<any>;
-  }
-
-  it("max_tokens in agent config ends up in the provider request payload", async () => {
-    mockModules.mockGetAgentConfig.mockReturnValue({
-      ...defaultAgentConfig,
-      maxTokens: 4096,
-    });
-
-    const model = makeMockModel({
-      id: "llama-3.1-8b",
-      name: "Llama 3.1 8B",
-      provider: "vllm",
-      baseUrl: "http://localhost:8000/v1",
-      compat: { maxTokensField: "max_tokens" },
-    });
-
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, model });
-
-    const rawPayload = {
-      model: "llama-3.1-8b",
-      messages: [{ role: "user", content: "do something" }],
-      stream: true,
-    };
-    const finalPayload = await session.agent.onPayload(rawPayload, model);
-
-    expect(finalPayload.max_tokens).toBe(4096);
-    expect(finalPayload.model).toBe("llama-3.1-8b");
-    expect(finalPayload.stream).toBe(true);
-  });
-
-  it("uses max_completion_tokens when the provider requires it", async () => {
-    mockModules.mockGetAgentConfig.mockReturnValue({
-      ...defaultAgentConfig,
-      maxTokens: 8192,
-    });
-
-    const model = makeMockModel({ compat: { maxTokensField: "max_completion_tokens" } });
-
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, model });
-
-    const finalPayload = await session.agent.onPayload(
-      { model: "some-model", messages: [{ role: "user", content: "do something" }] },
-      model,
-    );
-
-    expect(finalPayload.max_completion_tokens).toBe(8192);
-    expect(finalPayload.max_tokens).toBeUndefined();
-  });
-
-  it("no max_tokens injected when agent config omits it", async () => {
-    mockModules.mockGetAgentConfig.mockReturnValue({ ...defaultAgentConfig });
-
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, model: makeMockModel() });
-
-    expect(session.agent.onPayload).toBeUndefined();
-  });
-});
-
-/* ------------------------------------------------------------------ */
 /*  runAgent — context file gating (includeContextFiles)              */
 /* ------------------------------------------------------------------ */
 
@@ -2074,7 +1823,6 @@ describe("runAgent — agent config snapshot", () => {
       tools: ["read"],
       extensions: false,
       skills: false,
-      maxTurns: 2,
     };
     mockModules.mockGetConfig.mockImplementation(() => { throw new Error("registry config must not be read"); });
     mockModules.mockGetAgentConfig.mockImplementation(() => { throw new Error("registry agent must not be read"); });

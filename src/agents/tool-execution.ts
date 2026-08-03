@@ -254,8 +254,8 @@ export function buildAgentDetails(
     // Only the current execution's compact delta/result is exposed: never
     // execution history, execution ids, timestamps, or prior responses. The
     // initial spawn's summary stays lifetime-cumulative; every continuation
-    // reports the exact per-execution summary (usage/turn/tool/compaction
-    // deltas) instead of cumulative record totals.
+    // reports the exact per-execution usage/compaction deltas instead of
+    // cumulative record totals.
     const current = record.stats.executions?.at(-1);
     const continuation = current && (record.stats.executions?.length ?? 0) > 1 ? current : undefined;
     const usage = continuation?.usage;
@@ -263,9 +263,6 @@ export function buildAgentDetails(
       ? (continuation.completedAt !== undefined ? continuation.completedAt - continuation.startedAt : 0)
       : (record.lifecycle.completedAt ? record.lifecycle.completedAt - record.lifecycle.startedAt : 0);
 
-    details.turnCount = continuation?.turnCount ?? record.stats.turnCount;
-    details.maxTurns = record.stats.maxTurns;
-    details.toolUses = continuation?.toolUses ?? record.stats.toolUses;
     const terminal = record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
     // Terminal records retain manager-populated telemetry; their session may
     // already be disposed, so never perform a live branch read here.
@@ -328,8 +325,6 @@ export function buildAgentDetails(
         status: current.status,
         ...(current.responseText !== undefined ? { responseText: current.responseText } : {}),
         ...(current.usage !== undefined ? { usage: current.usage } : {}),
-        ...(current.turnCount !== undefined ? { turnCount: current.turnCount } : {}),
-        ...(current.toolUses !== undefined ? { toolUses: current.toolUses } : {}),
         ...(current.compactionCount !== undefined ? { compactionCount: current.compactionCount } : {}),
         ...(current.error !== undefined ? { error: current.error } : {}),
       };
@@ -440,7 +435,6 @@ export async function executeAgentTool(
   const prompt = params.prompt as string;
   const description = (params.description as string | undefined) || prompt.split("\n")[0].slice(0, 80) || prompt.slice(0, 80);
   const runInBackground = params.run_in_background as boolean | undefined;
-  const maxTurns = params.max_turns as number | undefined ?? agentConfig.maxTurns;
 
   // Worktree definitions are resolved above, then share the same explicit >
   // session > persisted > Markdown > global > parent precedence as all spawns.
@@ -456,7 +450,6 @@ export async function executeAgentTool(
   // Older detached stores have no snapshot, so capture their live settings at
   // the same boundary as the compatibility fallback.
   const runtimeAgentSettings = runtimeSettingsSnapshot?.agent ?? store.agent;
-  const graceTurns = runtimeAgentSettings.graceTurns;
   const forceBackground = runtimeAgentSettings.forceBackground;
   const shouldRunInBackground = runInBackground || forceBackground;
   const resolvedModelKey = runtimeSettingsSnapshot
@@ -521,9 +514,7 @@ export async function executeAgentTool(
       description,
       model,
       modelKey,
-      maxTurns,
       thinkingLevel,
-      graceTurns,
       worktreePath: validatedWorktreePath,
       worktreeLabel,
       worktreeParentCwd: validatedWorktreePath ? parentCwd : undefined,
@@ -532,7 +523,6 @@ export async function executeAgentTool(
         modelName,
         ...(modelKey !== undefined ? { modelKey } : {}),
         thinkingLevel,
-        maxTurns,
       },
       runtimeSettingsSnapshot,
       runInBackground: shouldRunInBackground,

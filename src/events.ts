@@ -34,7 +34,6 @@ export function ensureManagerAndCoordinator(): void {
       undefined,
       getStore().concurrency as unknown as ConstructorParameters<typeof AgentManager>[1],
       undefined,
-      getStore().agent.outputThinkingBufferSize,
     );
     setManager(manager);
     getStore().setDeps({ manager });

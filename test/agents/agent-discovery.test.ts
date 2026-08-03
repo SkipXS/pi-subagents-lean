@@ -103,8 +103,6 @@ skills: all
 thinking: high
 eco_model: openai/gpt-4o-mini
 eco_thinking: low
-max_turns: "50"
-max_tokens: "2048"
 delegate_to: [scout, reviewer]
 max_child_agents: "2"
 hidden: "false"
@@ -125,8 +123,6 @@ This is the system prompt body.
     expect(result).not.toHaveProperty("eco_thinking");
     expect(toAgentConfig(result)).not.toHaveProperty("ecoModel");
     expect(toAgentConfig(result)).not.toHaveProperty("ecoThinkingLevel");
-    expect(result.max_turns).toBe(50);
-    expect(result.max_tokens).toBe(2048);
     // Deprecated delegation frontmatter is tolerated but ignored.
     expect(toAgentConfig(result)).not.toHaveProperty("delegateTo");
     expect(toAgentConfig(result)).not.toHaveProperty("maxChildAgents");
@@ -150,8 +146,6 @@ Just a body.
     expect(result.extensions).toBeUndefined();
     expect(result.skills).toBeUndefined();
     expect(result.thinking).toBeUndefined();
-    expect(result.max_turns).toBeUndefined();
-    expect(result.max_tokens).toBeUndefined();
     expect(result.hidden).toBeUndefined();
     expect(result.systemPrompt).toBe("Just a body.");
     expect(result.source).toBe("project");
@@ -231,19 +225,6 @@ body
     const result = parseAgentFile(content, "user");
     expect(result.hidden).toBe(false);
   });
-
-  it("parses max_turns as number", () => {
-    const content = makeAgentMd({ max_turns: "10" });
-    const result = parseAgentFile(content, "user");
-    expect(result.max_turns).toBe(10);
-  });
-
-  it("parses max_tokens as number", () => {
-    const content = makeAgentMd({ max_tokens: "1024" });
-    const result = parseAgentFile(content, "user");
-    expect(result.max_tokens).toBe(1024);
-  });
-
 
   it("ignores unknown frontmatter fields", () => {
     const content = `---

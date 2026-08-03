@@ -2,7 +2,6 @@
 export const CONFIG_AGENT_NON_MODEL_KEYS = [
   "default",
   "forceBackground",
-  "graceTurns",
   "systemPromptMode",
   "includeContextFiles",
   "defaultThinking",
@@ -10,6 +9,5 @@ export const CONFIG_AGENT_NON_MODEL_KEYS = [
   "loadExtensionsImplicitly",
   "disableDefaultAgents",
   "orchestrationPrompt",
-  "outputThinkingBufferSize",
   "finishedRetentionMinutes",
 ];

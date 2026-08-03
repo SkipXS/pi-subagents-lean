@@ -6,10 +6,9 @@ import { parseAgentFile, toAgentConfig } from "../../src/agents/agent-discovery.
 import { CONFIG_AGENT_NON_MODEL_KEYS } from "../../src/config/types.ts";
 
 const expectedNonModelKeys = [
-  "default", "forceBackground", "graceTurns", "systemPromptMode", "includeContextFiles",
+  "default", "forceBackground", "systemPromptMode", "includeContextFiles",
   "defaultThinking", "loadSkillsImplicitly", "loadExtensionsImplicitly",
-  "disableDefaultAgents", "orchestrationPrompt", "outputThinkingBufferSize",
-  "finishedRetentionMinutes",
+  "disableDefaultAgents", "orchestrationPrompt", "finishedRetentionMinutes",
 ];
 
 describe("bundled agent and config contracts", () => {

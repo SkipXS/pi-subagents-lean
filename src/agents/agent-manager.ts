@@ -35,7 +35,6 @@ import {
   type SessionStatsContextUsage,
 } from "./usage.js";
 import { errorMessage } from "../utils.js";
-import { DEFAULT_GRACE_TURNS } from "../config/config-io.js";
 import { getSubagentRuntimeContext } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 
@@ -67,7 +66,6 @@ interface ConcurrencySlot {
 
 interface ExecutionBaseline {
   usage: AgentUsage;
-  toolUses: number;
   compactionCount: number;
 }
 
@@ -88,8 +86,6 @@ interface ContinueRequest {
   baseline: ExecutionBaseline;
   prompt: string;
   isBackground: boolean;
-  maxTurns?: number;
-  graceTurns?: number;
   signal?: AbortSignal;
   onToolActivity?: (activity: ToolActivity) => void;
   onTextDelta?: (delta: string, fullText: string) => void;
@@ -115,8 +111,6 @@ type QueueEntry = SpawnQueueEntry | ContinueQueueEntry;
 
 export interface ContinueOptions {
   isBackground?: boolean;
-  maxTurns?: number;
-  graceTurns?: number;
   signal?: AbortSignal;
   onToolActivity?: (activity: ToolActivity) => void;
   onTextDelta?: (delta: string, fullText: string) => void;
@@ -144,11 +138,6 @@ function updateCumulativeCacheHitRate(record: AgentRecord): void {
     : undefined;
 }
 
-function normalizeTurnBudget(value: number | undefined): number | undefined {
-  if (value == null || value === 0) return undefined;
-  return Math.max(1, value);
-}
-
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -173,7 +162,6 @@ export class AgentManager {
     onComplete?: OnAgentComplete,
     concurrency?: ConcurrencyConfig,
     onStart?: OnAgentStart,
-    private bufferSize: number = 0,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
@@ -258,12 +246,8 @@ export class AgentManager {
       execution: { abortController, promise: queuedPromise },
       stats: {
         lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-        toolUses: 0,
-        turnCount: 1,
         compactionCount: 0,
         cacheRead: 0,
-        maxTurns: normalizeTurnBudget(options.maxTurns ?? agentConfig?.maxTurns),
-        graceTurns: options.graceTurns ?? DEFAULT_GRACE_TURNS,
         contextStats: createContextStats(),
         compactionReasons: [],
         executions: [{
@@ -327,7 +311,7 @@ export class AgentManager {
     record.lifecycle.startedAt = Date.now();
 
     try {
-      record.execution.outputLog = new AgentOutputLog(id, prompt, undefined, this.bufferSize);
+      record.execution.outputLog = new AgentOutputLog(id, prompt);
       record.display.outputFile = record.execution.outputLog.path;
     } catch { /* output logs are optional telemetry */ }
 
@@ -341,21 +325,12 @@ export class AgentManager {
       agentConfig: options.agentConfig,
       runtimeSettings: options.runtimeSettings,
       model: options.model,
-      maxTurns: options.maxTurns,
-      maxTokens: options.maxTokens,
       thinkingLevel: options.thinkingLevel,
       cwd: options.worktreePath,
       worktreeParentCwd: options.worktreeParentCwd,
       worktreeSelectionPath: options.worktreeSelectionPath,
-      graceTurns: options.graceTurns,
       signal: record.execution.abortController!.signal,
       ...this.createRecordCallbacks(record, options, execution.id),
-      onTurnEnd: (turnCount) => {
-        if (!this.isActiveExecution(record, execution.id)) return;
-        record.stats.turnCount = turnCount;
-        execution.turnCount = turnCount;
-        options.onTurnEnd?.(turnCount);
-      },
       onTextDelta: (delta, fullText) => {
         if (!this.isActiveExecution(record, execution.id)) return;
         options.onTextDelta?.(delta, fullText);
@@ -371,9 +346,9 @@ export class AgentManager {
         options.onSessionCreated?.(session);
       },
     })
-      .then(({ responseText, session, aborted, turnLimited }) => {
+      .then(({ responseText, session, aborted }) => {
         if (this.agents.get(record.id) === record) record.execution.session = session;
-        this.finishTurnExecution(record, execution, { responseText, aborted, turnLimited }, concurrencySlot);
+        this.finishTurnExecution(record, execution, { responseText, aborted }, concurrencySlot);
         if (execution.mode === "foreground") execution.deliveredText = responseText;
         return responseText;
       })
@@ -381,7 +356,7 @@ export class AgentManager {
         this.finishTurnExecution(
           record,
           execution,
-          { responseText: "", aborted: false, turnLimited: false, error: errorMessage(err) },
+          { responseText: "", aborted: false, error: errorMessage(err) },
           concurrencySlot,
         );
         return "";
@@ -431,8 +406,6 @@ export class AgentManager {
       baseline,
       prompt,
       isBackground: options.isBackground === true,
-      maxTurns: options.maxTurns,
-      graceTurns: options.graceTurns,
       signal: options.signal,
       onToolActivity: options.onToolActivity,
       onTextDelta: options.onTextDelta,
@@ -522,7 +495,7 @@ export class AgentManager {
         record.execution.outputLog.append(request.prompt);
         record.execution.outputLog.attach(session, session.messages.length + 1);
       } else {
-        record.execution.outputLog = new AgentOutputLog(record.id, request.prompt, undefined, this.bufferSize, true);
+        record.execution.outputLog = new AgentOutputLog(record.id, request.prompt, undefined, true);
         record.display.outputFile = record.execution.outputLog.path;
         record.execution.outputLog.attach(session, session.messages.length + 1);
       }
@@ -530,21 +503,15 @@ export class AgentManager {
 
     this.onStart?.(record);
     const promise = executeAgentTurn(session, request.prompt, {
-      maxTurns: request.maxTurns ?? record.stats.maxTurns,
-      graceTurns: request.graceTurns ?? record.stats.graceTurns,
       signal: record.execution.abortController.signal,
-      onTurnEnd: (turnCount) => {
-        if (!this.isActiveExecution(record, execution.id)) return;
-        execution.turnCount = turnCount;
-      },
       ...this.createRecordCallbacks(record, { onToolActivity: request.onToolActivity }, execution.id),
       onTextDelta: (delta, fullText) => {
         if (!this.isActiveExecution(record, execution.id)) return;
         request.onTextDelta?.(delta, fullText);
       },
     })
-      .then(({ responseText, aborted, turnLimited }) => {
-        this.finishTurnExecution(record, execution, { responseText, aborted, turnLimited }, concurrencySlot, request.baseline);
+      .then(({ responseText, aborted }) => {
+        this.finishTurnExecution(record, execution, { responseText, aborted }, concurrencySlot, request.baseline);
         if (!request.isBackground) execution.deliveredText = responseText;
         request.resolve(responseText);
         return responseText;
@@ -553,7 +520,7 @@ export class AgentManager {
         this.finishTurnExecution(
           record,
           execution,
-          { responseText: "", aborted: false, turnLimited: false, error: errorMessage(err) },
+          { responseText: "", aborted: false, error: errorMessage(err) },
           concurrencySlot,
           request.baseline,
         );
@@ -566,7 +533,7 @@ export class AgentManager {
   private finishTurnExecution(
     record: AgentRecord,
     execution: AgentExecutionSummary,
-    outcome: { responseText: string; aborted: boolean; turnLimited: boolean; error?: string },
+    outcome: { responseText: string; aborted: boolean; error?: string },
     concurrencySlot: ConcurrencySlot,
     baseline?: ExecutionBaseline,
   ): void {
@@ -581,14 +548,13 @@ export class AgentManager {
       ? "stopped"
       : outcome.error !== undefined
         ? "error"
-        : outcome.aborted ? "aborted" : outcome.turnLimited ? "turn_limited" : "completed";
+        : outcome.aborted ? "aborted" : "completed";
     execution.status = status;
     execution.completedAt = completedAt;
     execution.responseText = outcome.responseText;
     execution.error = outcome.error;
     const delta = this.executionDelta(record, execution.id, baseline);
     execution.usage = delta?.usage;
-    execution.toolUses = delta?.toolUses;
     execution.compactionCount = delta?.compactionCount;
     this.executionBases.delete(execution.id);
     this.totalAgentCost += execution.usage?.cost ?? 0;
@@ -597,11 +563,6 @@ export class AgentManager {
     record.result = outcome.responseText;
     record.error = outcome.error;
     record.lifecycle.completedAt ??= completedAt;
-    if (record.stats.executions?.[0] === execution) {
-      record.stats.turnCount = execution.turnCount ?? record.stats.turnCount;
-    } else {
-      record.stats.turnCount = (record.stats.turnCount ?? 0) + (execution.turnCount ?? 0);
-    }
 
     this.finalizeAgentCompletion(record, concurrencySlot);
     this.safeNotifyComplete(record, execution);
@@ -611,8 +572,6 @@ export class AgentManager {
     if (record.execution.outputLog) {
       try {
         record.execution.outputLog.finalize({
-          turnCount: record.stats.turnCount ?? 0,
-          toolUseCount: record.stats.toolUses,
           totalTokens: getLifetimeTotal(record.stats.lifetimeUsage),
           cost: record.stats.lifetimeUsage.cost,
         });
@@ -634,7 +593,6 @@ export class AgentManager {
         cost: record.stats.lifetimeUsage.cost,
         cacheRead: record.stats.cacheRead,
       },
-      toolUses: record.stats.toolUses,
       compactionCount: record.stats.compactionCount,
     };
   }
@@ -654,15 +612,12 @@ export class AgentManager {
         cacheRead: Math.max(0, record.stats.cacheRead - base.usage.cacheRead),
         cost: Math.max(0, record.stats.lifetimeUsage.cost - base.usage.cost),
       },
-      toolUses: Math.max(0, record.stats.toolUses - base.toolUses),
       compactionCount: Math.max(0, record.stats.compactionCount - base.compactionCount),
     };
   }
 
   private finalizeUnstartedExecution(execution: AgentExecutionSummary): void {
     execution.usage = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
-    execution.turnCount = 0;
-    execution.toolUses = 0;
     execution.compactionCount = 0;
   }
 
@@ -694,8 +649,6 @@ export class AgentManager {
     if (record.execution.outputLog) {
       try {
         record.execution.outputLog.finalize({
-          turnCount: record.stats.turnCount ?? 0,
-          toolUseCount: record.stats.toolUses,
           totalTokens: getLifetimeTotal(record.stats.lifetimeUsage),
           cost: record.stats.lifetimeUsage.cost,
         });
@@ -822,7 +775,6 @@ export class AgentManager {
     return {
       onToolActivity: (activity) => {
         if (!isActive()) return;
-        if (activity.type === "end") record.stats.toolUses++;
         options?.onToolActivity?.(activity);
       },
       onAssistantUsage: (usage) => {

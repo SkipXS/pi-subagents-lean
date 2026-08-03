@@ -63,7 +63,7 @@ describe("config I/O with the real filesystem", () => {
     const configIo = await loadConfigModule();
     expect(configIo.loadConfig().config).toMatchObject({
       concurrency: { default: 4 },
-      agent: { forceBackground: false, graceTurns: 6, orchestrationPrompt: true },
+      agent: { forceBackground: false, orchestrationPrompt: true },
       thinkingOverrides: {},
     });
 
@@ -140,7 +140,15 @@ describe("config I/O with the real filesystem", () => {
     const { createConfigFileIO } = await loadConfigModule();
     const configPath = join(testDir!, "subagents-lean.json");
     writeFileSync(configPath, "{broken", "utf8");
-    writeFileSync(`${configPath}.bak`, JSON.stringify({ agent: { forceBackground: true }, concurrency: { default: 4 } }), "utf8");
+    writeFileSync(`${configPath}.bak`, JSON.stringify({
+      agent: {
+        forceBackground: true,
+        dynamicModel: "provider/model",
+        dynamicNumber: 42,
+        dynamicBoolean: true,
+      },
+      concurrency: { default: 4 },
+    }), "utf8");
     const io = createConfigFileIO(testDir!);
 
     expect(io.load()).toMatchObject({ health: "using-backup", canRepair: true, config: { agent: { forceBackground: true } } });
@@ -148,7 +156,10 @@ describe("config I/O with the real filesystem", () => {
     expect(readFileSync(configPath, "utf8")).toBe("{broken");
 
     expect(io.repair()).toMatchObject({ health: "healthy", config: { agent: { forceBackground: true } } });
-    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
+    const repairedAgent = JSON.parse(readFileSync(configPath, "utf8")).agent;
+    expect(repairedAgent).toMatchObject({ forceBackground: true, dynamicModel: "provider/model" });
+    expect(repairedAgent).not.toHaveProperty("dynamicNumber");
+    expect(repairedAgent).not.toHaveProperty("dynamicBoolean");
     const archives = readdirSync(testDir!).filter((name) => name.startsWith("subagents-lean.json.corrupt-"));
     expect(archives).toHaveLength(1);
     expect(readFileSync(join(testDir!, archives[0]!), "utf8")).toBe("{broken");
