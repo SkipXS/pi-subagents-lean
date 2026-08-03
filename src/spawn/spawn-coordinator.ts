@@ -25,7 +25,7 @@ export interface SpawnIntent extends SpawnConfig {
   signal?: AbortSignal;
   /** Narrowed to required — all callers resolve this before spawn. */
   graceTurns: number;
-  /** Root mode/settings snapshot captured by callers that resolve fields before entering the coordinator. */
+  /** Runtime settings snapshot captured by callers that resolve fields before entering the coordinator. */
   runtimeSettingsSnapshot?: SubagentRuntimeSettings;
 }
 
@@ -148,7 +148,7 @@ export class SpawnCoordinator {
       modelKey,
       thinkingLevel,
       agentConfig,
-      invocation: { ...invocation, mode: runtimeSettings.mode, thinkingLevel },
+      invocation: { ...invocation, thinkingLevel },
       isBackground: runInBackground,
       runtimeSettings,
     };

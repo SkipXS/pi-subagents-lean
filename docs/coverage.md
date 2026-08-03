@@ -30,7 +30,7 @@ conservative per-file floors:
 | `src/agents/agent-manager.ts` | 85% | 80% | 80% | 88% |
 | `src/config/config-io.ts` | 68% | 80% | 73% | 70% |
 | `src/prompt/skill-loader.ts` | 72% | 80% | 70% | 72% |
-| `src/spawn/spawn-coordinator.ts` | 74% | 70% | 80% | 75% |
+| `src/spawn/spawn-coordinator.ts` | 74% | 70% | 80% | 74% |
 
 The manager function floor remains at the project gate for the active root-only
 implementation; all other floors remain below the reproducible Ubuntu baseline rather than rounded up

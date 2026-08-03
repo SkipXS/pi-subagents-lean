@@ -288,22 +288,11 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
   const defaultThinking = parseThinkingLevel(agent.defaultThinking);
   if (defaultThinking === undefined) delete agent.defaultThinking;
   else agent.defaultThinking = defaultThinking;
-  const mode = raw.mode === "eco" ? "eco" : raw.mode === "default" ? "default" : undefined;
-  const ecoModelOverrides = Object.fromEntries(
-    Object.entries(raw.ecoModelOverrides ?? {})
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0),
-  );
-  const ecoThinkingOverrides = Object.fromEntries(
-    Object.entries(raw.ecoThinkingOverrides ?? {})
-      .map(([key, value]) => [key, parseThinkingLevel(value)] as const)
-      .filter((entry): entry is [string, NonNullable<typeof entry[1]>] => entry[1] !== undefined),
-  );
+  // Legacy root mode/Eco keys are deliberately not read. Keeping them out of
+  // the normalized object makes every subsequent write a migration boundary.
   return {
     agent,
     thinkingOverrides: { ...(raw.thinkingOverrides ?? {}) },
-    ...(mode ? { mode } : {}),
-    ecoModelOverrides,
-    ecoThinkingOverrides,
     concurrency,
   };
 }
@@ -313,9 +302,6 @@ function replaceConfig(target: SubagentsConfig, source: SubagentsConfig): void {
   target.agent = structuredClone(normalized.agent);
   target.concurrency = structuredClone(normalized.concurrency);
   target.thinkingOverrides = structuredClone(normalized.thinkingOverrides ?? {});
-  target.mode = normalized.mode;
-  target.ecoModelOverrides = structuredClone(normalized.ecoModelOverrides ?? {});
-  target.ecoThinkingOverrides = structuredClone(normalized.ecoThinkingOverrides ?? {});
 }
 
 function atomicWrite(targetPath: string, contents: Buffer): void {
@@ -398,9 +384,7 @@ function isConfigShape(value: unknown): value is SubagentsConfig {
   if (!isRecord(value)) return false;
   return (value.agent === undefined || isRecord(value.agent))
     && (value.concurrency === undefined || isRecord(value.concurrency))
-    && (value.thinkingOverrides === undefined || isRecord(value.thinkingOverrides))
-    && (value.ecoModelOverrides === undefined || isRecord(value.ecoModelOverrides))
-    && (value.ecoThinkingOverrides === undefined || isRecord(value.ecoThinkingOverrides));
+    && (value.thinkingOverrides === undefined || isRecord(value.thinkingOverrides));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

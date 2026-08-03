@@ -18,7 +18,6 @@ import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-
 
 import { parseModelKey, findModelInRegistry, parseThinkingLevel } from "../utils.js";
 import { normalizeThinkingLevel } from "../models/thinking.js";
-import { requireAvailableModel } from "../models/model-availability.js";
 import { getSubagentRuntimeContext } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import type { AgentManager } from "./agent-manager.js";
@@ -48,32 +47,6 @@ function errorResult(text: string, details?: Record<string, unknown>) {
 /** Cancellation has a distinct tool contract; it is never reported as success. */
 function cancelledResult(details?: Record<string, unknown>) {
   return errorResult("Agent execution cancelled", details);
-}
-
-/** Compatibility with detached stores created before Eco-mode methods existed. */
-function modeModelSetting(store: ReturnType<typeof getStore>, type: string, parent: string, config?: AgentConfig, explicit?: string) {
-  return typeof store.modelSettingForMode === "function"
-    ? store.modelSettingForMode(type, parent, config, explicit)
-    : { ...store.modelSettingFor(type, parent, config, explicit), ecoConfigured: false };
-}
-
-function modeThinkingSetting(store: ReturnType<typeof getStore>, type: string, parent: import("../types.js").ThinkingLevel | undefined, config?: AgentConfig, explicit?: import("../types.js").ThinkingLevel) {
-  return typeof store.thinkingSettingForMode === "function"
-    ? store.thinkingSettingForMode(type, parent, config, explicit)
-    : { ...store.thinkingSettingFor(type, parent, config, explicit), ecoConfigured: false };
-}
-
-/** Compatibility with runtime snapshots captured before Eco-mode resolvers existed. */
-function snapshotModelSetting(settings: SubagentRuntimeSettings, type: string, parent: string, config?: AgentConfig, explicit?: string) {
-  return typeof settings.modelSettingForMode === "function"
-    ? settings.modelSettingForMode(type, parent, config, explicit)
-    : { value: settings.modelFor(type, parent, config, explicit), source: "parent" as const, ecoConfigured: false };
-}
-
-function snapshotThinkingSetting(settings: SubagentRuntimeSettings, type: string, parent: import("../types.js").ThinkingLevel | undefined, config?: AgentConfig, explicit?: import("../types.js").ThinkingLevel) {
-  return typeof settings.thinkingSettingForMode === "function"
-    ? settings.thinkingSettingForMode(type, parent, config, explicit)
-    : { ...settings.thinkingSettingFor(type, parent, config, explicit), ecoConfigured: false };
 }
 
 // ============================================================================
@@ -316,25 +289,18 @@ export async function executeAgentTool(
   const graceTurns = runtimeAgentSettings.graceTurns;
   const forceBackground = runtimeAgentSettings.forceBackground;
   const shouldRunInBackground = runInBackground || forceBackground;
-  const modelSetting = runtimeSettingsSnapshot
-    ? snapshotModelSetting(runtimeSettingsSnapshot, resolvedType, parentModelId, agentConfig, explicitModel)
-    : modeModelSetting(store, resolvedType, parentModelId, agentConfig, explicitModel);
+  const resolvedModelKey = runtimeSettingsSnapshot
+    ? runtimeSettingsSnapshot.modelFor(resolvedType, parentModelId, agentConfig, explicitModel)
+    : store.modelSettingFor(resolvedType, parentModelId, agentConfig, explicitModel).value;
   let model: ReturnType<typeof findModelInRegistry>;
-  if (modelSetting.ecoConfigured) {
-    try {
-      model = await requireAvailableModel(modelSetting.value, ctx.modelRegistry, "Eco model");
-    } catch (error) {
-      if (signal?.aborted) return cancelledResult();
-      return errorResult(error instanceof Error ? error.message : String(error));
-    }
-  } else if (explicitModel !== undefined) {
-    // Preserve Default-mode semantics: explicit models are exact, while Pi's
-    // session creation remains the authentication boundary.
+  if (explicitModel !== undefined) {
+    // Explicit models are exact, while Pi's session creation remains the
+    // authentication boundary.
     const parsed = parseModelKey(explicitModel);
     model = parsed ? ctx.modelRegistry.find(parsed.provider, parsed.modelId) : undefined;
     if (!model) return errorResult(`Model not found: ${explicitModel}`);
   } else {
-    model = findModelInRegistry(modelSetting.value, ctx.modelRegistry, ctx.model);
+    model = findModelInRegistry(resolvedModelKey, ctx.modelRegistry, ctx.model);
   }
   const modelKey = model ? `${model.provider}/${model.id}` : undefined;
   const modelName = model?.id;
@@ -342,8 +308,8 @@ export async function executeAgentTool(
     ? undefined
     : parseThinkingLevel(params.thinking as string | undefined);
   const requestedThinking = (runtimeSettingsSnapshot
-    ? snapshotThinkingSetting(runtimeSettingsSnapshot, resolvedType, ctx.thinkingLevel, agentConfig, explicitThinking)
-    : modeThinkingSetting(store, resolvedType, ctx.thinkingLevel, agentConfig, explicitThinking)
+    ? runtimeSettingsSnapshot.thinkingSettingFor(resolvedType, ctx.thinkingLevel, agentConfig, explicitThinking)
+    : store.thinkingSettingFor(resolvedType, ctx.thinkingLevel, agentConfig, explicitThinking)
   ).value;
   const thinkingLevel = normalizeThinkingLevel(model, requestedThinking);
 
@@ -600,9 +566,7 @@ export async function toolCallListener(
 
   if (subagentType && input.model === undefined) {
     const store = getStore();
-    const effectiveModel = typeof store.modelSettingForMode === "function"
-      ? store.modelSettingForMode(subagentType, parentModelId, agentConfig).value
-      : store.modelFor(subagentType, parentModelId, agentConfig);
+    const effectiveModel = store.modelFor(subagentType, parentModelId, agentConfig);
     if (effectiveModel) {
       input.model = effectiveModel;
       input._modelFromSettings = true;
@@ -614,7 +578,7 @@ export async function toolCallListener(
   }
 
   if (subagentType && input.thinking === undefined) {
-    const setting = modeThinkingSetting(getStore(), subagentType, ctx.thinkingLevel, agentConfig);
+    const setting = getStore().thinkingSettingFor(subagentType, ctx.thinkingLevel, agentConfig, undefined);
     input.thinking = setting.value;
     input._thinkingFromSettings = true;
   }

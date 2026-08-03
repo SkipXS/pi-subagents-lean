@@ -12,7 +12,6 @@ const state = vi.hoisted(() => ({
   registerAgents: vi.fn(),
   scanAndMerge: vi.fn(async () => new Map()),
   store: {
-    mode: "default" as "default" | "eco",
     agent: {
       disableDefaultAgents: false,
       orchestrationPrompt: true,

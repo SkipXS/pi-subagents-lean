@@ -97,7 +97,6 @@ Der gesamte interaktive UI-Bereich soll entfallen:
 - `src/ui/renderer.ts`
 - `src/ui/searchable-select.ts`
 - `src/ui/markdown-theme.ts`
-- `src/ui/eco-status.ts`
 - `src/ui/menu/**`
 - weitere ausschließlich visuelle Hilfsfunktionen unter `src/ui/`
 
@@ -158,8 +157,7 @@ Die Entfernung soll bestehende Konfigurationsdateien nicht unnötig unlesbar mac
   veraltete Felder akzeptiert und ignoriert.
 - Neue Schreibvorgänge erzeugen entfernte Felder nicht mehr.
 - Eine spätere Hauptversion kann die veralteten Felder und Parser endgültig entfernen.
-- Eco bleibt fachlich erhalten und wird dateibasiert über Konfiguration genutzt;
-  es gibt dafür keine TUI-Abhängigkeit.
+- Modell- und Thinking-Auflösung bleiben dateibasiert und ohne TUI-Abhängigkeit.
 - README, `CONTEXT.md`, Agent-Beispiele und Konfigurationsreferenz beschreiben
   den flachen Ausführungsbaum.
 
@@ -281,10 +279,8 @@ Ein sofortiges hartes Ablehnen alter Felder würde vorhandene Installationen unn
 
 ## Finale Entscheidungen und verbleibende Fragen
 
-Für Phase 5 sind zwei zuvor offene Punkte entschieden:
+Für Phase 5 ist ein zuvor offener Punkt entschieden:
 
-- **Eco bleibt erhalten.** Eco bleibt dateibasiert und wird über die persistierte
-  bzw. sessionbezogene Konfiguration ohne TUI genutzt.
 - **`AgentContinue` bleibt erhalten.** Es bleibt auf erfolgreich beendete Root-
   Sessions beschränkt und verwendet den normalen Root-Slot sowie eigene
   Ausführungs- und Nudge-Historie.

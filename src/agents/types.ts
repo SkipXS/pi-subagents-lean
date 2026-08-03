@@ -1,5 +1,4 @@
 import type { ThinkingLevel } from "../types.js";
-import type { AgentMode } from "../models/model-precedence.js";
 
 /** Agent type: any string name (built-in defaults or user-defined). */
 export type SubagentType = string;
@@ -33,10 +32,6 @@ export interface AgentConfig {
   preloadSkills?: string[] | false;
   model?: string;
   thinkingLevel?: ThinkingLevel;
-  /** Optional model used only while Eco mode is active. */
-  ecoModel?: string;
-  /** Optional thinking level used only while Eco mode is active. */
-  ecoThinkingLevel?: ThinkingLevel;
   maxTurns?: number;
   /** Max output tokens per LLM response. Passed to provider as max_tokens or max_completion_tokens. */
   maxTokens?: number;
@@ -51,8 +46,6 @@ export interface AgentConfig {
 }
 
 export interface AgentInvocation {
-  /** Mode snapshot accepted for this root spawn. */
-  mode?: AgentMode;
   /** Short display name, e.g. "haiku" — only set when different from parent. */
   modelName?: string;
   thinkingLevel?: ThinkingLevel;

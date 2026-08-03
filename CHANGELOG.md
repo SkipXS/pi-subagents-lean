@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **AgentContinue tool.** Continue a finished agent's session with a new prompt: the execution reuses the retained session, model, working directory, output log, and the original `max_turns`/`grace_turns` limits, and consumes a normal global concurrency slot without incrementing the accepted-agent count. Foreground calls await their execution; `run_in_background` acknowledges immediately and delivers exactly one per-execution completion notification. Each execution is retained in the record as its own summary (`executions`) with per-execution usage/cost/turn deltas, while lifetime totals stay cumulative.
-- **Eco mode.** Default/Eco model and thinking settings resolve independently, fail closed for configured unavailable models, and are snapshotted for queued root execution.
 - **Flat root-agent execution.** `Agent`, `AgentContinue`, `StopAgent`, and `AgentStatus` now operate only on root records. Subagent sessions remain ALS-isolated but receive no `Agent` custom proxy or root control tool.
 
 ### Changed

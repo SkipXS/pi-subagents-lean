@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  resolveEcoModelSetting,
-  resolveEcoThinkingSetting,
   resolveModel,
   resolveModelSetting,
   resolveThinkingSetting,
@@ -111,27 +109,6 @@ describe("shared agent setting precedence", () => {
       parentThinking: "minimal",
       sessionOverrides: { default: "high" },
     })).toEqual({ value: "high", source: "session-global" });
-  });
-
-  it("resolves Eco fields independently and falls back to fully resolved Default values", () => {
-    const config: SubagentsConfig = {
-      ...baseConfig,
-      ecoModelOverrides: { reviewer: "saved/eco" },
-      ecoThinkingOverrides: {},
-    };
-    const defaultModel = { value: "resolved/default", source: "session-global" as const };
-    const defaultThinking = { value: "high" as const, source: "agent-md" as const };
-
-    expect(resolveEcoModelSetting({
-      subagentType: "reviewer", agentConfig: { ecoModel: "md/eco" }, config,
-      sessionOverrides: { models: { reviewer: "session/eco" }, thinking: {} }, defaultSetting: defaultModel,
-    })).toEqual({ value: "session/eco", source: "session-agent", ecoConfigured: true });
-    expect(resolveEcoModelSetting({
-      subagentType: "reviewer", explicitModel: "wizard/model", config, defaultSetting: defaultModel,
-    })).toEqual({ value: "wizard/model", source: "spawn", ecoConfigured: false });
-    expect(resolveEcoThinkingSetting({
-      subagentType: "reviewer", config, defaultSetting: defaultThinking,
-    })).toEqual({ ...defaultThinking, ecoConfigured: false });
   });
 
   it("uses the same precedence for thinking", () => {
