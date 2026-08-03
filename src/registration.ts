@@ -3,7 +3,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { executeAgentTool, executeContinueAgentTool, executeStopAgentTool } from "./agents/tool-execution.js";
 import type { AgentRenderMetadataBridge } from "./agents/agent-render-bridge.js";
 import { executeAgentStatusTool } from "./agents/agent-status.js";
-import { renderAgentCall, renderAgentResult } from "./agents/agent-renderer.js";
+import {
+  renderAgentCall,
+  renderAgentContinueCall,
+  renderAgentResult,
+  renderStopAgentCall,
+} from "./agents/agent-renderer.js";
 
 // Provider-side json_schema enforcement; "prefer" falls back gracefully on
 // providers without strict mode (e.g. local Ollama).
@@ -56,6 +61,14 @@ export function registerTools(
   registerAgentTool(pi, renderBridge);
 
   // AgentContinue remains a strict-schema compatible root continuation tool.
+  const executeContinueWithBridge: typeof executeContinueAgentTool = (
+    toolCallId,
+    params,
+    signal,
+    onUpdate,
+    ctx,
+  ) => executeContinueAgentTool(toolCallId, params, signal, onUpdate, ctx, renderBridge);
+
   const continueAgentTool = {
     name: "AgentContinue",
     label: "AgentContinue",
@@ -68,10 +81,20 @@ export function registerTools(
       prompt: Type.String(),
       run_in_background: Type.Boolean(),
     }, { additionalProperties: false }),
-    execute: throwingToolExecute(executeContinueAgentTool),
+    execute: throwingToolExecute(executeContinueWithBridge),
+    renderCall: renderAgentContinueCall,
+    renderResult: renderAgentResult,
     constrainedSampling: CONSTRAINED_SAMPLING,
   };
   pi.registerTool(continueAgentTool);
+
+  const executeStopWithBridge: typeof executeStopAgentTool = (
+    toolCallId,
+    params,
+    signal,
+    onUpdate,
+    ctx,
+  ) => executeStopAgentTool(toolCallId, params, signal, onUpdate, ctx, renderBridge);
 
   const stopAgentTool = {
     name: "StopAgent",
@@ -80,7 +103,9 @@ export function registerTools(
     parameters: Type.Object({
       agent_id: Type.String(),
     }, { additionalProperties: false }),
-    execute: throwingToolExecute(executeStopAgentTool),
+    execute: throwingToolExecute(executeStopWithBridge),
+    renderCall: renderStopAgentCall,
+    renderResult: renderAgentResult,
     constrainedSampling: CONSTRAINED_SAMPLING,
   };
   pi.registerTool(stopAgentTool);

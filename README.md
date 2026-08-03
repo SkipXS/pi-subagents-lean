@@ -80,8 +80,10 @@ definition. Every `Agent` call is a root launch owned by the parent session.
 
 In Pi's interactive tool rows, `Agent` displays the canonical role, resolved
 `provider/model-id`, normalized thinking level, and the complete prompt. The
-row is hydrated after asynchronous resolution; `AgentContinue` keeps Pi's
-standard renderer.
+row is hydrated after asynchronous resolution. `AgentContinue` and `StopAgent`
+use the same details renderer: their first line shows the canonical full agent
+ID, role, resolved model, and normalized thinking; `AgentContinue` then shows
+its complete prompt.
 
 ### `AgentContinue`
 
@@ -106,7 +108,8 @@ compaction totals stay cumulative across executions.
 `StopAgent({ agent_id })` stops one running or queued agent. A background
 `Agent` acknowledgement supplies its full ID; foreground `Agent` results do not
 necessarily supply one. Use `AgentStatus` to identify other agents; it
-displays IDs as `short_id (type)`.
+displays IDs as `short_id (type)`. The interactive `StopAgent` row resolves a
+full ID from a unique prefix when the retained record is available.
 
 ### `AgentStatus`
 

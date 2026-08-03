@@ -203,6 +203,27 @@ describe("AgentManager", () => {
   // ── Concurrency ──
 
   describe("concurrency", () => {
+    it("retains the resolved model key in invocation metadata for queued controls", () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const first = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValue(first.promise);
+
+      const active = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "active", {
+        description: "active",
+        modelKey: "provider/active",
+        isBackground: true,
+      });
+      const queued = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "queued", {
+        description: "queued",
+        modelKey: "provider/queued",
+        isBackground: true,
+      });
+
+      expect(manager.getRecord(active)?.display.invocation?.modelKey).toBe("provider/active");
+      expect(manager.getRecord(queued)?.display.invocation?.modelKey).toBe("provider/queued");
+      first.resolve(mockRunResult());
+    });
+
     it("uses the default global limit for agents with every model key, including none", () => {
       const config: ConcurrencyConfig = { default: 2 };
       manager = new AgentManager(onComplete, config);

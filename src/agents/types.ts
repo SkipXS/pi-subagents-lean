@@ -48,6 +48,8 @@ export interface AgentConfig {
 export interface AgentInvocation {
   /** Short display name, e.g. "haiku" — only set when different from parent. */
   modelName?: string;
+  /** Resolved provider/model id retained internally for queued control rows. */
+  modelKey?: string;
   thinkingLevel?: ThinkingLevel;
   maxTurns?: number;
   runInBackground?: boolean;
