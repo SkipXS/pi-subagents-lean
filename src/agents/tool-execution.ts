@@ -10,6 +10,11 @@ import { getStatusNote } from "../status-note.js";
 import type { ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 
 import type { AgentRecord } from "../types.js";
+import {
+  type AgentCallRenderMetadata,
+  withAgentCallRenderMetadata,
+} from "./agent-renderer.js";
+import type { AgentRenderMetadataBridge } from "./agent-render-bridge.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 import type { AgentConfig } from "./types.js";
 import { resolveType, getAgentConfig, discoverNewAgents, resolveAgentCatalog, resolveTypeInCatalog } from "./agent-types.js";
@@ -47,6 +52,57 @@ function errorResult(text: string, details?: Record<string, unknown>) {
 /** Cancellation has a distinct tool contract; it is never reported as success. */
 function cancelledResult(details?: Record<string, unknown>) {
   return errorResult("Agent execution cancelled", details);
+}
+
+/** Attach renderer-only invocation metadata without changing public result text. */
+function agentRenderDetails(
+  details: Record<string, unknown> | undefined,
+  metadata: AgentCallRenderMetadata,
+): Record<string, unknown> {
+  return withAgentCallRenderMetadata(details, metadata);
+}
+
+/**
+ * Notify Pi's row renderer as soon as model/type resolution is complete.
+ * Partial updates are UI-only; the final tool result remains the sole LLM
+ * result and keeps its existing content unchanged.
+ */
+function emitAgentRenderUpdate(
+  toolCallId: string,
+  onUpdate: ((update: any) => void) | undefined,
+  metadata: AgentCallRenderMetadata,
+  renderBridge: AgentRenderMetadataBridge | undefined,
+): void {
+  renderBridge?.update(toolCallId, metadata);
+  if (!onUpdate) return;
+  try {
+    onUpdate({ content: [], details: agentRenderDetails(undefined, metadata) });
+  } catch {
+    // A renderer update must never turn a valid tool execution into a failure.
+  }
+}
+
+/** Prefer the session's actual model/thinking values once a session exists. */
+function finalAgentRenderMetadata(
+  metadata: AgentCallRenderMetadata,
+  record: AgentRecord | undefined,
+): AgentCallRenderMetadata {
+  let modelKey = metadata.model;
+  let thinking = metadata.thinking;
+  try {
+    const session = record?.execution?.session;
+    if (session?.model) modelKey = `${session.model.provider}/${session.model.id}`;
+    if (session?.thinkingLevel) thinking = session.thinkingLevel;
+  } catch {
+    // Terminal/legacy records may expose no live session; keep the resolved
+    // preflight values, which are still sufficient to render the row.
+  }
+  return {
+    role: metadata.role,
+    ...(modelKey !== undefined ? { model: modelKey } : {}),
+    ...(thinking !== undefined ? { thinking } : {}),
+    prompt: metadata.prompt,
+  };
 }
 
 // ============================================================================
@@ -186,11 +242,12 @@ export function formatResultContent(record: AgentRecord): string {
 // ============================================================================
 
 export async function executeAgentTool(
-  _toolCallId: string,
+  toolCallId: string,
   params: Record<string, unknown>,
   signal: AbortSignal | undefined,
-  _onUpdate: ((update: any) => void) | undefined,
+  onUpdate: ((update: any) => void) | undefined,
   ctx: ExtensionContext,
+  renderBridge?: AgentRenderMetadataBridge,
 ): Promise<any> {
   // Do not start preflight work for a tool call Pi has already cancelled.
   if (signal?.aborted) return cancelledResult();
@@ -313,14 +370,29 @@ export async function executeAgentTool(
   ).value;
   const thinkingLevel = normalizeThinkingLevel(model, requestedThinking);
 
+  // renderCall runs before this asynchronous resolution. Publish the resolved
+  // values as a row-local partial update immediately, including the abort and
+  // stale-runtime paths below; the same metadata is attached to the final
+  // result so restored rows never depend on a global cache.
+  const renderMetadata: AgentCallRenderMetadata = {
+    role: resolvedType,
+    ...(modelKey !== undefined ? { model: modelKey } : {}),
+    ...(thinkingLevel !== undefined ? { thinking: thinkingLevel } : {}),
+    prompt,
+  };
+  emitAgentRenderUpdate(toolCallId, onUpdate, renderMetadata, renderBridge);
+
   // No spawn may begin after cancellation, including cancellation during
   // asynchronous catalog/worktree preflight.
-  if (signal?.aborted) return cancelledResult();
+  if (signal?.aborted) return cancelledResult(agentRenderDetails(undefined, renderMetadata));
 
   // Preflight may have awaited while session_shutdown ran. Do not let a
   // captured, now-disposed coordinator spawn against a stale root runtime.
   if (getCoordinator() !== coordinator || !getManager()) {
-    return errorResult("Agent execution is unavailable until the root session is ready");
+    return errorResult(
+      "Agent execution is unavailable until the root session is ready",
+      agentRenderDetails(undefined, renderMetadata),
+    );
   }
 
   // Use SpawnCoordinator for unified spawn path. A synchronous acceptance/setup
@@ -349,21 +421,29 @@ export async function executeAgentTool(
       signal,
     });
   } catch (error) {
-    if (signal?.aborted) return cancelledResult();
-    return errorResult(error instanceof Error ? error.message : String(error));
+    const details = agentRenderDetails(undefined, renderMetadata);
+    if (signal?.aborted) return cancelledResult(details);
+    return errorResult(error instanceof Error ? error.message : String(error), details);
   }
 
   const { agentId, record } = result;
+  const finalRenderMetadata = finalAgentRenderMetadata(renderMetadata, record);
 
   // A background spawn may complete its abort path while coordinator.spawn()
   // is still pending. Its stopped record is not a successful tool result.
   if (signal?.aborted) {
-    return cancelledResult(buildAgentDetails(record, { includeStatus: true }));
+    return cancelledResult(agentRenderDetails(
+      buildAgentDetails(record, { includeStatus: true }),
+      finalRenderMetadata,
+    ));
   }
 
   if (shouldRunInBackground) {
     const isActive = record.lifecycle.status === "queued" || record.lifecycle.status === "running";
-    const details = buildAgentDetails(record, isActive ? undefined : { includeStatus: true });
+    const details = agentRenderDetails(
+      buildAgentDetails(record, isActive ? undefined : { includeStatus: true }),
+      finalRenderMetadata,
+    );
     if (!isActive) {
       return successResult(`[Agent ${record.lifecycle.status}] Agent ID: ${agentId}`, details);
     }
@@ -375,7 +455,10 @@ export async function executeAgentTool(
   }
 
   // Foreground: record.execution.promise is already awaited by coordinator.spawn()
-  const details = buildAgentDetails(record, { includeStats: true });
+  const details = agentRenderDetails(
+    buildAgentDetails(record, { includeStats: true }),
+    finalRenderMetadata,
+  );
 
   // The manager bridges the parent signal to its own execution controller. Once
   // the foreground tool call is cancelled, never turn its partial response

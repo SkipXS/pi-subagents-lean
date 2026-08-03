@@ -45,7 +45,7 @@ describe("tool registration", () => {
     expect(api.api.registerTool).toHaveBeenCalledTimes(4);
   });
 
-  it("keeps the fixed Agent schema without a custom renderer", () => {
+  it("keeps the fixed Agent schema and registers only the Agent renderer", () => {
     const api = createApi();
     registerTools(api.api as any);
     const tool = api.tools[0]!;
@@ -63,8 +63,12 @@ describe("tool registration", () => {
         worktree_path: { type: "string" },
       },
     });
-    expect(tool).not.toHaveProperty("renderCall");
-    expect(tool).not.toHaveProperty("renderResult");
+    expect(tool.renderCall).toEqual(expect.any(Function));
+    expect(tool.renderResult).toEqual(expect.any(Function));
+    for (const otherTool of api.tools.slice(1)) {
+      expect(otherTool).not.toHaveProperty("renderCall");
+      expect(otherTool).not.toHaveProperty("renderResult");
+    }
   });
 
   it("keeps AgentContinue strict-mode requirements", () => {
@@ -112,5 +116,33 @@ describe("tool registration", () => {
 
     await expect(publicExecute(api.tools[0]!)!("call", {}, undefined, undefined, {}))
       .rejects.toThrow("agent failed clearly");
+  });
+
+  it("passes successful Agent results through unchanged", async () => {
+    const api = createApi();
+    registerTools(api.api as any);
+    const result = { content: [{ type: "text", text: "done" }], details: { keep: true } };
+    state.executeAgentTool.mockResolvedValueOnce(result);
+
+    await expect(publicExecute(api.tools[0]!)!("call", {}, undefined, undefined, {}))
+      .resolves.toBe(result);
+  });
+
+  it("keeps an undefined internal result defensive", async () => {
+    const api = createApi();
+    registerTools(api.api as any);
+    state.executeAgentTool.mockResolvedValueOnce(undefined);
+
+    await expect(publicExecute(api.tools[0]!)!("call", {}, undefined, undefined, {}))
+      .resolves.toBeUndefined();
+  });
+
+  it("uses a defensive fallback for malformed error results", async () => {
+    const api = createApi();
+    registerTools(api.api as any);
+    state.executeAgentTool.mockResolvedValueOnce({ isError: true });
+
+    await expect(publicExecute(api.tools[0]!)!("call", {}, undefined, undefined, {}))
+      .rejects.toThrow("Tool execution failed");
   });
 });

@@ -4,6 +4,10 @@ import { registerAgents, getAvailableAgents, setAgentScanDirs, scanAndMerge } fr
 import { AgentManager } from "./agents/agent-manager.js";
 import { SpawnCoordinator } from "./spawn/spawn-coordinator.js";
 import { toolCallListener } from "./agents/tool-execution.js";
+import {
+  createAgentRenderMetadataBridge,
+  type AgentRenderMetadataBridge,
+} from "./agents/agent-render-bridge.js";
 import { getOrchestrationPromptUpdate } from "./prompt/orchestration.js";
 import {
   getCoordinator,
@@ -87,7 +91,18 @@ export async function loadConfigAndRegisterAgents(
 // ============================================================================
 
 /** Register the root lifecycle and catalog listeners. */
-export function setupEventListeners(pi: ExtensionAPI): void {
+export function setupEventListeners(
+  pi: ExtensionAPI,
+  renderBridge: AgentRenderMetadataBridge = createAgentRenderMetadataBridge(),
+): void {
+  pi.on("tool_execution_start", (event) => {
+    renderBridge.start(event.toolCallId, event.toolName);
+  });
+  pi.on("tool_execution_update", (event) => {
+    renderBridge.updateFromPartial(event.toolCallId, event.toolName, event.partialResult);
+  });
+  pi.on("tool_result", (event) => renderBridge.onToolResult(event));
+  pi.on("message_end", (event) => renderBridge.onMessageEnd(event) as any);
   pi.on("tool_call", toolCallListener);
 
   // Refresh only configured global/current-project directories before every
@@ -115,6 +130,7 @@ export function setupEventListeners(pi: ExtensionAPI): void {
    * inherits stale manager, coordinator, or store references.
    */
   const cleanupSessionRuntime = async (cleanupEpoch: number): Promise<void> => {
+    renderBridge.clear();
     let cleanupError: unknown;
     const attempt = async (work: () => void | Promise<void>) => {
       try {
@@ -169,6 +185,7 @@ export function setupEventListeners(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event: unknown, ctx: ExtensionContext) => {
     if (cleanupPromise) await cleanupPromise;
+    renderBridge.startSession();
     const startupEpoch = ++sessionEpoch;
     setSessionCtx(ctx);
     try {

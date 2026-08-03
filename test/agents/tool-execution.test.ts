@@ -157,6 +157,7 @@ vi.mock("../../src/agents/usage.js", () => ({
 
 // Import after mocks are in place
 import { executeAgentTool, toolCallListener } from "../../src/agents/tool-execution.js";
+import { AGENT_RENDER_DETAILS_KEY } from "../../src/agents/agent-renderer.js";
 import * as agentTypes from "../../src/agents/agent-types.js";
 import * as utils from "../../src/utils.js";
 
@@ -335,6 +336,48 @@ describe("executeAgentTool — explicit agent type", () => {
     expect(runtimeSettingsSnapshot.current.modelFor).toHaveBeenCalled();
     expect(runtimeSettingsSnapshot.current.thinkingSettingFor).toHaveBeenCalled();
     expect(mockCoordinatorSpawn).toHaveBeenCalledOnce();
+  });
+
+  it("publishes resolved renderer metadata in partial and final results", async () => {
+    const model = { provider: "openai", id: "gpt-4o", reasoning: true };
+    const record = {
+      id: "agent-render-details", result: "done",
+      display: { type: "general-purpose", description: "Test agent" },
+      lifecycle: { status: "completed", startedAt: 0, completedAt: 1 },
+      execution: { session: { model, thinkingLevel: "low" } },
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, toolUses: 0, compactionCount: 0 },
+    };
+    mockGetRecord.mockReturnValueOnce(record);
+    (utils.findModelInRegistry as any).mockReturnValueOnce(model);
+    const onUpdate = vi.fn();
+    const prompt = "first line\nsecond line";
+
+    const result = await executeAgentTool(
+      "tc-render-details",
+      makeParams({ prompt, thinking: "high" }),
+      undefined,
+      onUpdate,
+      ctx,
+    );
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      content: [],
+      details: {
+        [AGENT_RENDER_DETAILS_KEY]: {
+          role: "general-purpose",
+          model: "openai/gpt-4o",
+          thinking: "high",
+          prompt,
+        },
+      },
+    });
+    expect(result.content[0].text).toBe("done");
+    expect(result.details[AGENT_RENDER_DETAILS_KEY]).toEqual({
+      role: "general-purpose",
+      model: "openai/gpt-4o",
+      thinking: "low",
+      prompt,
+    });
   });
 
   it("keeps listener-injected settings distinct from explicit tool values at execution", async () => {

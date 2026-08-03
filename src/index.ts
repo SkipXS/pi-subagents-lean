@@ -25,6 +25,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getSubagentRuntimeContext, isInsideSubagentSpawn, setPiInstance } from "./shell.js";
 import { registerTools } from "./registration.js";
 import { setupEventListeners } from "./events.js";
+import { createAgentRenderMetadataBridge } from "./agents/agent-render-bridge.js";
 
 export default function (pi: ExtensionAPI) {
   // Stay inert when Pi binds this extension while loading an agent session.
@@ -32,6 +33,7 @@ export default function (pi: ExtensionAPI) {
   // control tool or listener can leak into a subagent.
   if (getSubagentRuntimeContext() || isInsideSubagentSpawn()) return;
   setPiInstance(pi);
-  registerTools(pi);
-  setupEventListeners(pi);
+  const renderBridge = createAgentRenderMetadataBridge();
+  registerTools(pi, renderBridge);
+  setupEventListeners(pi, renderBridge);
 }

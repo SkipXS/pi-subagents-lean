@@ -1,7 +1,9 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { executeAgentTool, executeContinueAgentTool, executeStopAgentTool } from "./agents/tool-execution.js";
+import type { AgentRenderMetadataBridge } from "./agents/agent-render-bridge.js";
 import { executeAgentStatusTool } from "./agents/agent-status.js";
+import { renderAgentCall, renderAgentResult } from "./agents/agent-renderer.js";
 
 // Provider-side json_schema enforcement; "prefer" falls back gracefully on
 // providers without strict mode (e.g. local Ollama).
@@ -20,7 +22,15 @@ function throwingToolExecute<T extends (...args: any[]) => Promise<any>>(execute
 }
 
 /** Register the Agent tool once at extension initialization. */
-function registerAgentTool(pi: ExtensionAPI): void {
+function registerAgentTool(pi: ExtensionAPI, renderBridge: AgentRenderMetadataBridge | undefined): void {
+  const executeAgentWithBridge: typeof executeAgentTool = (
+    toolCallId,
+    params,
+    signal,
+    onUpdate,
+    ctx,
+  ) => executeAgentTool(toolCallId, params, signal, onUpdate, ctx, renderBridge);
+
   pi.registerTool({
     name: "Agent",
     label: "Agent",
@@ -32,13 +42,18 @@ function registerAgentTool(pi: ExtensionAPI): void {
       run_in_background: Type.Optional(Type.Boolean()),
       worktree_path: Type.Optional(Type.String()),
     }, { additionalProperties: false }),
-    execute: throwingToolExecute(executeAgentTool),
+    execute: throwingToolExecute(executeAgentWithBridge),
+    renderCall: renderAgentCall,
+    renderResult: renderAgentResult,
   });
 }
 
 /** Register all four public tools. */
-export function registerTools(pi: ExtensionAPI): void {
-  registerAgentTool(pi);
+export function registerTools(
+  pi: ExtensionAPI,
+  renderBridge?: AgentRenderMetadataBridge,
+): void {
+  registerAgentTool(pi, renderBridge);
 
   // AgentContinue remains a strict-schema compatible root continuation tool.
   const continueAgentTool = {

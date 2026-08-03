@@ -210,6 +210,13 @@ describe("tool registration", () => {
     const names = api.tools.map((t) => t.name);
     expect(names).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
   });
+
+  it("keeps the public Agent wrapper's pre-abort contract", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(findTool(api, "Agent")!.execute!("contract-agent", {}, controller.signal, undefined, {}))
+      .rejects.toThrow("Agent execution cancelled");
+  });
 });
 
 /* ------------------------------------------------------------------ */
