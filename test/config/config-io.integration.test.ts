@@ -4,6 +4,7 @@ import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { createConfigFileIO } from "../../src/config/config-io.ts";
 
 let testDir: string | undefined;
 
@@ -88,18 +89,59 @@ describe("config I/O with the real filesystem", () => {
     expect(configIo.loadConfig().config).toMatchObject({ concurrency: { default: 7 } });
   });
 
-  it.each([
-    ["non-record root", "null", false],
-    ["invalid agent", JSON.stringify({ agent: "not-an-object" }), false],
-    ["invalid concurrency", JSON.stringify({ concurrency: "not-an-object" }), false],
-    ["invalid thinking overrides", JSON.stringify({ thinkingOverrides: "not-an-object" }), false],
-    ["optional sections omitted", JSON.stringify({}), true],
-    ["optional sections are records", JSON.stringify({ agent: {}, concurrency: {}, thinkingOverrides: {} }), true],
-  ] as const)("validates the real config shape when %s", async (_label, contents, valid) => {
-    const configIo = await loadConfigModule();
-    writeFileSync(join(testDir!, "subagents-lean.json"), contents, "utf8");
+  it("covers shape, update, recovery, and stale-lock paths on one static module instance", () => {
+    const directory = mkdtempSync(join(tmpdir(), "subagents-config-static-"));
+    testDir = directory;
+    const configPath = join(directory, "subagents-lean.json");
+    const lockPath = `${configPath}.lock`;
+    const killCalls: Array<[number, 0]> = [];
+    const kill = (pid: number, signal: 0): void => {
+      killCalls.push([pid, signal]);
+      throw Object.assign(new Error("stale owner is gone"), { code: "ESRCH" });
+    };
+    const io = createConfigFileIO(directory, {
+      lockTimeoutMs: 0,
+      staleLockMs: 10,
+      now: () => 31_000,
+      hostname: () => "static-test-host",
+      kill,
+    });
 
-    expect(configIo.loadConfig().health).toBe(valid ? "healthy" : "unrecoverable");
+    expect(io.load().health).toBe("healthy");
+    for (const [contents, healthy] of [
+      ["null", false],
+      [JSON.stringify({ agent: "not-an-object" }), false],
+      [JSON.stringify({ concurrency: "not-an-object" }), false],
+      [JSON.stringify({ thinkingOverrides: "not-an-object" }), false],
+      [JSON.stringify({}), true],
+      [JSON.stringify({ agent: {}, concurrency: {}, thinkingOverrides: {} }), true],
+    ] as const) {
+      writeFileSync(configPath, contents, "utf8");
+      expect(io.load().health).toBe(healthy ? "healthy" : "unrecoverable");
+    }
+
+    const primary = JSON.stringify({ agent: { forceBackground: false }, concurrency: { default: 4 } });
+    writeFileSync(configPath, primary, "utf8");
+    io.update((config) => { config.agent.forceBackground = true; });
+    expect(readFileSync(`${configPath}.bak`, "utf8")).toBe(primary);
+    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
+
+    writeFileSync(configPath, "{broken", "utf8");
+    writeFileSync(`${configPath}.bak`, JSON.stringify({ agent: { forceBackground: false }, concurrency: { default: 9 } }), "utf8");
+    expect(io.load()).toMatchObject({ health: "using-backup", canRepair: true });
+    expect(io.repair()).toMatchObject({ health: "healthy", config: { concurrency: { default: 9 } } });
+    expect(readdirSync(directory).some((name) => name.startsWith("subagents-lean.json.corrupt-"))).toBe(true);
+
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+      token: "stale-owner",
+      pid: 321,
+      hostname: "static-test-host",
+      createdAt: 0,
+    }), "utf8");
+    io.update((config) => { config.agent.forceBackground = true; });
+    expect(killCalls).toEqual([[321, 0]]);
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("normalizes legacy values from a real config file", async () => {
@@ -148,36 +190,6 @@ describe("config I/O with the real filesystem", () => {
 
     expect(readFileSync(`${configPath}.bak`, "utf8")).toBe(primary);
     expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
-  });
-
-  it("reclaims a stale lock with real files and retries in the same process", async () => {
-    const { createConfigFileIO } = await loadConfigModule();
-    const configPath = join(testDir!, "subagents-lean.json");
-    const lockPath = `${configPath}.lock`;
-    mkdirSync(lockPath);
-    writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
-      token: "stale-owner",
-      pid: 321,
-      hostname: hostname(),
-      createdAt: 0,
-    }), "utf8");
-    const kill = vi.fn(() => {
-      throw Object.assign(new Error("stale owner is gone"), { code: "ESRCH" });
-    });
-
-    const io = createConfigFileIO(testDir!, {
-      lockTimeoutMs: 0,
-      staleLockMs: 10,
-      now: () => 100_000,
-      hostname: () => hostname(),
-      kill,
-    });
-    const result = io.update((config) => { config.agent.forceBackground = true; });
-
-    expect(result.health).toBe("healthy");
-    expect(kill).toHaveBeenCalledWith(321, 0);
-    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
-    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("uses a valid backup without overwriting a corrupt primary, then repairs with an archive", async () => {
