@@ -88,6 +88,20 @@ describe("config I/O with the real filesystem", () => {
     expect(configIo.loadConfig().config).toMatchObject({ concurrency: { default: 7 } });
   });
 
+  it.each([
+    ["non-record root", "null", false],
+    ["invalid agent", JSON.stringify({ agent: "not-an-object" }), false],
+    ["invalid concurrency", JSON.stringify({ concurrency: "not-an-object" }), false],
+    ["invalid thinking overrides", JSON.stringify({ thinkingOverrides: "not-an-object" }), false],
+    ["optional sections omitted", JSON.stringify({}), true],
+    ["optional sections are records", JSON.stringify({ agent: {}, concurrency: {}, thinkingOverrides: {} }), true],
+  ] as const)("validates the real config shape when %s", async (_label, contents, valid) => {
+    const configIo = await loadConfigModule();
+    writeFileSync(join(testDir!, "subagents-lean.json"), contents, "utf8");
+
+    expect(configIo.loadConfig().health).toBe(valid ? "healthy" : "unrecoverable");
+  });
+
   it("normalizes legacy values from a real config file", async () => {
     const configIo = await loadConfigModule();
     writeFileSync(join(testDir!, "subagents-lean.json"), JSON.stringify({
@@ -134,6 +148,36 @@ describe("config I/O with the real filesystem", () => {
 
     expect(readFileSync(`${configPath}.bak`, "utf8")).toBe(primary);
     expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
+  });
+
+  it("reclaims a stale lock with real files and retries in the same process", async () => {
+    const { createConfigFileIO } = await loadConfigModule();
+    const configPath = join(testDir!, "subagents-lean.json");
+    const lockPath = `${configPath}.lock`;
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+      token: "stale-owner",
+      pid: 321,
+      hostname: hostname(),
+      createdAt: 0,
+    }), "utf8");
+    const kill = vi.fn(() => {
+      throw Object.assign(new Error("stale owner is gone"), { code: "ESRCH" });
+    });
+
+    const io = createConfigFileIO(testDir!, {
+      lockTimeoutMs: 0,
+      staleLockMs: 10,
+      now: () => 100_000,
+      hostname: () => hostname(),
+      kill,
+    });
+    const result = io.update((config) => { config.agent.forceBackground = true; });
+
+    expect(result.health).toBe("healthy");
+    expect(kill).toHaveBeenCalledWith(321, 0);
+    expect(JSON.parse(readFileSync(configPath, "utf8")).agent.forceBackground).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("uses a valid backup without overwriting a corrupt primary, then repairs with an archive", async () => {

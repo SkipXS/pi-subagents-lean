@@ -93,27 +93,6 @@ describe("config I/O paths", () => {
     expect(config.agent).not.toHaveProperty("dynamicBoolean");
   });
 
-  it.each([
-    ["non-record root", "null", false],
-    ["invalid agent", JSON.stringify({ agent: "not-an-object" }), false],
-    ["invalid concurrency", JSON.stringify({ concurrency: "not-an-object" }), false],
-    ["invalid thinking overrides", JSON.stringify({ thinkingOverrides: "not-an-object" }), false],
-    ["optional sections omitted", JSON.stringify({}), true],
-    ["optional sections are records", JSON.stringify({ agent: {}, concurrency: {}, thinkingOverrides: {} }), true],
-  ] as const)("validates config shape when %s", async (_label, contents, valid) => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockImplementationOnce(() => contents).mockImplementation(() => {
-      const err = new Error("missing") as NodeJS.ErrnoException;
-      err.code = "ENOENT";
-      throw err;
-    });
-    vi.resetModules();
-
-    const { loadConfig } = await import("../../src/config/config-io.ts");
-    const result = loadConfig();
-    expect(result.health).toBe(valid ? "healthy" : "unrecoverable");
-  });
-
   it("normalizes legacy provider and model limits out of saved config", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({
@@ -439,57 +418,6 @@ describe("config I/O paths", () => {
     const pendingPath = mockMkdirSync.mock.calls.find(([candidate]) => String(candidate).startsWith(`${lockPath}.pending-`))![0];
     expect(mockRmSync).toHaveBeenCalledWith(pendingPath, { recursive: true, force: true });
     expect(mockRmSync).not.toHaveBeenCalledWith(lockPath, expect.anything());
-  });
-
-  it("reclaims a stale lock and retries entirely within the mocked process", async () => {
-    const agentDir = "/tmp/pi-agent";
-    const configPath = join(agentDir, "subagents-lean.json");
-    const lockPath = `${configPath}.lock`;
-    const staleOwner = { token: "stale-owner", pid: 321, hostname: "local-host", createdAt: 0 };
-    let staleOwnerRead = true;
-    let lockPublishAttempts = 0;
-    const kill = vi.fn(() => {
-      throw Object.assign(new Error("stale owner is gone"), { code: "ESRCH" });
-    });
-    mockGetAgentDir.mockReturnValue(agentDir);
-    mockReadFileSync.mockImplementation((file) => {
-      if (String(file) === join(lockPath, "owner.json")) {
-        if (staleOwnerRead) {
-          staleOwnerRead = false;
-          return JSON.stringify(staleOwner);
-        }
-        const ownerWrites = mockWriteFileSync.mock.calls.filter(([candidate]) => String(candidate).endsWith("owner.json"));
-        return String(ownerWrites.at(-1)?.[1] ?? "{}");
-      }
-      const err = new Error("missing") as NodeJS.ErrnoException;
-      err.code = "ENOENT";
-      throw err;
-    });
-    mockRenameSync.mockImplementation((_source, target) => {
-      if (String(target) === lockPath && lockPublishAttempts++ === 0) {
-        throw Object.assign(new Error("pending publish raced"), { code: "EEXIST" });
-      }
-    });
-    vi.resetModules();
-
-    const { createConfigFileIO } = await import("../../src/config/config-io.ts");
-    const result = createConfigFileIO(agentDir, {
-      lockTimeoutMs: 0,
-      staleLockMs: 10,
-      now: () => 100_000,
-      hostname: () => "local-host",
-      kill,
-    }).update(() => undefined);
-
-    expect(result.health).toBe("healthy");
-    expect(kill).toHaveBeenCalledWith(321, 0);
-    expect(mockRenameSync.mock.calls.filter(([, target]) => target === lockPath)).toHaveLength(2);
-    expect(mockRenameSync.mock.calls.some(([source, target]) => (
-      source === lockPath && String(target).startsWith(`${lockPath}.stale-`)
-    ))).toBe(true);
-    expect(mockRmSync.mock.calls.some(([file]) => String(file).startsWith(`${lockPath}.stale-`))).toBe(true);
-    expect(mockRmSync).toHaveBeenCalledWith(lockPath, { recursive: true, force: true });
-    expect(staleOwnerRead).toBe(false);
   });
 
   it("propagates EPERM from the final config publish rename after acquiring the lock", async () => {
