@@ -61,10 +61,7 @@ export function shellMock(fns: ShellMockFns = {}) {
   };
   const pi = fns.pi ?? { sendMessage: vi.fn(), exec: vi.fn() };
   const sessionCtx = fns.sessionCtx ?? { cwd: "/home/test" };
-  const store = fns.store ?? {
-    agent: { forceBackground: false },
-    modelFor: () => "",
-  };
+  const store = fns.store ?? { agent: {} };
   const coordinator = fns.coordinator ?? { spawn: vi.fn() };
 
   return {
@@ -310,7 +307,6 @@ export function makeAgentMd(overrides: Record<string, unknown> = {}): string {
     name: "test-agent",
     description: "A test agent",
     model: "anthropic/claude-sonnet-4-6",
-    display_name: "Test Agent",
     tools: "read, bash, edit",
     extensions: "true",
     skills: "true",

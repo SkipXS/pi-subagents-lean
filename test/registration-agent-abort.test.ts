@@ -22,19 +22,13 @@ vi.mock("../src/agents/agent-types.js", () => ({
 vi.mock("../src/shell.js", () => ({
   getPiInstance: () => ({ exec: vi.fn() }),
   getSessionCtx: () => ({ cwd: "/project" }),
-  getStore: () => ({
-    agent: { forceBackground: false },
-    modelSettingFor: () => ({ value: undefined }),
-    thinkingSettingFor: () => ({ value: undefined }),
-  }),
+  getStore: () => ({ agent: {}, createSubagentRuntimeSettings: () => ({ agent: {} }) }),
   getCoordinator: () => ({ spawn: boundary.coordinatorSpawn }),
   getManager: () => ({ getRecord: vi.fn(), listAgents: vi.fn(() => []) }),
 }));
 
 vi.mock("../src/utils.js", () => ({
-  parseModelKey: vi.fn(),
   findModelInRegistry: vi.fn(),
-  parseThinkingLevel: vi.fn(),
 }));
 
 vi.mock("../src/agents/usage.js", () => ({

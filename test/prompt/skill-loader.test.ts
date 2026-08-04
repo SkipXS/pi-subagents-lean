@@ -2,20 +2,19 @@
  * skill-loader.test.ts — Tests for skill loading and prompt integration.
  *
  * Covers:
- *   - preloadSkills: loads full SKILL.md content via Pi's loadSkills
  *   - loadSkillMeta: loads metadata only (name, description, location)
  *   - loadAllSkills: correct precedence, filtering, dedup
- *   - buildAgentPrompt: correct format for whitelist vs preload
+ *   - buildAgentPrompt: correct metadata format
  *   - Integration proof with secret token verification
  *
  * Pi's loadSkills/loadSkillsFromDir are mocked to isolate from system skills.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { preloadSkills, loadSkillMeta, loadAllSkills } from "../../src/prompt/skill-loader.ts";
+import { loadSkillMeta, loadAllSkills } from "../../src/prompt/skill-loader.ts";
 import { buildAgentPrompt } from "../../src/prompt/prompts.ts";
 import type { AgentConfig, EnvInfo } from "../../src/types.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
@@ -159,54 +158,6 @@ describe("loadAllSkills", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  Unit: preloadSkills                                               */
-/* ------------------------------------------------------------------ */
-
-describe("preloadSkills", () => {
-  it("loads full content and extracts description from a skill directory", () => {
-    createSkillDir(tmpDir, "tdd", "Test-driven development workflow", "## TDD Steps\n1. Red\n2. Green\n3. Refactor");
-    const tddPath = join(tmpDir, ".pi", "skills", "tdd", "SKILL.md");
-    mockLoadSkills.mockReturnValue({
-      skills: [makeSkill("tdd", "Test-driven development workflow", tddPath)],
-      diagnostics: [],
-    });
-
-    const result = preloadSkills(["tdd"], tmpDir);
-
-    expect(result).toHaveLength(1);
-    expect(result[0].name).toBe("tdd");
-    expect(result[0].description).toBe("Test-driven development workflow");
-    expect(result[0].content).toContain("## TDD Steps");
-    expect(result[0].content).toContain("1. Red");
-  });
-
-  it("loads full content and extracts description from a flat skill file", () => {
-    createFlatSkill(tmpDir, "debug", "Debugging workflow", "## Debug Steps\n1. Reproduce\n2. Isolate\n3. Fix");
-    const debugPath = join(tmpDir, ".pi", "skills", "debug.md");
-    mockLoadSkills.mockReturnValue({
-      skills: [makeSkill("debug", "Debugging workflow", debugPath)],
-      diagnostics: [],
-    });
-
-    const result = preloadSkills(["debug"], tmpDir);
-
-    expect(result).toHaveLength(1);
-    expect(result[0].name).toBe("debug");
-    expect(result[0].description).toBe("Debugging workflow");
-    expect(result[0].content).toContain("## Debug Steps");
-  });
-
-  it("returns error message for missing skill", () => {
-    const result = preloadSkills(["nonexistent"], tmpDir);
-
-    expect(result).toHaveLength(1);
-    expect(result[0].name).toBe("nonexistent");
-    expect(result[0].content).toContain("not found");
-    expect(result[0].description).toBe("");
-  });
-});
-
-/* ------------------------------------------------------------------ */
 /*  Unit: loadSkillMeta                                               */
 /* ------------------------------------------------------------------ */
 
@@ -271,6 +222,21 @@ describe("loadSkillMeta", () => {
     expect(result[0].description).toBe("TDD workflow");
     expect(result[1].name).toBe("debug");
     expect(result[1].description).toBe("Debug workflow");
+  });
+
+  it("subtracts excluded skills before loading metadata", () => {
+    const tddPath = join(tmpDir, ".pi", "skills", "tdd", "SKILL.md");
+    const debugPath = join(tmpDir, ".pi", "skills", "debug", "SKILL.md");
+    mockLoadSkills.mockReturnValue({
+      skills: [
+        makeSkill("tdd", "TDD workflow", tddPath),
+        makeSkill("debug", "Debug workflow", debugPath),
+      ],
+      diagnostics: [],
+    });
+
+    expect(loadSkillMeta(["tdd", "debug"], tmpDir, ["debug"]).map(({ name }) => name))
+      .toEqual(["tdd"]);
   });
 
   it("threads disableModelInvocation from loaded skill", () => {
@@ -342,114 +308,5 @@ describe("Prompt integration: whitelist excludes body", () => {
 
     expect(prompt).not.toContain(SECRET_TOKEN);
     expect(prompt).not.toContain(BODY_MARKER);
-  });
-});
-
-describe("Prompt integration: preload in available_skills with content tag", () => {
-  it("Preloaded skill appears in available_skills with content tag", () => {
-    createProofSkill();
-    const tddPath = join(tmpDir, ".pi", "skills", "proof-skill", "SKILL.md");
-    mockLoadSkills.mockReturnValue({
-      skills: [makeSkill("proof-skill", "Skill with secret token", tddPath)],
-      diagnostics: [],
-    });
-
-    const blocks = preloadSkills(["proof-skill"], tmpDir);
-    const prompt = buildAgentPrompt(baseConfig, tmpDir, env, { skillBlocks: blocks });
-
-    expect(prompt).toContain("<available_skills>");
-    expect(prompt).toContain("<skill><name>proof-skill</name><description>Skill with secret token</description><content>");
-    expect(prompt).toContain(SECRET_TOKEN);
-    expect(prompt).toContain(BODY_MARKER);
-    expect(prompt).toContain("</content></skill>");
-    expect(prompt).not.toContain("# Preloaded Skill:");
-  });
-});
-
-describe("Prompt integration: both together", () => {
-  it("metadata skill has no secret, preloaded skill has secret in content tag", () => {
-    createProofSkill();
-    createSkillDir(tmpDir, "other-skill", "Another skill", "OTHER_SECRET_123");
-
-    const proofPath = join(tmpDir, ".pi", "skills", "proof-skill", "SKILL.md");
-    const otherPath = join(tmpDir, ".pi", "skills", "other-skill", "SKILL.md");
-    mockLoadSkills.mockReturnValue({
-      skills: [
-        makeSkill("proof-skill", "Skill with secret token", proofPath),
-        makeSkill("other-skill", "Another skill", otherPath),
-      ],
-      diagnostics: [],
-    });
-    mockFormatSkillsForPrompt.mockReturnValue(
-      `<skill><name>proof-skill</name><description>Skill with secret token</description><location>${proofPath}</location></skill>`,
-    );
-
-    const metas = loadSkillMeta(["proof-skill"], tmpDir);
-    const blocks = preloadSkills(["other-skill"], tmpDir);
-    const prompt = buildAgentPrompt(baseConfig, tmpDir, env, { skillMetas: metas, skillBlocks: blocks });
-
-    // Single available_skills block
-    const blockCount = (prompt.match(/<available_skills>/g) || []).length;
-    expect(blockCount).toBe(1);
-
-    // proof-skill: metadata only (location) — from formatSkillsForPrompt
-    expect(prompt).toContain("<name>proof-skill</name>");
-    expect(prompt).toContain("<description>Skill with secret token</description>");
-    expect(prompt).not.toContain(SECRET_TOKEN);
-
-    // other-skill: preloaded (content tag)
-    expect(prompt).toContain("<skill><name>other-skill</name><description>Another skill</description><content>");
-    expect(prompt).toContain("OTHER_SECRET_123");
-
-    expect(prompt).not.toContain("# Preloaded Skill:");
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  Unit: preloadSkills — description from Skill object               */
-/* ------------------------------------------------------------------ */
-
-describe("preloadSkills — description from Skill object", () => {
-  it("returns empty description when skill not found", () => {
-    const result = preloadSkills(["nonexistent"], tmpDir);
-    expect(result[0].description).toBe("");
-  });
-
-  it("uses description from Skill object", () => {
-    createSkillDir(tmpDir, "test-skill", "My skill description", "Body text");
-    const skillPath = join(tmpDir, ".pi", "skills", "test-skill", "SKILL.md");
-    mockLoadSkills.mockReturnValue({
-      skills: [makeSkill("test-skill", "My skill description", skillPath)],
-      diagnostics: [],
-    });
-
-    const result = preloadSkills(["test-skill"], tmpDir);
-    expect(result[0].description).toBe("My skill description");
-  });
-
-  it("returns empty description when Skill has no description", () => {
-    const skillDir = join(tmpDir, ".pi", "skills", "plain");
-    mkdirSync(skillDir, { recursive: true });
-    const skillPath = join(skillDir, "SKILL.md");
-    writeFileSync(skillPath, "Just body text, no frontmatter.");
-    mockLoadSkills.mockReturnValue({
-      skills: [makeSkill("plain", "", skillPath)],
-      diagnostics: [],
-    });
-
-    const result = preloadSkills(["plain"], tmpDir);
-    expect(result[0].description).toBe("");
-  });
-
-  it("handles file read errors gracefully", () => {
-    const missingPath = join(tmpDir, ".pi", "skills", "gone", "SKILL.md");
-    mockLoadSkills.mockReturnValue({
-      skills: [makeSkill("gone", "Was here", missingPath)],
-      diagnostics: [],
-    });
-
-    const result = preloadSkills(["gone"], tmpDir);
-    expect(result[0].content).toContain("not found");
-    expect(result[0].description).toBe("");
   });
 });

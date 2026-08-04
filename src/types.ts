@@ -117,7 +117,7 @@ export type AgentStatus = "queued" | "running" | "completed" | "aborted" | "stop
 /** Who initiated an agent stop: a control tool, the agent, or its parent turn. */
 export type StopInitiator = "user" | "agent" | "parent";
 
-/** Background-result delivery state; `accepted` only means no synchronous throw, while `failed` records a diagnostic error until eviction. */
+/** Background-result delivery state; `accepted` only means no synchronous throw, while `failed` records a diagnostic error until session shutdown. */
 export type BackgroundDeliveryState = "pending" | "accepted" | "failed" | "abandoned";
 
 /** Whether an execution runs in the foreground (awaited) or background (notification). */
@@ -152,7 +152,7 @@ export interface AgentExecutionSummary {
   error?: string;
 }
 
-/** Delivery diagnostics retained with a background result until its record is evicted. */
+/** Delivery diagnostics retained with a background result until session shutdown. */
 export interface BackgroundDelivery {
   state: BackgroundDeliveryState;
   /** Number of automatic sendMessage attempts; failed delivery is not retried. */
@@ -163,7 +163,7 @@ export interface BackgroundDelivery {
 
 /**
  * Lifecycle state: when the agent started, completed, and its current status.
- * Used by agent-manager for lifecycle control and retention.
+ * Used by agent-manager for lifecycle control and session lifetime.
  */
 export interface AgentLifecycle {
   status: AgentStatus;
@@ -173,14 +173,13 @@ export interface AgentLifecycle {
   /**
    * Whether the result was delivered to the LLM, or has no remaining delivery
    * path (for example, its parent tool call was already aborted). This is
-   * delivery telemetry only; cleanup() keeps the existing hard terminal-age
-   * retention policy and does not gate eviction on this flag.
+   * delivery telemetry only; it does not control the session-lifetime record.
    */
   resultConsumed?: boolean;
   /**
    * True only after all runner/queue work has settled. A stopped running agent is
    * terminal for status reporting before its runner has actually released its
-   * session, so retention must not release execution handles until this is true.
+   * session; session shutdown may release its handles immediately.
    */
   settled?: boolean;
 }

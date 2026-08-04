@@ -1,6 +1,5 @@
 ---
 name: implementer
-display_name: Implementer
 description: Implementation agent for bounded changes to code, tests, configuration, or documentation, with focused validation.
 tools: [read, grep, bash, edit, write]
 extensions: false

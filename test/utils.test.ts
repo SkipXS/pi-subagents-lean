@@ -27,8 +27,8 @@ describe("summarizeToolArgs", () => {
 
 describe("isUnsafeName", () => {
   it("allows simple alphanumeric names", () => {
-    expect(isUnsafeName("general-purpose")).toBe(false);
-    expect(isUnsafeName("Explore")).toBe(false);
+    expect(isUnsafeName("scout")).toBe(false);
+    expect(isUnsafeName("architect")).toBe(false);
     expect(isUnsafeName("myAgent42")).toBe(false);
   });
 

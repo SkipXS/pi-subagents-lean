@@ -23,14 +23,13 @@ import { parseThinkingLevel } from "../utils.js";
 /** Raw agent config as parsed from .md frontmatter. */
 export interface AgentConfigFromMd {
   name?: string;
-  display_name?: string;
   description?: string;
-  tools?: string[];
+  tools?: boolean | string[];
   exclude_tools?: string[];
   extensions?: boolean | string[];
   exclude_extensions?: string[];
   skills?: boolean | string[];
-  preload_skills?: string[] | false;
+  exclude_skills?: string[];
   model?: string;
   thinking?: ThinkingLevel;
   hidden?: boolean;
@@ -168,26 +167,6 @@ export function parseExtensions(
   return undefined;
 }
 
-/**
- * Parse the preload_skills field from frontmatter.
- * Unlike parseExtensions, does NOT accept true/"true"/"all" —
- * preload requires an explicit list of skill names.
- */
-export function parsePreloadSkills(
-  raw: unknown,
-): string[] | false | undefined {
-  if (raw === false || raw === "false" || raw === "none") {
-    return false;
-  }
-  if (typeof raw === "string" && raw.length > 0) {
-    return splitCommaList(raw);
-  }
-  if (Array.isArray(raw)) {
-    return raw.map(String);
-  }
-  return undefined; // true/"true"/"all" not supported
-}
-
 /* ------------------------------------------------------------------ */
 /*  Frontmatter value helpers                                          */
 /* ------------------------------------------------------------------ */
@@ -253,14 +232,13 @@ export function parseAgentFile(
 
   return {
     name: parseString(frontmatter, "name"),
-    display_name: parseString(frontmatter, "display_name"),
     description: parseString(frontmatter, "description"),
-    tools: parseStringArray(frontmatter, "tools"),
+    tools: parseExtensions(frontmatter.tools),
     exclude_tools: parseStringArray(frontmatter, "exclude_tools"),
     extensions: parseExtensions(frontmatter.extensions),
     exclude_extensions: parseStringArray(frontmatter, "exclude_extensions"),
     skills: parseExtensions(frontmatter.skills),
-    preload_skills: parsePreloadSkills(frontmatter.preload_skills),
+    exclude_skills: parseStringArray(frontmatter, "exclude_skills"),
     model: parseString(frontmatter, "model"),
     thinking: parseThinkingLevel(parseString(frontmatter, "thinking")),
     hidden: parseBoolean(frontmatter, "hidden"),
@@ -345,15 +323,30 @@ export function mergeAgents(
 ): Map<string, AgentConfig> {
   const result = new Map<string, AgentConfig>();
 
-  // Start with defaults
+  // Start with detached defaults. Discovery results are retained in the
+  // registry, so never let a caller mutate the source map through an array
+  // field on the merged config.
   for (const [name, config] of defaults) {
-    result.set(name, { ...config });
+    result.set(name, cloneAgentConfig(config));
   }
 
-  // Apply overrides in precedence order: user, then shared, then project
+  // Apply overrides in precedence order: user, then shared, then project.
+  // Names identify roles case-insensitively, while the first layer that creates
+  // a role supplies its canonical map key.
   mergeAgentOverrides(result, userAgents);
   mergeAgentOverrides(result, sharedAgents);
   mergeAgentOverrides(result, projectAgents);
+
+  // A missing selection is deliberately closed after all field-wise layers
+  // have been merged. This preserves inherited explicit values while making a
+  // new/minimal definition deterministic without global implicit settings.
+  for (const [name, config] of result) {
+    result.set(name, cloneAgentConfig({
+      ...config,
+      skills: config.skills ?? false,
+      extensions: config.extensions ?? false,
+    }));
+  }
 
   return result;
 }
@@ -368,11 +361,12 @@ function mergeAgentOverrides(
 ): void {
   for (const md of agents) {
     if (!md.name) continue;
-    const existing = result.get(md.name);
-    if (existing) {
-      result.set(md.name, { ...existing, ...fromMd(md) });
+    const existingKey = [...result.keys()].find((key) => key.toLowerCase() === md.name!.toLowerCase());
+    if (existingKey !== undefined) {
+      const existing = result.get(existingKey)!;
+      result.set(existingKey, cloneAgentConfig({ ...existing, ...fromMd(md) }));
     } else {
-      result.set(md.name, { ...BASE_DEFAULTS, ...fromMd(md) });
+      result.set(md.name, cloneAgentConfig({ ...BASE_DEFAULTS, ...fromMd(md) }));
     }
   }
 }
@@ -389,15 +383,17 @@ function mergeAgentOverrides(
 function fromMd(md: AgentConfigFromMd): Partial<AgentConfig> {
   const obj: Record<string, unknown> = {
     name: md.name,
-    displayName: md.display_name,
     description: md.description,
-    registeredTools: md.tools,
-    tools: md.tools,
-    excludeTools: md.exclude_tools,
-    extensions: md.extensions,
-    excludeExtensions: md.exclude_extensions,
-    skills: md.skills,
-    preloadSkills: md.preload_skills,
+    // A tools list seeds the registry and controls visible schemas. Boolean
+    // values only control schema selection; the runner supplies its normal
+    // built-in registry base for true/undefined.
+    registeredTools: md.tools === undefined || typeof md.tools === "boolean" ? undefined : [...md.tools],
+    tools: Array.isArray(md.tools) ? [...md.tools] : md.tools,
+    excludeTools: md.exclude_tools ? [...md.exclude_tools] : md.exclude_tools,
+    extensions: Array.isArray(md.extensions) ? [...md.extensions] : md.extensions,
+    excludeExtensions: md.exclude_extensions ? [...md.exclude_extensions] : md.exclude_extensions,
+    skills: Array.isArray(md.skills) ? [...md.skills] : md.skills,
+    excludeSkills: md.exclude_skills ? [...md.exclude_skills] : md.exclude_skills,
     model: md.model,
     thinkingLevel: md.thinking,
     hidden: md.hidden,
@@ -405,6 +401,20 @@ function fromMd(md: AgentConfigFromMd): Partial<AgentConfig> {
     source: md.source === "user" ? "global" : md.source,
   };
   return compactDefined(obj) as Partial<AgentConfig>;
+}
+
+/** Clone every mutable selection field carried by an agent definition. */
+function cloneAgentConfig(config: AgentConfig): AgentConfig {
+  return {
+    ...config,
+    registeredTools: config.registeredTools && [...config.registeredTools],
+    tools: Array.isArray(config.tools) ? [...config.tools] : config.tools,
+    excludeTools: config.excludeTools && [...config.excludeTools],
+    extensions: Array.isArray(config.extensions) ? [...config.extensions] : config.extensions,
+    excludeExtensions: config.excludeExtensions && [...config.excludeExtensions],
+    skills: Array.isArray(config.skills) ? [...config.skills] : config.skills,
+    excludeSkills: config.excludeSkills && [...config.excludeSkills],
+  };
 }
 
 /**
@@ -415,11 +425,13 @@ function fromMd(md: AgentConfigFromMd): Partial<AgentConfig> {
 const BASE_DEFAULTS: AgentConfig = {
   name: "unknown",
   description: "",
-  // extensions and skills intentionally omitted — resolved by global default
+  // Missing selections resolve to false after the field-wise merge.
+  extensions: false,
+  skills: false,
   systemPrompt: "",
 };
 
 /** Convert a parsed Markdown agent into a complete standalone config. */
 export function toAgentConfig(md: AgentConfigFromMd): AgentConfig {
-  return { ...BASE_DEFAULTS, ...fromMd(md) } as AgentConfig;
+  return cloneAgentConfig({ ...BASE_DEFAULTS, ...fromMd(md) } as AgentConfig);
 }

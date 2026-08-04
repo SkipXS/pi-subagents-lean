@@ -3,11 +3,10 @@
  *
  * Tests focus on:
  *   - isolated parameter handling (overrides extensions/skills)
- *   - tool filtering (excluded tools, whitelist, blacklist)
+ *   - tool filtering (selection, exclusions, and extension expansion)
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import fs from "node:fs";
 import { fakeCtx, fakePi as makeFakePi } from "../fixtures.ts";
 import type { AgentConfig } from "../../src/agents/types.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -37,14 +36,12 @@ const mockModules = vi.hoisted(() => ({
   mockGetAgentConfig: vi.fn(),
   mockBuildAgentPrompt: vi.fn(),
   mockExtractText: vi.fn(),
-  mockPreloadSkills: vi.fn().mockReturnValue([]),
   mockLoadSkillMeta: vi.fn().mockReturnValue([]),
   mockCreateAgentSession: vi.fn(),
   mockDefaultResourceLoader: MockDefaultResourceLoader,
   mockGetAgentDir: vi.fn(() => "/home/test/.pi/agent"),
   mockLoadProjectContextFiles: vi.fn().mockReturnValue([]),
   mockIncludeContextFiles: true as boolean,
-  mockSystemPromptMode: "replace" as string,
   loaderReloadFailure: undefined as Error | undefined,
   loaderExtensionsFailure: undefined as Error | undefined,
   getLoaderOpts: () => _loaderOpts[_loaderOpts.length - 1] ?? null,
@@ -80,7 +77,6 @@ vi.mock("../../src/prompt/context.js", () => ({
 }));
 
 vi.mock("../../src/prompt/skill-loader.js", () => ({
-  preloadSkills: mockModules.mockPreloadSkills,
   loadSkillMeta: mockModules.mockLoadSkillMeta,
 }));
 
@@ -89,20 +85,12 @@ vi.mock("../../src/shell.js", () => ({
   getStore: () => {
     const agent = {
       includeContextFiles: mockModules.mockIncludeContextFiles,
-      systemPromptMode: mockModules.mockSystemPromptMode,
-      forceBackground: false,
-      showCost: false,
-      defaultModel: null,
-      loadSkillsImplicitly: true,
-      loadExtensionsImplicitly: true,
+      disableDefaultAgents: false,
+      orchestrationPrompt: true,
     };
     return {
       agent,
-      createSubagentRuntimeSettings: () => ({
-        agent,
-        modelFor: (_type: string, parentModelId: string, config?: { model?: string }) => config?.model ?? parentModelId,
-        thinkingSettingFor: (_type: string, parentThinking: unknown, config?: { thinkingLevel?: unknown }) => ({ value: config?.thinkingLevel ?? parentThinking }),
-      }),
+      createSubagentRuntimeSettings: () => ({ agent }),
     };
   },
   getSubagentRuntimeContext: () => undefined,
@@ -122,10 +110,14 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 
 // --- Import the module under test ---
 
-import { executeAgentTurn, runAgent, subscribeToSessionEvents } from "../../src/agents/agent-runner.js";
+import {
+  buildSkillsOverride,
+  executeAgentTurn,
+  runAgent,
+  subscribeToSessionEvents,
+} from "../../src/agents/agent-runner.js";
 
 const defaultConfig = {
-  displayName: "Agent",
   description: "Test agent",
   registeredTools: ["read", "bash", "edit"],
   extensions: true,
@@ -149,7 +141,6 @@ function resetMocks() {
   mockModules.clearLoaderOpts();
   mockModules.clearLoaderExtensions();
   mockModules.mockIncludeContextFiles = true;
-  mockModules.mockSystemPromptMode = "replace";
   mockModules.loaderReloadFailure = undefined;
   mockModules.loaderExtensionsFailure = undefined;
   mockModules.mockLoadProjectContextFiles.mockReturnValue([]);
@@ -159,7 +150,6 @@ function resetMocks() {
   mockModules.mockBuildAgentPrompt.mockReturnValue("system prompt");
   mockModules.mockExtractText.mockReturnValue("");
   mockModules.mockGetAgentDir.mockReturnValue("/home/test/.pi/agent");
-  mockModules.mockPreloadSkills.mockReturnValue([]);
   mockModules.mockManager = null;
   mockModules.mockCoordinator = null;
   mockModules.mockRevalidateWorktreePath.mockResolvedValue({
@@ -277,15 +267,10 @@ describe("runAgent — tool filtering", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  runAgent — excludeTools (blacklist mode)                           */
+/*  runAgent — selection-minus-exclusion tools                         */
 /* ------------------------------------------------------------------ */
 
-
-/* ------------------------------------------------------------------ */
-/*  runAgent — excludeTools (blacklist mode)                           */
-/* ------------------------------------------------------------------ */
-
-describe("runAgent — excludeTools (blacklist mode)", () => {
+describe("runAgent — selection-minus-exclusion tools", () => {
   beforeEach(() => {
     resetMocks();
     fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
@@ -363,7 +348,7 @@ describe("runAgent — excludeTools (blacklist mode)", () => {
     expect(session.setActiveToolsByName).not.toHaveBeenCalled();
   });
 
-  it("excludeTools is ignored when tools whitelist is set", async () => {
+  it("subtracts excludeTools after a tools whitelist", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue([
       "read", "bash", "edit", "write", "grep",
@@ -375,14 +360,13 @@ describe("runAgent — excludeTools (blacklist mode)", () => {
     mockModules.mockGetAgentConfig.mockReturnValue({
       ...defaultAgentConfig,
       tools: ["read", "bash"],
-      excludeTools: ["write"], // ignored because tools is set
+      excludeTools: ["bash"],
     });
 
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
 
-    // tools whitelist wins — only read and bash visible
     const activeToolsCall = session.setActiveToolsByName.mock.calls[0][0];
-    expect(activeToolsCall).toEqual(["read", "bash"]);
+    expect(activeToolsCall).toEqual(["read"]);
   });
 
   it("excludeTools with ext/* syntax — excludes all tools from extension", async () => {
@@ -420,6 +404,8 @@ describe("runAgent — excludeTools (blacklist mode)", () => {
     expect(activeToolsCall).not.toContain("web_extract");
     expect(activeToolsCall).not.toContain("web_crawl");
     expect(activeToolsCall).not.toContain("Agent");
+    const sessionOptions = mockModules.mockCreateAgentSession.mock.calls[0][0];
+    expect(sessionOptions.tools).not.toEqual(expect.arrayContaining(["web_search", "web_extract", "web_crawl"]));
   });
 
   it("excludeTools with mixed syntax — ext/* and bare names", async () => {
@@ -711,6 +697,111 @@ describe("subscribeToSessionEvents — cost extraction", () => {
 });
 
 /* ------------------------------------------------------------------ */
+/*  runAgent — skill selection and exclusion                           */
+/* ------------------------------------------------------------------ */
+
+describe("runAgent — skill selection and exclusion", () => {
+  beforeEach(() => {
+    resetMocks();
+    fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
+  });
+
+  it("subtracts excludeSkills from explicit skill metadata", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    const excludeSkills = ["blocked"];
+    mockModules.mockGetAgentConfig.mockReturnValue({
+      ...defaultAgentConfig,
+      skills: ["visible", "blocked"],
+      excludeSkills,
+    });
+    mockModules.mockGetConfig.mockReturnValue({
+      ...defaultConfig,
+      skills: ["visible", "blocked"],
+      excludeSkills,
+    });
+
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+
+    expect(mockModules.mockLoadSkillMeta).toHaveBeenCalledWith(
+      ["visible", "blocked"], expect.any(String), excludeSkills,
+    );
+    const loader = mockModules.getLoaderOpts();
+    expect(loader.noSkills).toBe(true);
+    expect(loader.skillsOverride({
+      skills: [{ name: "visible" }, { name: "blocked" }],
+      diagnostics: ["kept"],
+    })).toEqual({ skills: [{ name: "visible" }], diagnostics: ["kept"] });
+  });
+
+  it("keeps skills=false empty while filtering excluded names", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    mockModules.mockGetAgentConfig.mockReturnValue({
+      ...defaultAgentConfig,
+      skills: false,
+      excludeSkills: ["blocked"],
+    });
+    mockModules.mockGetConfig.mockReturnValue({
+      ...defaultConfig,
+      skills: false,
+      excludeSkills: ["blocked"],
+    });
+
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+
+    expect(mockModules.mockLoadSkillMeta).not.toHaveBeenCalled();
+    const loader = mockModules.getLoaderOpts();
+    expect(loader.noSkills).toBe(true);
+    expect(loader.skillsOverride({
+      skills: [{ name: "blocked" }, { name: "other" }],
+      diagnostics: ["kept"],
+    })).toEqual({ skills: [], diagnostics: ["kept"] });
+  });
+
+  it("keeps skills=true as metadata while excluding selected names", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    mockModules.mockGetAgentConfig.mockReturnValue({
+      ...defaultAgentConfig,
+      skills: true,
+      excludeSkills: ["blocked"],
+    });
+    mockModules.mockGetConfig.mockReturnValue({
+      ...defaultConfig,
+      skills: true,
+      excludeSkills: ["blocked"],
+    });
+
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+
+    expect(mockModules.mockLoadSkillMeta).not.toHaveBeenCalled();
+    const loader = mockModules.getLoaderOpts();
+    expect(loader.noSkills).toBe(false);
+    expect(loader.skillsOverride({
+      skills: [{ name: "allowed" }, { name: "blocked" }],
+      diagnostics: ["kept"],
+    })).toEqual({ skills: [{ name: "allowed" }], diagnostics: ["kept"] });
+  });
+
+  it("applies the complete metadata policy to skills added after reload", () => {
+    const resources = {
+      skills: [{ name: "allowed" }, { name: "blocked" }, { name: "other" }],
+      diagnostics: ["kept"],
+    } as any;
+
+    expect(buildSkillsOverride(false, ["blocked"])(resources).skills).toEqual([]);
+    expect(buildSkillsOverride(["allowed", "blocked"], ["blocked"])(resources).skills)
+      .toEqual([{ name: "allowed" }]);
+    expect(buildSkillsOverride(true, ["blocked"])(resources).skills)
+      .toEqual([{ name: "allowed" }, { name: "other" }]);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /*  runAgent — extension name-based filtering                          */
 /* ------------------------------------------------------------------ */
 
@@ -845,10 +936,9 @@ describe("runAgent — extension name-based filtering", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  runAgent — excludeExtensions (blacklist mode)                      */
+/*  runAgent — selection-minus-exclusion extensions                    */
 /* ------------------------------------------------------------------ */
-
-describe("runAgent — excludeExtensions (blacklist mode)", () => {
+describe("runAgent — selection-minus-exclusion extensions", () => {
   beforeEach(() => {
     resetMocks();
     fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
@@ -919,24 +1009,24 @@ describe("runAgent — excludeExtensions (blacklist mode)", () => {
     expect(result.extensions[0].path).toContain("tavily");
   });
 
-  it("excludeExtensions ignored when extensions whitelist is set", async () => {
+  it("subtracts excludeExtensions after an extensions whitelist", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
     mockModules.mockGetConfig.mockReturnValue({
       ...defaultConfig,
-      extensions: ["tavily"],
+      extensions: ["quality-monitor", "tavily"],
     });
     mockModules.mockGetAgentConfig.mockReturnValue({
       ...defaultAgentConfig,
-      extensions: ["tavily"],
-      excludeExtensions: ["quality-monitor"], // ignored
+      extensions: ["quality-monitor", "tavily"],
+      excludeExtensions: ["quality-monitor"],
     });
 
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
 
     const loaderCall = mockModules.getLoaderOpts();
-    // extensions whitelist wins — override should filter to only tavily
+    // The selected quality-monitor extension is removed after selection.
     const override = loaderCall.extensionsOverride;
     const result = override({
       extensions: [
@@ -1431,7 +1521,6 @@ describe("runAgent — context file gating", () => {
       expect.objectContaining({
         contextFiles: [{ path: "AGENTS.md", content: "project instructions" }],
       }),
-      expect.anything(),
     );
   });
 
@@ -1449,7 +1538,6 @@ describe("runAgent — context file gating", () => {
       expect.anything(),
       expect.anything(),
       expect.not.objectContaining({ contextFiles: expect.anything() }),
-      expect.anything(),
     );
   });
 
@@ -1471,191 +1559,6 @@ describe("runAgent — context file gating", () => {
   });
 });
 
-/* ------------------------------------------------------------------ */
-/*  runAgent — system prompt modes (replace, inherit, custom)         */
-/* ------------------------------------------------------------------ */
-
-describe("runAgent — system prompt modes", () => {
-  beforeEach(() => {
-    resetMocks();
-    fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
-  });
-
-  it("uses replace mode by default — passes 'replace' to buildAgentPrompt", async () => {
-    mockModules.mockSystemPromptMode = "replace";
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
-
-    expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      "replace",
-    );
-  });
-
-  it("calls ctx.getSystemPrompt() when mode is inherit", async () => {
-    mockModules.mockSystemPromptMode = "inherit";
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    const ctx = fakeCtx();
-    ctx.getSystemPrompt = vi.fn().mockReturnValue("parent prompt content");
-
-    await runAgent(ctx, "test-agent", "do something", { pi: fakePi });
-
-    expect(ctx.getSystemPrompt).toHaveBeenCalled();
-    expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      expect.objectContaining({ parentSystemPrompt: "parent prompt content" }),
-      "inherit",
-    );
-  });
-
-  it("falls back gracefully when getSystemPrompt throws in inherit mode", async () => {
-    mockModules.mockSystemPromptMode = "inherit";
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    const ctx = fakeCtx();
-    ctx.getSystemPrompt = vi.fn().mockImplementation(() => { throw new Error("no prompt"); });
-    ctx.ui = { notify: vi.fn() };
-
-    await runAgent(ctx, "test-agent", "do something", { pi: fakePi });
-
-    // Notified about the failure
-    expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Failed to get parent system prompt"),
-      "warning",
-    );
-    // buildAgentPrompt still called — without parentSystemPrompt
-    expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      expect.not.objectContaining({ parentSystemPrompt: expect.anything() }),
-      "inherit",
-    );
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  runAgent — custom mode (file reading, fallback)                   */
-/* ------------------------------------------------------------------ */
-
-describe("runAgent — custom mode", () => {
-  let fsReadFileSyncSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    resetMocks();
-    fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
-    mockModules.mockSystemPromptMode = "custom";
-    fsReadFileSyncSpy = vi.spyOn(fs, "readFileSync");
-  });
-
-  afterEach(() => {
-    fsReadFileSyncSpy.mockRestore();
-  });
-
-  it("reads custom prompt file and passes content to buildAgentPrompt", async () => {
-    fsReadFileSyncSpy.mockReturnValue("My custom system prompt");
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
-
-    expect(fsReadFileSyncSpy).toHaveBeenCalledWith(
-      expect.stringContaining("subagents-lean-prompt.md"),
-      "utf-8",
-    );
-    expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      expect.objectContaining({ customSystemPrompt: "My custom system prompt" }),
-      "custom",
-    );
-  });
-
-  it("falls back when custom file is missing (ENOENT)", async () => {
-    const err = new Error("ENOENT") as any;
-    err.code = "ENOENT";
-    fsReadFileSyncSpy.mockImplementation(() => { throw err; });
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    const ctx = fakeCtx();
-    ctx.ui = { notify: vi.fn() };
-
-    await runAgent(ctx, "test-agent", "do something", { pi: fakePi });
-
-    expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Custom prompt file not found"),
-      "warning",
-    );
-    // buildAgentPrompt called without customSystemPrompt
-    expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      expect.not.objectContaining({ customSystemPrompt: expect.anything() }),
-      "custom",
-    );
-  });
-
-  it("falls back when custom file is empty", async () => {
-    fsReadFileSyncSpy.mockReturnValue("   "); // whitespace only
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    const ctx = fakeCtx();
-    ctx.ui = { notify: vi.fn() };
-
-    await runAgent(ctx, "test-agent", "do something", { pi: fakePi });
-
-    expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Custom prompt file is empty"),
-      "warning",
-    );
-    expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      expect.not.objectContaining({ customSystemPrompt: expect.anything() }),
-      "custom",
-    );
-  });
-
-  it("falls back when custom file is unreadable (other error)", async () => {
-    fsReadFileSyncSpy.mockImplementation(() => { throw new Error("permission denied"); });
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-
-    const ctx = fakeCtx();
-    ctx.ui = { notify: vi.fn() };
-
-    await runAgent(ctx, "test-agent", "do something", { pi: fakePi });
-
-    expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Failed to read custom prompt file"),
-      "warning",
-    );
-  });
-});
-
-/* ------------------------------------------------------------------ */
 /*  runAgent — notify buffering (session tree corruption fix)          */
 /* ------------------------------------------------------------------ */
 
@@ -1687,7 +1590,7 @@ describe("runAgent — notify buffering", () => {
     return { session, resolvePrompt: () => resolvePrompt() };
   }
 
-  it("does NOT call ctx.ui.notify before runTurnLoop completes", async () => {
+  it("does not warn for a valid selection-plus-exclusion combination", async () => {
     const { session, resolvePrompt } = createPendingPromptSession();
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
@@ -1716,11 +1619,11 @@ describe("runAgent — notify buffering", () => {
     resolvePrompt();
     await promise;
 
-    // Now notify should have been called (warnings flushed after turn loop)
-    expect(ctx.ui.notify).toHaveBeenCalled();
+    // Selection/exclusion combinations are valid and remain silent.
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
   });
 
-  it("flushes buffered warnings after turn loop", async () => {
+  it("does not emit a conflict warning when tools and excludeTools are both set", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
@@ -1737,15 +1640,10 @@ describe("runAgent — notify buffering", () => {
 
     await runAgent(ctx, "test-agent", "do something", { pi: fakePi });
 
-    // Should have exactly one warning (mutual exclusion)
-    expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
-    expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining('both tools and exclude_tools set'),
-      "warning",
-    );
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
   });
 
-  it("uses console.warn fallback when ctx.ui.notify is unavailable", async () => {
+  it("does not use console.warn for a valid exclusion combination", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
@@ -1762,12 +1660,10 @@ describe("runAgent — notify buffering", () => {
 
     await runAgent(ctx, "test-agent", "do something", { pi: fakePi });
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('both tools and exclude_tools set'),
-    );
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it("console.warn fallback also waits until after turn loop", async () => {
+  it("console.warn fallback also remains silent after turn loop", async () => {
     const { session, resolvePrompt } = createPendingPromptSession();
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
@@ -1794,10 +1690,7 @@ describe("runAgent — notify buffering", () => {
     resolvePrompt();
     await promise;
 
-    // Now console.warn should have been called
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('both tools and exclude_tools set'),
-    );
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -1836,12 +1729,11 @@ describe("runAgent — agent config snapshot", () => {
       expect.anything(),
       expect.anything(),
       expect.anything(),
-      expect.anything(),
     );
     expect(mockModules.mockCreateAgentSession.mock.calls[0][0].tools).toEqual(["read"]);
   });
 
-  it("uses resolved spawn values rather than model or thinking from Agent Markdown", async () => {
+  it("carries already-resolved internal model and thinking values into session setup", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue(["read"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });

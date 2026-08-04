@@ -45,14 +45,13 @@ Durch die Entfernung beider Bereiche wird aus der Extension ein kleineres und le
 - TUI-spezifische Laufzeitpfade, Timer und Zustände vollständig entfernen.
 - Hierarchie-, Tiefen- und Child-Budget-Logik vollständig entfernen.
 - Headless-, RPC-, JSON- und Print-Nutzung als primären Betriebsmodus behandeln.
-- Bestehende Konfigurationsdateien möglichst tolerant weiter einlesen.
 
 ## Nicht-Ziele
 
 - `AgentContinue` in diesem Umbau neu zu entwerfen oder zu entfernen.
 - Scheduling oder Join-Modi einzuführen.
 - Worktree-Unterstützung zu entfernen.
-- Agent-Markdown, Skills, Extensions oder Modellauswahl grundsätzlich zu ändern.
+- Agent-Markdown, Skills, Extensions oder die Registry-Prüfung von Modellen und Thinking grundsätzlich zu entfernen.
 - Das Parent-Orchestration-Prompt vollständig abzuschaffen.
 - Eine neue Web- oder Terminaloberfläche als Ersatz für die TUI zu bauen.
 
@@ -74,7 +73,7 @@ Für `AgentContinue` gelten folgende Invarianten:
 4. Gestoppte, abgebrochene oder fehlgeschlagene Agents bleiben gemäß bestehendem Vertrag nicht fortsetzbar.
 5. `run_in_background` bleibt unterstützt; jede Background-Ausführung erhält
    ihren eigenen exactly-once-Nudge über den normalen Zustellungsweg.
-6. Retention bleibt begrenzt, damit beendete Sessions nicht unbegrenzt Speicher belegen.
+6. Beendete Agent-Records bleiben bis zum Ende der Parent-Session verfügbar; `session_shutdown` gibt Sessions und Ressourcen frei.
 
 ### `StopAgent`
 
@@ -119,7 +118,7 @@ Folgende Konzepte entfallen:
 
 - `src/agents/nested-agent-proxy.ts`;
 - Child-spezifische Runtime-Kontexte und Executor-Factories;
-- `delegate_to` und `max_child_agents` als wirksame Agent-Konfiguration;
+- Delegationsfelder als wirksame Agent-Konfiguration;
 - maximale Nesting-Tiefe;
 - Parent-/Child-Hierarchien in Agent-Records;
 - Child-Budgets und Active-Child-Zustände;
@@ -127,7 +126,7 @@ Folgende Konzepte entfallen:
 - Vererbung von Worktree- und Katalog-Snapshots an Child-Agents;
 - Child-spezifische Orchestration-Prompts;
 - Sonderregeln für globale Slots während verschachtelter Ausführung;
-- kaskadierende Child-Abbrüche und Child-Retention.
+- kaskadierende Child-Abbrüche und Child-Lebenszykluszustände.
 
 Subagent-Sessions dürfen die Extension weiterhin isoliert laden, aber sie erhalten kein funktionsfähiges `Agent`-Tool. Notwendige Session-Isolation darf daher nicht zusammen mit der Delegationsfähigkeit entfernt werden.
 
@@ -139,26 +138,43 @@ Subagent-Sessions dürfen die Extension weiterhin isoliert laden, aber sie erhal
 - Foreground- und Background-Ausführung;
 - globale Root-Concurrency und Queue;
 - atomare Annahme eines Root-Auftrags;
-- Modell-, Thinking-, Tool-, Skill- und Extension-Auflösung;
+- Agent-Markdown-basierte Modell- und Thinking-Auflösung mit Registry-Fallback und Provider-Normalisierung;
+- Tool-, Skill- und Extension-Auflösung;
 - Worktree-Validierung;
 - Usage-Erfassung;
 - Output-Logs;
 - Background-Zustellung über `sendMessage()`;
 - sauberer Shutdown und Abbruch laufender Root-Agents;
-- Session-Retention für `AgentContinue`.
+- Aufbewahrung beendeter Root-Records bis zum Ende der Parent-Session für `AgentContinue`.
 
-## Konfiguration und Kompatibilität
+## Bestätigte Vereinfachung: Agent-Definition und Laufzeitauflösung
 
-Die Entfernung soll bestehende Konfigurationsdateien nicht unnötig unlesbar machen.
+Die Agent-Identität kommt ausschließlich aus dem kanonischen `name`-Feld oder
+als Dateiname ohne `.md`; die Auflösung ist case-insensitiv. Separate
+Anzeige-Aliase und ihre internen Felder entfallen.
 
-- Alte UI-Schlüssel werden tolerant ignoriert, statt das Laden abzulehnen.
-- `delegate_to`, `max_child_agents` und Nesting-Einstellungen werden als
-  veraltete Felder akzeptiert und ignoriert.
-- Neue Schreibvorgänge erzeugen entfernte Felder nicht mehr.
-- Eine spätere Hauptversion kann die veralteten Felder und Parser endgültig entfernen.
-- Modell- und Thinking-Auflösung bleiben dateibasiert und ohne TUI-Abhängigkeit.
-- README, `CONTEXT.md`, Agent-Beispiele und Konfigurationsreferenz beschreiben
-  den flachen Ausführungsbaum.
+Fehlende `skills` und `extensions` werden nach dem feldweisen Merge als `false`
+aufgelöst. Explizite boolesche Werte und Listen sowie `exclude_*` bleiben
+wirksam. Skills erscheinen ausschließlich als Metadaten; ihre `SKILL.md`
+Inhalte werden bei Bedarf mit `read` geladen.
+
+System-Prompts verwenden ausschließlich Replace-Verhalten. Der Markdown-Body,
+die Parent-Umgebung, optionale `AGENTS.md`-Kontexte und Skills bleiben wirksam;
+Parent-Prompt-Vererbung, Custom-Prompt-Dateien und ihr Scaffolding entfallen.
+
+Modelle und Thinking kommen ausschließlich aus Agent Markdown, sonst aus der
+Parent-Session. Globale, persistente und Session-Overrides, `agent`-Modellkeys,
+Thinking-Maps, Resolver und automatische Vorab-Injektion entfallen. Bereits aufgelöste
+Werte dürfen für Queue und Rendering weitergetragen werden; `AgentContinue`
+nutzt die ursprüngliche Session.
+
+Die Konfiguration akzeptiert und persistiert nur `includeContextFiles`,
+`disableDefaultAgents`, `orchestrationPrompt` und `concurrency.default`.
+Unbekannte `agent`-Schlüssel werden nicht als Modelle interpretiert. Es gibt
+keine benannte Legacy-Migration oder Bereinigung.
+
+README, `CONTEXT.md`, Agent-Beispiele, ADR und Konfigurationsreferenz beschreiben
+diesen flachen Ausführungsbaum.
 
 ## Umsetzung in Phasen
 
@@ -207,7 +223,7 @@ Ausführung bleibt auf direkte Root-Agents beschränkt.
 
 - Fortsetzung arbeitet nur mit Root-Agent-IDs.
 - Berechtigungsprüfungen beziehen sich nicht mehr auf Parent-/Child-Beziehungen.
-- Retention speichert nur Daten, die für Status, Ergebnis und Fortsetzung benötigt werden.
+- Die Parent-Session bewahrt nur Daten auf, die für Status, Ergebnis und Fortsetzung benötigt werden.
 - Foreground- und Background-Fortsetzungen verwenden denselben Ausführungspfad.
 - Ausgabe- und Usage-Historie bleiben pro Ausführung nachvollziehbar.
 
@@ -218,12 +234,15 @@ Diese Phase ist eine interne Vereinfachung und keine Entfernung des Features.
 - README, `CONTEXT.md`, ADR 0001 und dieser Plan beschreiben die statischen
   Tool-Beschreibungen und das flache Root-Modell.
 - Öffentliche Tool-Schemas enthalten keine Model-/Thinking-Spawn-Overrides;
-  diese Werte werden intern aus Definitionen und Konfiguration aufgelöst.
+  diese Werte werden intern aus Agent Markdown oder der Parent-Session aufgelöst.
+- Die bestätigte Vereinfachung von Identität, Skills/Extensions, Replace-Prompts
+  und Agent-Markdown-Modell/Thinking ist in den relevanten Verträgen und Tests
+  abgebildet.
 - Hintergrundzustellung ist pro Ausführung claim-basiert: jede Background- oder
   `AgentContinue`-Ausführung erhält nach kurzer Verzögerung ihre eigene Message
   und genau einen automatischen `sendMessage`-Versuch. Ein `sendMessage`-Fehler
-  bleibt bis zur Eviction als diagnostischer Delivery-Fehler erhalten; ein
-  Retry-Pfad ist nicht Bestandteil des Vertrags.
+  bleibt bis zum Ende der Parent-Session als diagnostischer Delivery-Fehler
+  erhalten; ein Retry-Pfad ist nicht Bestandteil des Vertrags.
 - `refreshActiveSessions`, `SessionRevision` und der alte Viewer-Cadence-Pfad
   samt ausschließlich zugehöriger Tests sind entfernt.
 - Stale Präsentationskommentare, Testnamen, Fixtures und historische TUI-
@@ -246,7 +265,7 @@ Der Umbau ist abgeschlossen, wenn:
 7. Ein regulär beendeter Root-Agent erfolgreich fortgesetzt werden kann.
 8. Queue, Concurrency, Abbruch und Shutdown für Root-Agents getestet sind.
 9. Worktrees und Session-Isolation weiterhin funktionieren.
-10. Alte Konfigurationsdateien mit entfernten UI- oder Delegationsfeldern nicht zu einem Startfehler führen.
+10. Konfigurationsdateien nur mit den aktiven Optionen laden und speichern.
 11. `bun run typecheck`, `bun run typecheck:test`, `bun run test`, Coverage,
     beide Package-Smokes und `bun run pack:check` erfolgreich durchlaufen.
 12. README, `CONTEXT.md`, ADR und Konfigurationsdokumentation dem tatsächlichen
@@ -266,13 +285,12 @@ Widget und Conversation Viewer entfallen. Status und Stop bleiben über Tools ve
 
 Nested Delegation nutzt Teile der Session-Isolation. Beim Entfernen darf nicht angenommen werden, dass jeder AsyncLocalStorage- oder Extension-Filter ausschließlich für Nested Delegation existiert. Die Isolation geladener Child-Extensions muss mit einer realistischen Session-Sequenz geprüft werden.
 
-### Retention durch `AgentContinue`
+### Records durch `AgentContinue`
 
-Beendete Sessions müssen weiterhin zeitweise im Speicher bleiben. Ohne klare Grenzen könnte `AgentContinue` langfristig Ressourcen halten. Bestehende Retention-Regeln müssen daher erhalten oder vereinfacht, aber nicht ersatzlos entfernt werden.
-
-### Konfigurationsmigration
-
-Ein sofortiges hartes Ablehnen alter Felder würde vorhandene Installationen unnötig beschädigen. Die erste Version sollte entfernte Felder tolerant ignorieren und die Änderung deutlich dokumentieren.
+Beendete Sessions bleiben bis zum Ende der Parent-Session im Speicher, damit
+`AgentStatus` und `AgentContinue` zuverlässig auf erfolgreiche terminale Records
+zugreifen können. `session_shutdown` beziehungsweise `AgentManager.dispose`
+entfernt anschließend Records, Sessions, Queue-Einträge und Ressourcen.
 
 ## Finale Entscheidungen und verbleibende Fragen
 
@@ -285,7 +303,6 @@ Für Phase 5 ist ein zuvor offener Punkt entschieden:
 Separat vertagt bleiben nur nicht-strukturelle Detailfragen:
 
 - ob persistente Konfiguration weiter vereinfacht werden kann;
-- wie lange fortsetzbare Sessions retained werden;
 - ob `AgentStatus` zusätzlich kompakte Usage- oder Log-Informationen liefern soll.
 
 Diese Fragen sind nicht Voraussetzung für das abgeschlossene flache Zielmodell.

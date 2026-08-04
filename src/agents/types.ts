@@ -3,33 +3,31 @@ import type { ThinkingLevel } from "../types.js";
 /** Agent type: any string name (built-in defaults or user-defined). */
 export type SubagentType = string;
 
-/** How the subagent system prompt is constructed. */
-export type SystemPromptMode = "replace" | "inherit" | "custom";
-
 /** Unified agent configuration — used for both default and user-defined agents. */
 export interface AgentConfig {
   name: string;
-  displayName?: string;
   description: string;
   /** Tools to register with the session (controls availability, not LLM visibility). */
   registeredTools?: string[];
   /**
    * Controls which tool schemas the LLM sees. Can reference built-in tools
-   * and extension tools. true = all, string[] = listed, false = none.
-   * Supports ext/* syntax to include all tools from an extension.
-   * Mutually exclusive with excludeTools.
+   * and extension tools. true/undefined = all active, string[] = listed,
+   * false = none. Supports ext/* syntax to include all tools from an extension.
    */
   tools?: true | string[] | false;
-  /** Tool blacklist — all tools except these are visible. Mutually exclusive with tools (when tools is string[]). */
+  /** Tools removed from the selected tool set. Supports the same ext/* syntax. */
   excludeTools?: string[];
-  /** true = inherit all, string[] = only listed, false = none. undefined = not set (uses global default). Mutually exclusive with excludeExtensions. */
+  /**
+   * Controls which extensions load. true/undefined = all active, string[] =
+   * listed, false = none.
+   */
   extensions?: true | string[] | false;
-  /** Extension blacklist — all extensions except these load. Mutually exclusive with extensions (when extensions is string[]). */
+  /** Extensions removed from the selected extension set. */
   excludeExtensions?: string[];
-  /** Whitelist of allowed skills (metadata only in system prompt). true = all, string[] = listed, false = none. undefined = not set (uses global default). */
+  /** Selects skill metadata for the system prompt. true = all active, string[] = listed, false = none. */
   skills?: true | string[] | false;
-  /** Skills to preload with full content into system prompt. string[] = listed, false/undefined = none */
-  preloadSkills?: string[] | false;
+  /** Skills removed from the selected metadata set. */
+  excludeSkills?: string[];
   model?: string;
   thinkingLevel?: ThinkingLevel;
   systemPrompt: string;
@@ -43,7 +41,7 @@ export interface AgentConfig {
 }
 
 export interface AgentInvocation {
-  /** Short display name, e.g. "haiku" — only set when different from parent. */
+  /** Short model id used for rendering, when available. */
   modelName?: string;
   /** Resolved provider/model id retained internally for queued control rows. */
   modelKey?: string;

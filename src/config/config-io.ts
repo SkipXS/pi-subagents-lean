@@ -8,51 +8,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { SubagentsConfig } from "../models/model-precedence.js";
-import { parseThinkingLevel } from "../utils.js";
+import type { SubagentsConfig } from "./types.js";
 import { normalizeAgentEntries } from "./types.js";
 
 const CONFIG_DIR = getAgentDir();
 const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lean.json");
 
-export const CUSTOM_PROMPT_PATH = path.join(CONFIG_DIR, "subagents-lean-prompt.md");
-export const VALID_SYSTEM_PROMPT_MODES = new Set<string>(["replace", "inherit", "custom"]);
 export const DEFAULT_CONCURRENCY: SubagentsConfig["concurrency"] = { default: 4 };
 /** Persisted configuration changes fail promptly rather than block on lock contention. */
 export const CONFIG_LOCK_TIMEOUT_MS = 0;
 
-const REMOVED_AGENT_KEYS = [
-  "showCost",
-  "showTools",
-  "showTurns",
-  "showInput",
-  "showOutput",
-  "showContext",
-  "showTime",
-  "widgetMaxLines",
-  "widgetMaxLinesCompact",
-  "widgetDescLengthFull",
-  "widgetDescLengthCompact",
-  "widgetCompact",
-  "widgetShortcut",
-  "widgetShowModelThinking",
-  "widgetShowStartTime",
-  "maxNestingDepth",
-  "max_nesting_depth",
-  "delegate_to",
-  "delegateTo",
-  "max_child_agents",
-  "maxChildAgents",
-] as const;
-
 const DEFAULT_AGENT: SubagentsConfig["agent"] = {
-  default: null,
-  forceBackground: false,
-  systemPromptMode: "replace",
   includeContextFiles: true,
   disableDefaultAgents: false,
   orchestrationPrompt: true,
-  finishedRetentionMinutes: 60,
 };
 
 export type ConfigHealth = "healthy" | "using-backup" | "unrecoverable";
@@ -280,21 +249,12 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
     default: raw.concurrency?.default ?? DEFAULT_CONCURRENCY.default,
   };
   const rawAgent = { ...(raw.agent ?? {}) } as Record<string, unknown>;
-  for (const key of REMOVED_AGENT_KEYS) delete rawAgent[key];
   const agent = {
     ...DEFAULT_AGENT,
     ...normalizeAgentEntries(rawAgent),
   } as SubagentsConfig["agent"];
-  if (!Object.hasOwn(rawAgent, "scout") && typeof rawAgent.Explore === "string") agent.scout = rawAgent.Explore;
-  const typedAgent = agent;
-  const defaultThinking = parseThinkingLevel(typedAgent.defaultThinking);
-  if (defaultThinking === undefined) delete agent.defaultThinking;
-  else typedAgent.defaultThinking = defaultThinking;
-  // Legacy root mode/Eco keys are deliberately not read. Keeping them out of
-  // the normalized object makes every subsequent write a migration boundary.
   return {
-    agent: typedAgent,
-    thinkingOverrides: { ...(raw.thinkingOverrides ?? {}) },
+    agent,
     concurrency,
   };
 }
@@ -303,7 +263,6 @@ function replaceConfig(target: SubagentsConfig, source: SubagentsConfig): void {
   const normalized = normalizeConfig(source);
   target.agent = structuredClone(normalized.agent);
   target.concurrency = structuredClone(normalized.concurrency);
-  target.thinkingOverrides = structuredClone(normalized.thinkingOverrides ?? {});
 }
 
 function atomicWrite(targetPath: string, contents: Buffer): void {
@@ -385,8 +344,7 @@ function blockingSleep(milliseconds: number): void {
 function isConfigShape(value: unknown): value is SubagentsConfig {
   if (!isRecord(value)) return false;
   return (value.agent === undefined || isRecord(value.agent))
-    && (value.concurrency === undefined || isRecord(value.concurrency))
-    && (value.thinkingOverrides === undefined || isRecord(value.thinkingOverrides));
+    && (value.concurrency === undefined || isRecord(value.concurrency));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -106,7 +106,6 @@ describe.sequential("Pi extension contract", () => {
       )).rejects.toThrow("root session is ready");
       expect(runner.getMessageRenderer("subagent-result")).toEqual(expect.any(Function));
       expect(runner.hasUI()).toBe(false);
-      expect(runner.hasHandlers("tool_call")).toBe(true);
       expect(runner.hasHandlers("before_agent_start")).toBe(true);
       expect(runner.hasHandlers("tool_execution_start")).toBe(true);
       expect(runner.hasHandlers("tool_execution_update")).toBe(true);

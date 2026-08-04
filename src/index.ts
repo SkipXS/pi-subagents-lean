@@ -12,10 +12,9 @@
  *
  * Config:
  *   - Loaded from ~/.pi/agent/subagents-lean.json at session_start
- *   - ConfigStore owns config + session overrides + persistence + runtime side effects
+ *   - ConfigStore owns current config + persistence + runtime side effects
  *
  * Events:
- *   - tool_call: Inject effective model/thinking into Agent tool calls
  *   - before_agent_start: Refresh the parent catalog and orchestration prompt
  *   - session_start: Load config, register agents, initialise root services
  *   - session_shutdown: Abort all, dispose root services

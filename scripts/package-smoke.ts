@@ -72,7 +72,7 @@ try {
         throw new Error("Unexpected tools: " + tools.join(","));
       }
       if (extension.commands.size !== 0) throw new Error("Unexpected custom commands");
-      for (const event of ["tool_call", "session_start", "session_shutdown"]) {
+      for (const event of ["session_start", "session_shutdown"]) {
         if (!extension.handlers.has(event)) throw new Error("Missing handler: " + event);
       }
       console.log("Installed package loaded successfully through Pi");

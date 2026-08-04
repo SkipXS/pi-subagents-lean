@@ -138,6 +138,31 @@ describe("AgentManager.continueAgent", () => {
     expect(onComplete).toHaveBeenCalledWith(record, record.stats.executions![1]);
   });
 
+  it("continues an old completed record until parent-session shutdown", async () => {
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager(onComplete);
+      const session = mockAgentSession();
+      const { id } = await spawnCompletedAgent("initial task", { session });
+      const record = manager.getRecord(id)!;
+      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
+      vi.advanceTimersByTime(60 * 60_000);
+
+      mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
+        responseText: "continued after time", aborted: false,
+      });
+      const { promise } = manager.continueAgent(id, "follow-up", {});
+
+      await expect(promise).resolves.toBe("continued after time");
+      expect(manager.getRecord(id)).toBe(record);
+      expect(record.lifecycle.status).toBe("completed");
+      expect(session.dispose).not.toHaveBeenCalled();
+    } finally {
+      manager?.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("records per-execution usage deltas and cumulative lifetime usage", async () => {
     manager = new AgentManager(onComplete);
     const firstRun = makeResolvablePromise();
@@ -873,27 +898,6 @@ describe("AgentManager.continueAgent", () => {
     expect(record.execution.outputLog).toBeUndefined();
   });
 
-  it("evicts a completed continuation and disposes its retained session", async () => {
-    manager = new AgentManager(onComplete);
-    const session = mockAgentSession();
-    const { id } = await spawnCompletedAgent("initial task", { session });
-    mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "continued", aborted: false,
-    });
-    const { promise, record } = manager.continueAgent(id, "follow-up", {});
-    await promise;
-
-    const onEvicted = vi.fn();
-    manager.setOnRecordEvicted(onEvicted);
-    record.lifecycle.completedAt = Date.now() - 2 * 60_000;
-    manager.setRetentionMinutes(1);
-    (manager as any).cleanup();
-
-    expect(manager.getRecord(id)).toBeUndefined();
-    expect(session.dispose).toHaveBeenCalledOnce();
-    expect(onEvicted).toHaveBeenCalledWith(record);
-  });
-
   it("fails a queued continuation if its retained session disappears before start", async () => {
     manager = new AgentManager(onComplete, { default: 1 });
     const { id } = await spawnCompletedAgent("initial task");
@@ -943,9 +947,8 @@ describe("AgentManager.continueAgent", () => {
     expect(onComplete).toHaveBeenCalledTimes(2); // initial + one continuation terminal callback
   });
 
-  it("keeps manager configuration and cleanup failure-safe around retained records", async () => {
+  it("keeps manager configuration and shutdown failure-safe around retained records", async () => {
     manager = new AgentManager(onComplete);
-    manager.setRetentionMinutes(0);
     manager.setConcurrency({ default: 0 });
     expect(manager.abort("missing", "agent")).toBe(false);
 
@@ -955,20 +958,12 @@ describe("AgentManager.continueAgent", () => {
     expect(manager.abort(id, "agent")).toBe(false);
 
     const record = manager.getRecord(id)!;
-    const onEvicted = vi.fn(() => { throw new Error("eviction callback failed"); });
-    manager.setOnRecordEvicted(onEvicted);
-    record.lifecycle.completedAt = 0;
-    (manager as any).cleanup();
+    manager.dispose();
 
-    expect(onEvicted).toHaveBeenCalledWith(record);
     expect(manager.getRecord(id)).toBeUndefined();
     expect(session.dispose).toHaveBeenCalledOnce();
     expect(record.execution.session).toBeUndefined();
     expect(record.execution.abortController).toBeUndefined();
     expect(record.execution.promise).toBeUndefined();
-  });
-
-  it("keeps the retention default at 60 minutes", () => {
-    expect(AgentManager.DEFAULT_RETENTION_MINUTES).toBe(60);
   });
 });

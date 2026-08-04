@@ -1,21 +1,22 @@
 # Composition root over module-level shared state
 
-Shared runtime state (config, session overrides, the manager, coordinator, pi
-instance, and session context) lives on a single composition-root **shell**
-object that PI's fixed-signature callbacks capture by closure, rather than as
-module-level mutable `let`/`Map` bindings. Per-session services (config store,
-agent manager, and spawn coordinator) are constructed at `session_start` and
-mounted onto the shell; `session_shutdown` disposes them. Owned domain state
-moves into the module that owns the concern: config into the ConfigStore and
-background delivery into the spawn coordinator.
+Shared runtime state (config, the manager, coordinator, pi instance, and
+session context) lives on a single composition-root **shell** object that PI's
+fixed-signature callbacks capture by closure, rather than as module-level
+mutable `let`/`Map` bindings. Model and thinking are not shell or ConfigStore
+overrides: they come from Agent Markdown or the parent session. Per-session
+services (config store, agent manager, and spawn coordinator) are constructed at
+`session_start` and mounted onto the shell; `session_shutdown` disposes them.
+Owned domain state moves into the module that owns the concern: config into the
+ConfigStore and background delivery into the spawn coordinator.
 
 ## Why
 
 Three problems forced this. First, the PI runtime invokes tool `execute`
-callbacks and event handlers (`tool_call`, `session_start`, `session_shutdown`)
-as plain closures with signatures it dictates; they cannot take extra
-parameters, so dependencies must be reachable from inside them somehow. A shell
-captured by closure is the cleanest way and reaches every callback.
+callbacks and lifecycle handlers (`session_start`, `session_shutdown`) as plain
+closures with signatures it dictates; they cannot take extra parameters, so
+dependencies must be reachable from inside them somehow. A shell captured by
+closure is the cleanest way and reaches every callback.
 
 Second, the old state module warned that the PI runtime does not propagate ESM
 live-binding reassignments. A shell with fields removes that stale-reference

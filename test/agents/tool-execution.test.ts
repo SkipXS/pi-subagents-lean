@@ -30,15 +30,12 @@ const {
   mockDiscoverNewAgents,
   mockResolveWorktreeAgent,
   mockResolveAgentCatalog,
-  mockModelFor,
-  mockModelSettingFor,
-  mockThinkingSettingFor,
   mockCoordinatorSpawn,
   runtimeSettingsSnapshot,
   liveStoreAgent,
 } = vi.hoisted(() => ({
   runtimeSettingsSnapshot: { current: undefined as any },
-  liveStoreAgent: { current: { forceBackground: false } },
+  liveStoreAgent: { current: {} },
   mockValidateWorktreePath: vi.fn(),
   mockRevalidateWorktreePath: vi.fn(async (_pi: unknown, path: string): Promise<WorktreeValidationResult> => ({
     ok: true, resolvedPath: path, worktreeRoot: path, label: "feature",
@@ -51,15 +48,6 @@ const {
     config: { thinkingLevel: undefined },
   })),
   mockResolveAgentCatalog: vi.fn(async () => new Map<string, any>([["general-purpose", { thinkingLevel: undefined }]])),
-  mockModelFor: vi.fn((_: string, parentModelId: string, agentConfig?: any) => agentConfig?.model ?? parentModelId),
-  mockModelSettingFor: vi.fn((_: string, parentModelId: string, agentConfig?: any, explicitModel?: string) => ({
-    value: explicitModel ?? agentConfig?.model ?? parentModelId,
-    source: explicitModel ? "spawn" : "parent",
-  })),
-  mockThinkingSettingFor: vi.fn((_: string, parentThinking: any, agentConfig?: any, explicitThinking?: any) => ({
-    value: explicitThinking ?? agentConfig?.thinkingLevel ?? parentThinking,
-    source: explicitThinking ? "spawn" : "parent",
-  })),
   mockCoordinatorSpawn: vi.fn(async (_pi: any, _ctx: any, intent: any) => {
     const id = mockSpawn(_pi, _ctx, intent.type, intent.prompt, {
       description: intent.description,
@@ -102,16 +90,8 @@ vi.mock("../../src/agents/agent-types.js", () => ({
   resolveTypeInCatalog: vi.fn((catalog: Map<string, unknown>, type: string) => catalog.has(type) ? type : undefined),
 }));
 
-vi.mock("../../src/models/model-precedence.js", () => ({
-  resolveModel: vi.fn(() => undefined),
-  resolveModelSetting: vi.fn(() => ({ value: "", source: "parent" })),
-  resolveThinkingSetting: vi.fn(() => ({ value: undefined, source: "parent" })),
-}));
-
 vi.mock("../../src/utils.js", () => ({
-  parseModelKey: vi.fn(() => null),
   findModelInRegistry: vi.fn(() => null),
-  parseThinkingLevel: vi.fn((value?: string) => value),
 }));
 
 vi.mock("../../src/shell.js", () => {
@@ -129,9 +109,6 @@ vi.mock("../../src/shell.js", () => {
     get agent() {
       return liveStoreAgent.current;
     },
-    modelFor: mockModelFor,
-    modelSettingFor: mockModelSettingFor,
-    thinkingSettingFor: mockThinkingSettingFor,
     createSubagentRuntimeSettings: () => runtimeSettingsSnapshot.current,
   }),
   getPiInstance: () => ({ sendMessage: vi.fn(), exec: vi.fn() }),
@@ -154,14 +131,14 @@ vi.mock("../../src/agents/usage.js", () => ({
 }));
 
 // Import after mocks are in place
-import { executeAgentTool, toolCallListener } from "../../src/agents/tool-execution.js";
+import { executeAgentTool } from "../../src/agents/tool-execution.js";
 import { AGENT_RENDER_DETAILS_KEY } from "../../src/agents/agent-renderer.js";
 import * as agentTypes from "../../src/agents/agent-types.js";
 import * as utils from "../../src/utils.js";
 
 afterEach(() => {
   runtimeSettingsSnapshot.current = undefined;
-  liveStoreAgent.current = { forceBackground: false };
+  liveStoreAgent.current = {};
 });
 
 /* ------------------------------------------------------------------ */
@@ -180,76 +157,6 @@ function makeParams(overrides: Record<string, unknown> = {}): Record<string, unk
 /* ------------------------------------------------------------------ */
 /*  Tests                                                             */
 /* ------------------------------------------------------------------ */
-
-describe("toolCallListener — canonical agent settings", () => {
-  it("shows a model resolved from agent settings in invocation metadata", async () => {
-    vi.clearAllMocks();
-    mockModelFor.mockReturnValueOnce("openai/gpt-4o");
-    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "openai", modelId: "gpt-4o" });
-    const input: Record<string, unknown> = { agent: "reviewer", prompt: "inspect" };
-
-    await toolCallListener({ toolName: "Agent", input } as any, fakeCtx() as any);
-
-    expect(input.model).toBe("openai/gpt-4o");
-    expect(input._modelOverride).toBe("gpt-4o");
-  });
-
-  it("uses the canonical type for case-insensitive agent names", async () => {
-    vi.clearAllMocks();
-    (agentTypes.resolveType as any).mockReturnValueOnce("explorer");
-
-    await toolCallListener(
-      { toolName: "Agent", input: { agent: "Explorer", prompt: "inspect" } } as any,
-      fakeCtx() as any,
-    );
-
-    expect(mockModelFor).toHaveBeenCalledWith(
-      "explorer",
-      expect.any(String),
-      expect.any(Object),
-    );
-    expect(mockThinkingSettingFor).toHaveBeenCalledWith(
-      "explorer",
-      undefined,
-      expect.any(Object),
-      undefined,
-    );
-  });
-
-  it("does not inject parent model or thinking for a worktree call", async () => {
-    vi.clearAllMocks();
-    const input: Record<string, unknown> = {
-      agent: "reviewer", prompt: "inspect", worktree_path: "/wt/feature",
-    };
-
-    await toolCallListener({ toolName: "Agent", input } as any, fakeCtx() as any);
-
-    expect(input.model).toBeUndefined();
-    expect(input.thinking).toBeUndefined();
-    expect(mockModelFor).not.toHaveBeenCalled();
-    expect(mockThinkingSettingFor).not.toHaveBeenCalled();
-  });
-
-  it("keeps an explicit worktree model in the invocation display metadata", async () => {
-    vi.clearAllMocks();
-    (utils.parseModelKey as any).mockReturnValueOnce({
-      provider: "anthropic",
-      modelId: "claude-sonnet-4-20250514",
-    });
-    const input: Record<string, unknown> = {
-      agent: "reviewer",
-      prompt: "inspect",
-      worktree_path: "/wt/feature",
-      model: "anthropic/claude-sonnet-4-20250514",
-    };
-
-    await toolCallListener({ toolName: "Agent", input } as any, fakeCtx() as any);
-
-    expect(input._modelOverride).toBe("claude-sonnet-4-20250514");
-    expect(mockModelFor).not.toHaveBeenCalled();
-    expect(mockThinkingSettingFor).not.toHaveBeenCalled();
-  });
-});
 
 describe("executeAgentTool — explicit agent type", () => {
   let ctx: any;
@@ -314,30 +221,11 @@ describe("executeAgentTool — explicit agent type", () => {
     expect(mockCoordinatorSpawn).not.toHaveBeenCalled();
   });
 
-  it("uses a detached runtime snapshot for model and thinking resolution", async () => {
-    runtimeSettingsSnapshot.current = {
-      agent: {},
-      modelFor: vi.fn(() => "legacy/model"),
-      thinkingSettingFor: vi.fn(() => ({ value: "low", source: "config-global" })),
-    };
-    (utils.findModelInRegistry as any).mockReturnValueOnce({ provider: "legacy", id: "model", reasoning: true });
-    mockGetRecord.mockReturnValueOnce({
-      id: "legacy-snapshot", result: "done",
-      display: { type: "general-purpose", description: "Test agent" },
-      lifecycle: { status: "completed", startedAt: 0, completedAt: 1 }, execution: {},
-      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
-    });
-
-    const result = await executeAgentTool("legacy-snapshot", makeParams(), undefined, undefined, ctx);
-
-    expect(result.isError).toBeUndefined();
-    expect(runtimeSettingsSnapshot.current.modelFor).toHaveBeenCalled();
-    expect(runtimeSettingsSnapshot.current.thinkingSettingFor).toHaveBeenCalled();
-    expect(mockCoordinatorSpawn).toHaveBeenCalledOnce();
-  });
-
-  it("publishes resolved renderer metadata in partial and final results", async () => {
+  it("publishes resolved Markdown model and normalized thinking metadata", async () => {
     const model = { provider: "openai", id: "gpt-4o", reasoning: true };
+    (agentTypes.getAgentConfig as any).mockReturnValueOnce({
+      model: "openai/gpt-4o", thinkingLevel: "high", name: "general-purpose", description: "Test", systemPrompt: "",
+    });
     const record = {
       id: "agent-render-details", result: "done",
       display: { type: "general-purpose", description: "Test agent" },
@@ -352,7 +240,7 @@ describe("executeAgentTool — explicit agent type", () => {
 
     const result = await executeAgentTool(
       "tc-render-details",
-      makeParams({ prompt, thinking: "high" }),
+      makeParams({ prompt }),
       undefined,
       onUpdate,
       ctx,
@@ -378,52 +266,35 @@ describe("executeAgentTool — explicit agent type", () => {
     });
   });
 
-  it("keeps listener-injected settings distinct from explicit tool values at execution", async () => {
-    const record = {
-      id: "agent-settings", result: "done",
+  it("ignores non-schema model and thinking fields from the caller", async () => {
+    const model = { provider: "markdown", id: "role-model", reasoning: true };
+    (agentTypes.getAgentConfig as any).mockReturnValueOnce({
+      name: "general-purpose", description: "Test", systemPrompt: "",
+      model: "markdown/role-model", thinkingLevel: "high",
+    });
+    (utils.findModelInRegistry as any).mockReturnValueOnce(model);
+    mockGetRecord.mockReturnValueOnce({
+      id: "agent-markdown-settings", result: "done",
       display: { type: "general-purpose", description: "Test agent" },
       lifecycle: { status: "completed", startedAt: 0, completedAt: 1 }, execution: {},
       stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
-    };
-    mockGetRecord.mockReturnValueOnce(record);
-    mockModelFor.mockReturnValueOnce("settings/model");
-    mockThinkingSettingFor.mockReturnValueOnce({ value: "low", source: "config-global" });
-    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "settings", modelId: "model" });
-
-    const injected = makeParams();
-    await toolCallListener({ toolName: "Agent", input: injected } as any, ctx);
-    expect(injected).toMatchObject({
-      model: "settings/model", thinking: "low", _modelFromSettings: true, _thinkingFromSettings: true,
     });
 
-    await executeAgentTool("injected-settings", injected, undefined, undefined, ctx);
-    expect(mockModelSettingFor).toHaveBeenLastCalledWith(
-      "general-purpose", expect.any(String), expect.any(Object), undefined,
-    );
-    expect(mockThinkingSettingFor).toHaveBeenLastCalledWith(
-      "general-purpose", undefined, expect.any(Object), undefined,
+    await executeAgentTool(
+      "tc-markdown-settings",
+      makeParams({ model: "caller/model", thinking: "low" }),
+      undefined,
+      undefined,
+      ctx,
     );
 
-    vi.clearAllMocks();
-    mockGetRecord.mockReturnValueOnce(record);
-    (utils.parseModelKey as any)
-      .mockReturnValueOnce({ provider: "explicit", modelId: "model" })
-      .mockReturnValueOnce({ provider: "explicit", modelId: "model" })
-      .mockReturnValueOnce({ provider: "explicit", modelId: "model" });
-    ctx.modelRegistry.find.mockReturnValueOnce({ provider: "explicit", id: "model" });
-    const explicit = makeParams({ model: "explicit/model", thinking: "high" });
-    await toolCallListener({ toolName: "Agent", input: explicit } as any, ctx);
-    expect(explicit._modelFromSettings).toBeUndefined();
-    expect(explicit._thinkingFromSettings).toBeUndefined();
-
-    await executeAgentTool("explicit-settings", explicit, undefined, undefined, ctx);
-    expect(mockModelSettingFor).toHaveBeenLastCalledWith(
-      "general-purpose", expect.any(String), expect.any(Object), "explicit/model",
-    );
-    expect(mockThinkingSettingFor).toHaveBeenLastCalledWith(
-      "general-purpose", undefined, expect.any(Object), "high",
+    expect(mockCoordinatorSpawn).toHaveBeenCalledWith(
+      expect.anything(),
+      ctx,
+      expect.objectContaining({ model, thinkingLevel: "high" }),
     );
   });
+
   it("keeps foreground terminal failures on the ToolResult contract", async () => {
     const terminalCases = [
       { status: "error", error: "runner setup failed", expected: "Agent failed: runner setup failed" },
@@ -494,35 +365,6 @@ describe("executeAgentTool — worktree_path validation", () => {
     });
   });
 
-  it("applies internally supplied model and thinking settings", async () => {
-    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "openai", modelId: "gpt-4o" });
-    ctx.modelRegistry.find.mockReturnValueOnce({ provider: "openai", id: "gpt-4o", reasoning: true });
-    await executeAgentTool(
-      "tc-explicit-settings",
-      makeParams({ model: "openai/gpt-4o", thinking: "high" }),
-      undefined,
-      undefined,
-      ctx,
-    );
-
-    expect(mockModelSettingFor).toHaveBeenCalledWith(
-      "general-purpose",
-      expect.any(String),
-      expect.any(Object),
-      "openai/gpt-4o",
-    );
-    expect(mockThinkingSettingFor).toHaveBeenCalledWith(
-      "general-purpose",
-      undefined,
-      expect.any(Object),
-      "high",
-    );
-    expect(mockSpawn.mock.calls[0][4].thinkingLevel).toBe("high");
-    expect(mockSpawn.mock.calls[0][4].invocation).toMatchObject({
-      thinkingLevel: "high",
-    });
-  });
-
   it("forwards the parent abort signal to the spawn coordinator", async () => {
     const signal = new AbortController().signal;
 
@@ -589,22 +431,6 @@ describe("executeAgentTool — worktree_path validation", () => {
 
     expect(result).toMatchObject({ isError: true });
     expect(result.content[0].text).toBe("Agent execution cancelled");
-  });
-
-  it("rejects an unknown explicit model instead of silently using the parent", async () => {
-    (utils.parseModelKey as any).mockReturnValueOnce({ provider: "unknown", modelId: "model" });
-    ctx.modelRegistry.find.mockReturnValueOnce(undefined);
-
-    const result = await executeAgentTool(
-      "tc-unknown-model",
-      makeParams({ model: "unknown/model" }),
-      undefined,
-      undefined,
-      ctx,
-    );
-
-    expect(result.content[0]).toMatchObject({ type: "text", text: "Model not found: unknown/model" });
-    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it("uses local worktree model and thinking for the spawned display", async () => {

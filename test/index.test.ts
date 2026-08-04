@@ -62,15 +62,9 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   getAgentDir: vi.fn(() => "/home/test/.pi/agent"),
 }));
 
-vi.mock("../src/models/model-precedence.js", () => ({
-  resolveModel: vi.fn((opts: any) => opts?.parentModelId ?? ""),
-  resolveModelSetting: vi.fn((opts: any) => ({ value: opts?.parentModelId ?? "", source: "parent" })),
-  resolveThinkingSetting: vi.fn((opts: any) => ({ value: opts?.parentThinking, source: "parent" })),
-}));
-
 vi.mock("../src/agents/agent-types.js", () => ({
   resolveType: vi.fn((name: string) => name),
-  getConfig: vi.fn(() => ({ displayName: "unknown" })),
+  getConfig: vi.fn(() => ({ description: "unknown" })),
   getAgentConfig: vi.fn(() => ({})),
   registerAgents: vi.fn(),
   getAvailableAgents: vi.fn(() => []),
@@ -212,61 +206,6 @@ describe("tool registration", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  Listener Guards                                                   */
-/* ------------------------------------------------------------------ */
-
-describe("tool_call listener — guards", () => {
-  let api: MockExtensionAPI;
-
-  beforeAll(async () => {
-    api = createMockExtensionAPI();
-    await loadExtension(api.api);
-  });
-
-  const toolCallHandler = () =>
-    api.listeners.find((l) => l.event === "tool_call")?.handler;
-
-  it("does not mutate event.input.model for non-Agent tools", async () => {
-    expect(toolCallHandler()).toBeDefined();
-    const event = {
-      toolName: "bash",
-      toolCallId: "call_123",
-      input: { command: "echo hello" } as Record<string, unknown>,
-    };
-    const result = await toolCallHandler()!(event, {});
-
-    expect(event.input.model).toBeUndefined();
-    expect(result).toBeUndefined();
-  });
-
-  it("sets event.input.model for Agent tool calls", async () => {
-    const ctx = {
-      model: { provider: "test", id: "parent-model" },
-      modelRegistry: {
-        find: vi.fn((p: string, i: string) => ({ provider: p, id: i })),
-        getAvailable: vi.fn(() => []),
-      },
-    };
-
-    const event = {
-      toolName: "Agent",
-      toolCallId: "call_789",
-      input: {
-        prompt: "do something",
-        description: "test",
-        agent: "scout",
-      } as Record<string, unknown>,
-    };
-
-    const result = await toolCallHandler()!(event, ctx);
-
-    expect(event.input.model).toBeDefined();
-    expect(typeof event.input.model).toBe("string");
-    expect(result).toBeUndefined();
-  });
-});
-
-/* ------------------------------------------------------------------ */
 /*  Event Listener Registration                                       */
 /* ------------------------------------------------------------------ */
 
@@ -276,10 +215,6 @@ describe("event listener registration", () => {
   beforeAll(async () => {
     api = createMockExtensionAPI();
     await loadExtension(api.api);
-  });
-
-  it("registers tool_call listener", () => {
-    expect(api.listeners.some((l) => l.event === "tool_call")).toBe(true);
   });
 
   it("registers session_start listener", () => {

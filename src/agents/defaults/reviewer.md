@@ -1,6 +1,5 @@
 ---
 name: reviewer
-display_name: Reviewer
 description: Independent read-only reviewer of completed changes for correctness, regressions, security, and missing validation.
 tools: [read, grep, bash]
 extensions: false

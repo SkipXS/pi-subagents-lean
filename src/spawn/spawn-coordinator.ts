@@ -1,6 +1,7 @@
 import { getPiInstance, getSessionCtx, getStore, getSubagentRuntimeContext } from "../shell.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 import { normalizeThinkingLevel } from "../models/thinking.js";
+import { findModelInRegistry } from "../utils.js";
 import { getStatusNote } from "../status-note.js";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -130,12 +131,15 @@ export class SpawnCoordinator {
   ): Promise<SpawnResult> {
     const runtimeSettings = intent.runtimeSettingsSnapshot ?? getStore().createSubagentRuntimeSettings();
 
-    const model = intent.model ?? ctx.model;
-    const thinkingLevel = normalizeThinkingLevel(model, intent.thinkingLevel ?? ctx.thinkingLevel);
-    const modelKey = intent.modelKey ?? (model ? `${model.provider}/${model.id}` : undefined);
     const canonicalType = resolveType(intent.type) ?? intent.type;
     const selectedConfig = intent.agentConfig ?? getAgentConfig(canonicalType);
     const agentConfig = selectedConfig ? snapshotAgentConfig(selectedConfig) : undefined;
+    const model = intent.model ?? findModelInRegistry(agentConfig?.model, ctx.modelRegistry, ctx.model);
+    const thinkingLevel = normalizeThinkingLevel(
+      model,
+      intent.thinkingLevel ?? agentConfig?.thinkingLevel ?? ctx.thinkingLevel,
+    );
+    const modelKey = intent.modelKey ?? (model ? `${model.provider}/${model.id}` : undefined);
     const { type, prompt, runInBackground, invocation, signal, runtimeSettingsSnapshot: _runtimeSettingsSnapshot, ...config } = intent;
     const spawnOptions: SpawnOptions = {
       ...config,
@@ -274,12 +278,6 @@ export class SpawnCoordinator {
     this.onAgentComplete(record, execution);
   }
 
-  /** Remove coordinator tracking when AgentManager fully evicts a record. */
-  onRecordEvicted(record: AgentRecord): void {
-    for (const entry of this.entriesFor(record.id)) this.clearEntry(entry, true);
-    this.latestDeliveryKeys.delete(record.id);
-  }
-
   /** Dispose without delivering any retained pending or failed result. */
   dispose(): void {
     this.disposed = true;
@@ -312,7 +310,7 @@ export class SpawnCoordinator {
     this.trackBackgroundParentAbort(entry, record);
   }
 
-  /** Keep each execution's delivery tied to its parent turn until acceptance or eviction. */
+  /** Keep each execution's delivery tied to its parent turn until acceptance or session shutdown. */
   private trackBackgroundParentAbort(entry: BackgroundDeliveryEntry, record: AgentRecord): void {
     const signal = entry.signal;
     if (!signal) return;
@@ -346,7 +344,7 @@ export class SpawnCoordinator {
     this.clearEntry(entry, true);
   }
 
-  /** Clear transient tracking; failed delivery entries remain until record eviction. */
+  /** Clear transient tracking; failed delivery entries remain until session shutdown. */
   private clearEntry(entry: BackgroundDeliveryEntry, clearParent: boolean): void {
     if (entry.timer) {
       clearTimeout(entry.timer);
@@ -459,7 +457,7 @@ export class SpawnCoordinator {
       this.clearEntry(entry, true);
     } catch (error) {
       // Keep the result and record the sendMessage failure diagnostically until
-      // record eviction; there is no automatic or manual retry path.
+      // session shutdown; there is no automatic or manual retry path.
       entry.state = "failed";
       entry.lastError = deliveryErrorMessage(error);
       this.projectDelivery(record, entry);

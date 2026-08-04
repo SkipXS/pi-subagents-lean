@@ -48,13 +48,15 @@ export function registerAgents(userAgents: Map<string, AgentConfig>, options?: R
   // Start with defaults (unless disabled)
   if (!options?.disableDefaultAgents) {
     for (const [name, config] of DEFAULT_AGENTS) {
-      agents.set(name, config);
+      agents.set(name, snapshotAgentConfig(config));
     }
   }
 
-  // Overlay user agents (overrides defaults with same name)
+  // Overlay user agents (overrides defaults with same name). Keep the
+  // registry detached from the discovery/catalog map because callers may
+  // retain and mutate those maps after registration.
   for (const [name, config] of userAgents) {
-    agents.set(name, config);
+    agents.set(name, snapshotAgentConfig(config));
   }
 }
 
@@ -89,7 +91,7 @@ export async function discoverNewAgents(options?: RegisterAgentsOptions): Promis
   const previousNames = new Set(agents.keys());
   agents.clear();
   for (const [name, config] of discovered) {
-    agents.set(name, config);
+    agents.set(name, snapshotAgentConfig(config));
   }
   return [...discovered.keys()].filter((name) => !previousNames.has(name)).length;
 }
@@ -100,8 +102,7 @@ export function resolveTypeInCatalog(availableAgents: ReadonlyMap<string, AgentC
   if (availableAgents.has(name)) return name;
   const lower = name.toLowerCase();
   for (const [key, config] of availableAgents.entries()) {
-    if (key.toLowerCase() === lower) return key;
-    if ((config.displayName ?? "").toLowerCase() === lower) return key;
+    if (key.toLowerCase() === lower || config.name.toLowerCase() === lower) return key;
   }
   return undefined;
 }
@@ -163,19 +164,20 @@ export function snapshotAgentConfig(config: AgentConfig): AgentConfig {
     extensions: Array.isArray(config.extensions) ? [...config.extensions] : config.extensions,
     excludeExtensions: config.excludeExtensions && [...config.excludeExtensions],
     skills: Array.isArray(config.skills) ? [...config.skills] : config.skills,
-    preloadSkills: Array.isArray(config.preloadSkills) ? [...config.preloadSkills] : config.preloadSkills,
+    excludeSkills: config.excludeSkills && [...config.excludeSkills],
   };
 }
 
-/** Resolve a type name case-insensitively. Also matches displayName. Returns the canonical key or undefined. */
+/** Resolve a canonical role name case-insensitively. Returns the catalog key or undefined. */
 export function resolveType(name: string): string | undefined {
   return resolveTypeInCatalog(agents, name);
 }
 
-/** Get the agent config for a type (case-insensitive). */
+/** Get a detached agent config for a type (case-insensitive). */
 export function getAgentConfig(name: string): AgentConfig | undefined {
   const key = resolveType(name);
-  return key ? agents.get(key) : undefined;
+  const config = key ? agents.get(key) : undefined;
+  return config ? snapshotAgentConfig(config) : undefined;
 }
 
 /** Get visible agent configs in registry order. */
@@ -231,16 +233,15 @@ function resolveToolEntries(
 /**
  * Resolve the visible tool set for an agent type from its config.
  *
- * Single owner of tool visibility policy. Handles:
- *   - `tools: true` → all active tools (minus excluded)
- *   - `tools: string[]` → allowlist (minus excluded, with ext/* expansion)
+ * Selection is always evaluated first and exclusions are then subtracted:
+ *   - `tools: true | undefined` → all active tools
+ *   - `tools: string[]` → the selected allowlist (with ext/* expansion)
  *   - `tools: false` → no tools
- *   - `tools: undefined` + `excludeTools` → denylist (minus excluded, with ext/* expansion)
- *   - `tools: undefined` → all active tools (minus EXCLUDED_TOOL_NAMES if any are present)
+ *   - `excludeTools` → removed from any of the bases above
  *
- * `tools` and `excludeTools` are mutually exclusive. If both set, `tools` wins.
- *
- * Returns null when no filtering is needed, otherwise the filtered tool list.
+ * `EXCLUDED_TOOL_NAMES` remains an unconditional safety exclusion. Returns
+ * null when the base selection already equals the active set after policy
+ * exclusions; otherwise returns the concrete visible schema names.
  */
 export function resolveVisibleTools(opts: {
   activeTools: string[];
@@ -250,27 +251,23 @@ export function resolveVisibleTools(opts: {
   notify?: (msg: string) => void;
 }): string[] | null {
   const { activeTools, tools, excludeTools, extToolMap, notify } = opts;
-  const excludedTools = EXCLUDED_TOOL_NAMES;
-
-  // Blacklist mode: excludeTools set and tools not set as whitelist
-  if (excludeTools && !Array.isArray(tools)) {
-    const excludeSet = resolveToolEntries(excludeTools, extToolMap, notify);
-    const filtered = activeTools.filter(t =>
-      !excludedTools.includes(t) && !excludeSet.has(t)
-    );
-    return filtered.length !== activeTools.length ? filtered : null;
-  }
+  const excludedToolNames = new Set(EXCLUDED_TOOL_NAMES);
+  const selectedTools = tools === false
+    ? new Set<string>()
+    : Array.isArray(tools)
+      ? resolveToolEntries(tools, extToolMap, notify)
+      : undefined;
+  const excludedTools = tools === false
+    ? new Set<string>()
+    : resolveToolEntries(excludeTools ?? [], extToolMap, notify);
 
   if (Array.isArray(tools)) {
-    // Whitelist mode: resolve entries with ext/* expansion
     const allBuiltinSet = new Set(BUILTIN_TOOL_NAMES);
-    const allowedTools = resolveToolEntries(tools, extToolMap, notify);
 
-    // Warn about unknown entries
+    // Warn about unknown entries in the positive selection.
     for (const entry of tools) {
       const slashIdx = entry.indexOf("/");
       if (slashIdx === -1 && !allBuiltinSet.has(entry)) {
-        // Bare name, not a known built-in — check if it's an extension tool
         let foundInExt = false;
         for (const [, extToolNames] of extToolMap ?? []) {
           if (extToolNames.includes(entry)) { foundInExt = true; break; }
@@ -281,35 +278,26 @@ export function resolveVisibleTools(opts: {
       }
     }
 
-    const visibleSet = new Set<string>();
-    for (const t of activeTools) {
-      if (excludedTools.includes(t)) continue;
-      if (allowedTools.has(t)) {
-        visibleSet.add(t);
-      }
-    }
-
-    // Warn if a loaded extension has none of its tools in `tools`
+    // Warn if a loaded extension has none of its tools in the positive
+    // selection. Exclusions intentionally do not turn this into a conflict:
+    // the extension may be selected while one or more of its tools are removed.
     if (extToolMap) {
       for (const [extName, extTools] of extToolMap) {
-        const hasAny = extTools.some(t => allowedTools.has(t));
+        const hasAny = extTools.some(t => selectedTools!.has(t));
         if (!hasAny) {
           notify?.(`extension "${extName}" is loaded but none of its tools are in tools: [${tools.join(", ")}]`);
         }
       }
     }
-
-    return [...visibleSet];
   }
 
-  if (tools === false) {
-    return [];
-  }
+  const visible = activeTools.filter((toolName) => {
+    const selected = selectedTools === undefined || selectedTools.has(toolName);
+    return selected && !excludedToolNames.has(toolName) && !excludedTools.has(toolName);
+  });
 
-  // tools: true or undefined — all tools visible (except excluded)
-  const hasExcluded = activeTools.some(t => excludedTools.includes(t));
-  if (!hasExcluded) return null;
-  return activeTools.filter(t => !excludedTools.includes(t));
+  if (tools === false || Array.isArray(tools)) return visible;
+  return visible.length === activeTools.length ? null : visible;
 }
 
 /**
@@ -325,84 +313,63 @@ export function resolveVisibleTools(opts: {
 export function resolveSessionAllowedTools(opts: {
   registeredTools: string[];
   tools?: true | string[] | false;
+  excludeTools?: string[];
   extToolMap?: Map<string, string[]>;
 }): string[] {
-  const excludedTools = EXCLUDED_TOOL_NAMES;
+  const excludedToolNames = new Set(EXCLUDED_TOOL_NAMES);
   if (opts.tools === false) return [];
 
-  // tools is a whitelist: the gate is exactly its expansion. Builtins and
-  // extension tools are gated alike (a builtin not listed is NOT registered),
-  // and raw wildcard entries ("tavily/*") never leak as bogus allowedToolNames.
-  // registeredTools is not a base here.
-  if (Array.isArray(opts.tools)) {
-    const allowed = resolveToolEntries(opts.tools, opts.extToolMap);
-    return [...allowed].filter(t => !excludedTools.includes(t));
-  }
+  // This is the registry gate, not the final schema policy. A positive list
+  // gates exactly its expansion; true/undefined seed all known active names.
+  // Raw wildcard literals never reach pi as bogus allowedToolNames.
+  const selected = Array.isArray(opts.tools)
+    ? resolveToolEntries(opts.tools, opts.extToolMap)
+    : new Set([
+      ...opts.registeredTools,
+      ...(opts.extToolMap ? [...opts.extToolMap.values()].flat() : []),
+    ]);
+  const excluded = resolveToolEntries(opts.excludeTools ?? [], opts.extToolMap);
 
-  // No whitelist (true | undefined): register everything available so
-  // resolveVisibleTools can select freely.
-  const extTools = opts.extToolMap ? [...opts.extToolMap.values()].flat() : [];
-  const names = new Set(opts.registeredTools);
-  for (const t of extTools) {
-    if (!excludedTools.includes(t)) names.add(t);
-  }
-  return [...names].filter(t => !excludedTools.includes(t));
+  return [...selected].filter((name) =>
+    !excludedToolNames.has(name) && !excluded.has(name),
+  );
 }
 
 /** Resolved config shape returned by getConfig. */
 export interface ResolvedAgentConfig {
-  displayName: string;
+  /** Canonical role name used for resolution and rendering. */
+  name: string;
   description: string;
   registeredTools: string[];
-  /** Controls tool schema visibility. true = all, string[] = listed, false = none. */
+  /** Controls tool schema visibility. true/undefined = all, list = selected, false = none. */
   tools?: true | string[] | false;
+  excludeTools?: string[];
   extensions: true | string[] | false;
+  excludeExtensions?: string[];
   skills: true | string[] | false;
-}
-
-/**
- * Apply global implicit defaults to skills/extensions.
- * undefined means "not explicitly set" → resolve from global default.
- * Concrete values (true, false, string[]) pass through unchanged.
- */
-function applyGlobalDefaults(
-  skills: true | string[] | false | undefined,
-  extensions: true | string[] | false | undefined,
-  loadSkillsImplicitly: boolean,
-  loadExtensionsImplicitly: boolean,
-): { skills: true | string[] | false; extensions: true | string[] | false } {
-  return {
-    skills: skills === undefined ? loadSkillsImplicitly : skills,
-    extensions: extensions === undefined ? loadExtensionsImplicitly : extensions,
-  };
+  excludeSkills?: string[];
 }
 
 /** Resolve an already-selected agent definition without consulting the registry. */
-export function resolveAgentConfig(
-  config: AgentConfig,
-  loadSkillsImplicitly: boolean = true,
-  loadExtensionsImplicitly: boolean = true,
-): ResolvedAgentConfig {
-  const { skills, extensions, ...rest } = config;
-  const defaults = applyGlobalDefaults(skills, extensions, loadSkillsImplicitly, loadExtensionsImplicitly);
+export function resolveAgentConfig(config: AgentConfig): ResolvedAgentConfig {
   return {
-    displayName: rest.displayName ?? rest.name,
-    description: rest.description,
-    registeredTools: rest.registeredTools ?? BUILTIN_TOOL_NAMES,
-    tools: rest.tools,
-    ...defaults,
+    name: config.name,
+    description: config.description,
+    registeredTools: config.registeredTools ? [...config.registeredTools] : [...BUILTIN_TOOL_NAMES],
+    tools: Array.isArray(config.tools) ? [...config.tools] : config.tools,
+    excludeTools: config.excludeTools && [...config.excludeTools],
+    extensions: config.extensions ?? false,
+    excludeExtensions: config.excludeExtensions && [...config.excludeExtensions],
+    skills: config.skills ?? false,
+    excludeSkills: config.excludeSkills && [...config.excludeSkills],
   };
 }
 
 /** Get config for an explicitly selected type (case-insensitive). */
-export function getConfig(
-  type: string,
-  loadSkillsImplicitly: boolean = true,
-  loadExtensionsImplicitly: boolean = true,
-): ResolvedAgentConfig {
+export function getConfig(type: string): ResolvedAgentConfig {
   const config = getAgentConfig(type);
   if (!config) {
     throw new Error(`Unknown agent type: ${type || "(missing)"}`);
   }
-  return resolveAgentConfig(config, loadSkillsImplicitly, loadExtensionsImplicitly);
+  return resolveAgentConfig(config);
 }

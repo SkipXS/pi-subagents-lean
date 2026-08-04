@@ -1,6 +1,5 @@
 ---
 name: scout
-display_name: Scout
 description: Read-only discovery agent for locating relevant code, tracing behavior and dependencies, and identifying likely root causes when the relevant scope is unclear.
 tools: [read, grep, bash]
 extensions: false

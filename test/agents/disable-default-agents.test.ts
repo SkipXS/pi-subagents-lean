@@ -49,12 +49,12 @@ describe("registerAgents — disableDefaultAgents", () => {
       expect(config.skills).toBe(false);
     }
     expect(DEFAULT_AGENTS.get("architect")).toMatchObject({
-      displayName: "Architect",
+      name: "architect",
       registeredTools: ["read", "grep", "bash"],
       systemPrompt: expect.stringContaining("Design only the delegated change or decision."),
     });
     expect(DEFAULT_AGENTS.get("scout")).toMatchObject({
-      displayName: "Scout",
+      name: "scout",
       registeredTools: ["read", "grep", "bash"],
       systemPrompt: expect.stringContaining("Investigate only the delegated question."),
     });

@@ -7,7 +7,7 @@ import { getStatusNote } from "../status-note.js";
  * buildAgentDetails remains a pure result-details helper.
  */
 
-import type { ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import type { AgentRecord } from "../types.js";
 import {
@@ -21,10 +21,9 @@ import { resolveType, getAgentConfig, discoverNewAgents, resolveAgentCatalog, re
 import { getSessionUsageSnapshot } from "./usage.js";
 import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-validator.js";
 
-import { parseModelKey, findModelInRegistry, parseThinkingLevel } from "../utils.js";
+import { findModelInRegistry } from "../utils.js";
 import { normalizeThinkingLevel } from "../models/thinking.js";
 import { getSubagentRuntimeContext } from "../shell.js";
-import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import type { AgentManager } from "./agent-manager.js";
 import type { SpawnCoordinator } from "../spawn/spawn-coordinator.js";
 import {
@@ -436,45 +435,20 @@ export async function executeAgentTool(
   const description = (params.description as string | undefined) || prompt.split("\n")[0].slice(0, 80) || prompt.slice(0, 80);
   const runInBackground = params.run_in_background as boolean | undefined;
 
-  // Worktree definitions are resolved above, then share the same explicit >
-  // session > persisted > Markdown > global > parent precedence as all spawns.
-  const parentModelId = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-  const explicitModel = params._modelFromSettings === true
-    ? undefined
-    : typeof params.model === "string" ? params.model : undefined;
+  // Model and thinking come only from the resolved Agent Markdown definition;
+  // missing or unavailable values fall back to the calling parent session.
   const store = getStore();
   const runtimeSettingsSnapshot = typeof store.createSubagentRuntimeSettings === "function"
     ? store.createSubagentRuntimeSettings()
     : undefined;
-  // Keep scalar runtime controls stable across asynchronous model preflight.
-  // Older detached stores have no snapshot, so capture their live settings at
-  // the same boundary as the compatibility fallback.
-  const runtimeAgentSettings = runtimeSettingsSnapshot?.agent ?? store.agent;
-  const forceBackground = runtimeAgentSettings.forceBackground;
-  const shouldRunInBackground = runInBackground || forceBackground;
-  const resolvedModelKey = runtimeSettingsSnapshot
-    ? runtimeSettingsSnapshot.modelFor(resolvedType, parentModelId, agentConfig, explicitModel)
-    : store.modelSettingFor(resolvedType, parentModelId, agentConfig, explicitModel).value;
-  let model: ReturnType<typeof findModelInRegistry>;
-  if (explicitModel !== undefined) {
-    // Explicit models are exact, while Pi's session creation remains the
-    // authentication boundary.
-    const parsed = parseModelKey(explicitModel);
-    model = parsed ? ctx.modelRegistry.find(parsed.provider, parsed.modelId) : undefined;
-    if (!model) return errorResult(`Model not found: ${explicitModel}`);
-  } else {
-    model = findModelInRegistry(resolvedModelKey, ctx.modelRegistry, ctx.model);
-  }
+  const shouldRunInBackground = runInBackground === true;
+  const model = findModelInRegistry(agentConfig.model, ctx.modelRegistry, ctx.model);
   const modelKey = model ? `${model.provider}/${model.id}` : undefined;
   const modelName = model?.id;
-  const explicitThinking = params._thinkingFromSettings === true
-    ? undefined
-    : parseThinkingLevel(params.thinking as string | undefined);
-  const requestedThinking = (runtimeSettingsSnapshot
-    ? runtimeSettingsSnapshot.thinkingSettingFor(resolvedType, ctx.thinkingLevel, agentConfig, explicitThinking)
-    : store.thinkingSettingFor(resolvedType, ctx.thinkingLevel, agentConfig, explicitThinking)
-  ).value;
-  const thinkingLevel = normalizeThinkingLevel(model, requestedThinking);
+  const thinkingLevel = normalizeThinkingLevel(
+    model,
+    agentConfig.thinkingLevel ?? ctx.thinkingLevel,
+  );
 
   // renderCall runs before this asynchronous resolution. Publish the resolved
   // values as a row-local partial update immediately, including the abort and
@@ -796,57 +770,4 @@ export async function executeContinueAgentTool(
     if (signal?.aborted) return cancelledResult(details);
     return errorResult(error instanceof Error ? error.message : String(error), details);
   }
-}
-
-// ============================================================================
-// Tool_call listener — inject model into Agent tool calls
-// =============================================================================
-
-export async function toolCallListener(
-  event: ToolCallEvent,
-  ctx: ExtensionContext,
-): Promise<void> {
-  if (event.toolName !== "Agent") return;
-
-  const input = event.input;
-  // Preserve an explicit model in invocation details even for worktrees.
-  if (typeof input.model === "string") {
-    const parsed = parseModelKey(input.model);
-    if (parsed) input._modelOverride = parsed.modelId;
-  }
-  // Worktree overlays are selected atomically in executeAgentTool.
-  if (typeof input.worktree_path === "string" && input.worktree_path.trim() !== "") return;
-
-  const requestedType = input.agent as string | undefined;
-  const subagentType = requestedType ? resolveType(requestedType) : undefined;
-  const agentConfig = subagentType ? getAgentConfig(subagentType) : undefined;
-  const parentModelId = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-
-  if (subagentType && input.model === undefined) {
-    const store = getStore();
-    const effectiveModel = store.modelFor(subagentType, parentModelId, agentConfig);
-    if (effectiveModel) {
-      input.model = effectiveModel;
-      input._modelFromSettings = true;
-    }
-  }
-  if (typeof input.model === "string") {
-    const parsed = parseModelKey(input.model);
-    if (parsed) input._modelOverride = parsed.modelId;
-  }
-
-  if (subagentType && input.thinking === undefined) {
-    const setting = getStore().thinkingSettingFor(subagentType, ctx.thinkingLevel, agentConfig, undefined);
-    input.thinking = setting.value;
-    input._thinkingFromSettings = true;
-  }
-
-  const invocationModel = findModelInRegistry(
-    typeof input.model === "string" ? input.model : undefined,
-    ctx.modelRegistry,
-    ctx.model,
-  );
-  const requestedThinking = parseThinkingLevel(input.thinking as string | undefined);
-  const normalizedThinking = normalizeThinkingLevel(invocationModel, requestedThinking ?? ctx.thinkingLevel);
-  if (normalizedThinking !== undefined) input.thinking = normalizedThinking;
 }
