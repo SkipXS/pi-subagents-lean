@@ -44,182 +44,35 @@ afterEach(() => {
 });
 
 describe("config I/O paths", () => {
-  it.each([
-    ["is absent", {}, "legacy/model"],
-    ["is explicitly null", { scout: null }, null],
-    ["is explicitly empty", { scout: "" }, ""],
-    ["has another explicit value", { scout: "new/model" }, "new/model"],
-  ])("migrates legacy Explore only when scout %s", async (_, scout, expected) => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({
-      agent: { Explore: "legacy/model", ...scout },
-      concurrency: { default: 4 },
-    }));
-    vi.resetModules();
-
-    const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().config.agent.scout).toBe(expected);
-  });
-
   it("defaults global concurrency to four", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({ agent: { default: null, forceBackground: false } }));
+    mockReadFileSync.mockReturnValue(JSON.stringify({ agent: { default: null } }));
     vi.resetModules();
 
     const { loadConfig } = await import("../../src/config/config-io.ts");
     expect(loadConfig().config.concurrency).toEqual({ default: 4 });
   });
 
-  it("normalizes dynamic agent entries at the file boundary", async () => {
+  it("accepts only current known agent settings at the file boundary", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({
       agent: {
-        default: null,
-        forceBackground: false,
-        dynamicModel: "provider/model",
-        dynamicNull: null,
-        dynamicNumber: 42,
-        dynamicBoolean: true,
-      },
-      concurrency: { default: 4 },
-    }));
-    vi.resetModules();
-
-    const { loadConfig } = await import("../../src/config/config-io.ts");
-    const config = loadConfig().config;
-    expect(config.agent.dynamicModel).toBe("provider/model");
-    expect(config.agent.dynamicNull).toBeNull();
-    expect(config.agent).not.toHaveProperty("dynamicNumber");
-    expect(config.agent).not.toHaveProperty("dynamicBoolean");
-  });
-
-  it("normalizes legacy provider and model limits out of saved config", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({
-      agent: { default: null, forceBackground: false },
-      concurrency: {
-        default: 2,
-        providers: { llamacpp: 1 },
-        models: { "llamacpp/4b": 1 },
-      },
-    }));
-    vi.resetModules();
-
-    const { loadConfig, saveConfigAtomic } = await import("../../src/config/config-io.ts");
-    const config = loadConfig().config;
-    expect(config.concurrency).toEqual({ default: 2 });
-
-    saveConfigAtomic(config);
-    const configWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
-    const saved = JSON.parse(String(configWrite![1]));
-    expect(saved.concurrency).toEqual({ default: 2 });
-  });
-
-  it("drops an invalid global thinking value while loading config", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({
-      agent: { defaultThinking: "invalid" },
-      concurrency: { default: 4 },
-    }));
-    vi.resetModules();
-
-    const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().config.agent.defaultThinking).toBeUndefined();
-  });
-
-  it("tolerates legacy mode/model/thinking keys and drops them on normalized write", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValueOnce(JSON.stringify({
-      mode: { legacy: true },
-      ecoModelOverrides: ["legacy/model"],
-      ecoThinkingOverrides: "legacy/thinking",
-      agent: { default: "openai/gpt-4o" },
-      concurrency: { default: 7 },
-    }));
-    vi.resetModules();
-
-    const { loadConfig, saveConfigAtomic } = await import("../../src/config/config-io.ts");
-    const result = loadConfig();
-    expect(result.health).toBe("healthy");
-    expect(result.config).not.toHaveProperty("mode");
-    expect(result.config).not.toHaveProperty("ecoModelOverrides");
-    expect(result.config).not.toHaveProperty("ecoThinkingOverrides");
-    expect(result.config.agent.default).toBe("openai/gpt-4o");
-    expect(result.config.concurrency.default).toBe(7);
-
-    saveConfigAtomic(result.config);
-    const configWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
-    const saved = JSON.parse(String(configWrite![1]));
-    expect(saved).not.toHaveProperty("mode");
-    expect(saved).not.toHaveProperty("ecoModelOverrides");
-    expect(saved).not.toHaveProperty("ecoThinkingOverrides");
-  });
-
-  it("tolerates and drops legacy presentation fields while retaining functional settings", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({
-      agent: {
-        default: null,
-        forceBackground: false,
-        widgetShowModelThinking: false,
-        widgetShowStartTime: false,
-        showCost: true,
-        delegate_to: ["scout"],
-        max_child_agents: 2,
-        maxNestingDepth: 2,
+        includeContextFiles: false,
+        disableDefaultAgents: true,
         orchestrationPrompt: false,
+        ignoredRole: "provider/model",
+        anotherIgnoredRole: "provider/reviewer",
+        ignoredRoot: { reviewer: "high" },
       },
       concurrency: { default: 4 },
     }));
     vi.resetModules();
+
     const { loadConfig } = await import("../../src/config/config-io.ts");
-    const config = loadConfig().config;
-    expect(config.agent).not.toHaveProperty("widgetShowModelThinking");
-    expect(config.agent).not.toHaveProperty("widgetShowStartTime");
-    expect(config.agent).not.toHaveProperty("showCost");
-    expect(config.agent).not.toHaveProperty("delegate_to");
-    expect(config.agent).not.toHaveProperty("max_child_agents");
-    expect(config.agent).not.toHaveProperty("maxNestingDepth");
-    expect(config.agent.orchestrationPrompt).toBe(false);
-  });
-
-  it("does not recreate removed presentation keys when a write callback touches them", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({
-      agent: { default: null, forceBackground: false },
+    expect(loadConfig().config).toEqual({
+      agent: { includeContextFiles: false, disableDefaultAgents: true, orchestrationPrompt: false },
       concurrency: { default: 4 },
-    }));
-    vi.resetModules();
-
-    const { updateConfigAtomic } = await import("../../src/config/config-io.ts");
-    const result = updateConfigAtomic((config) => {
-      (config.agent as Record<string, unknown>).widgetCompact = true;
-      (config.agent as Record<string, unknown>).delegate_to = ["scout"];
-      (config.agent as Record<string, unknown>).max_child_agents = 2;
-      (config.agent as Record<string, unknown>).maxNestingDepth = 2;
-      (config.agent as Record<string, unknown>).dynamicModel = "provider/model";
-      (config.agent as Record<string, unknown>).dynamicNull = null;
-      (config.agent as Record<string, unknown>).dynamicNumber = 42;
-      (config.agent as Record<string, unknown>).dynamicBoolean = true;
-      config.agent.forceBackground = true;
     });
-    expect(result.config.agent.forceBackground).toBe(true);
-    expect(result.config.agent).not.toHaveProperty("widgetCompact");
-    expect(result.config.agent).not.toHaveProperty("delegate_to");
-    expect(result.config.agent).not.toHaveProperty("max_child_agents");
-    expect(result.config.agent).not.toHaveProperty("maxNestingDepth");
-    expect(result.config.agent.dynamicModel).toBe("provider/model");
-    expect(result.config.agent.dynamicNull).toBeNull();
-    expect(result.config.agent).not.toHaveProperty("dynamicNumber");
-    expect(result.config.agent).not.toHaveProperty("dynamicBoolean");
-    const configWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
-    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("widgetCompact");
-    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("delegate_to");
-    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("max_child_agents");
-    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("maxNestingDepth");
-    expect(JSON.parse(String(configWrite![1])).agent).toMatchObject({ dynamicModel: "provider/model", dynamicNull: null });
-    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("dynamicNumber");
-    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("dynamicBoolean");
   });
 
   it("rejects repair when neither a primary nor backup config exists", async () => {
@@ -230,18 +83,17 @@ describe("config I/O paths", () => {
     expect(() => repairConfig()).toThrow("Cannot repair config");
   });
 
-  it("uses Pi's agent directory for renamed config and custom prompts when HOME is unset", async () => {
+  it("uses Pi's agent directory for the renamed config when HOME is unset", async () => {
     const agentDir = "C:\\Users\\Pi User\\.pi\\agent";
     vi.stubEnv("HOME", "");
     mockGetAgentDir.mockReturnValue(agentDir);
     vi.resetModules();
 
-    const { CUSTOM_PROMPT_PATH, saveConfigAtomic } = await import("../../src/config/config-io.ts");
-    saveConfigAtomic({ agent: {} as any, concurrency: {} as any });
+    const { saveConfigAtomic } = await import("../../src/config/config-io.ts");
+    saveConfigAtomic({ agent: {}, concurrency: { default: 4 } });
 
     const configPath = join(agentDir, "subagents-lean.json");
     expect(mockGetAgentDir).toHaveBeenCalledOnce();
-    expect(CUSTOM_PROMPT_PATH).toBe(join(agentDir, "subagents-lean-prompt.md"));
     expect(mockMkdirSync).toHaveBeenCalledWith(agentDir, { recursive: true });
     const tmpPath = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."))![0] as string;
     expect(tmpPath.startsWith(`${configPath}.`)).toBe(true);
@@ -454,7 +306,7 @@ describe("config I/O paths", () => {
     vi.resetModules();
 
     const { loadConfig, saveConfigAtomic } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().config).toMatchObject({ concurrency: { default: 4 }, thinkingOverrides: {} });
+    expect(loadConfig().config).toMatchObject({ concurrency: { default: 4 }, agent: { orchestrationPrompt: true } });
     expect(() => saveConfigAtomic({ agent: {} as any, concurrency: {} as any }))
       .toThrow("primary config is corrupt");
     expect(mockWriteFileSync.mock.calls.some(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."))).toBe(false);

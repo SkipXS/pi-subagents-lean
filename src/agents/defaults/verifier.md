@@ -1,6 +1,5 @@
 ---
 name: verifier
-display_name: Verifier
 description: Read-only validation agent for reproducing a specific issue, running existing tests or checks, and reporting observed results and residual risks.
 tools: [read, grep, bash]
 extensions: false

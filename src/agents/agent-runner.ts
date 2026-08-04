@@ -14,6 +14,8 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
+  type ResourceDiagnostic,
+  type Skill,
   getAgentDir,
   loadProjectContextFiles,
   SessionManager,
@@ -29,14 +31,14 @@ import {
 } from "./agent-types.js";
 import { extractText } from "../prompt/context.js";
 import type { AgentUsage } from "./usage.js";
-import { GIT_EXEC_TIMEOUT_MS } from "../utils.js";
+import { GIT_EXEC_TIMEOUT_MS, findModelInRegistry } from "../utils.js";
+import { normalizeThinkingLevel } from "../models/thinking.js";
 import { buildAgentPrompt, type PromptExtras } from "../prompt/prompts.js";
-import { preloadSkills, loadSkillMeta, type SkillMeta } from "../prompt/skill-loader.js";
+import { loadSkillMeta } from "../prompt/skill-loader.js";
 import { type CompactionInfo, type EnvInfo, type RunCallbacks, type RunTunables, SHORT_ID_LENGTH } from "../types.js";
-import { type AgentConfig, type SubagentType, type SystemPromptMode } from "./types.js";
+import { type AgentConfig, type SubagentType } from "./types.js";
 import { createSubagentRuntimeContext, getStore, getSubagentRuntimeContext, runWithSubagentRuntime } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
-import { CUSTOM_PROMPT_PATH } from "../config/config-io.js";
 import { revalidateWorktreePath } from "../spawn/worktree-validator.js";
 
 // Cache: extension path → unscoped package name (lowercased), or undefined if not found
@@ -325,56 +327,18 @@ async function detectEnv(pi: ExtensionAPI, cwd: string): Promise<EnvInfo> {
 
 // ── runAgent phases ────────────────────────────────────────────────
 
-/**
- * Resolve system prompt mode, fetch the appropriate source prompt, and
- * load project context files. Returns everything buildPrompt needs.
- */
-function resolveSystemPromptSources(
-  ctx: ExtensionContext,
+/** Load AGENTS.md context files when the setting is enabled. */
+function resolvePromptExtras(
   cwd: string,
-  notify: (msg: string) => void,
   settings: SubagentRuntimeSettings,
-): { mode: SystemPromptMode; extras: Pick<PromptExtras, "parentSystemPrompt" | "customSystemPrompt" | "contextFiles"> } {
-  const mode = settings.agent.systemPromptMode;
-  const extras: Pick<PromptExtras, "parentSystemPrompt" | "customSystemPrompt" | "contextFiles"> = {};
-
-  // Fetch parent system prompt for inherit mode
-  if (mode === "inherit") {
-    try {
-      extras.parentSystemPrompt = ctx.getSystemPrompt();
-    } catch (err) {
-      notify(`Failed to get parent system prompt: ${err}. Falling back to replace mode.`);
-    }
+): Pick<PromptExtras, "contextFiles"> {
+  if (!settings.agent.includeContextFiles) return {};
+  try {
+    return { contextFiles: loadProjectContextFiles({ cwd, agentDir: getAgentDir() }) };
+  } catch {
+    // Non-fatal: context files are supplementary.
+    return {};
   }
-
-  // Read custom prompt file for custom mode
-  if (mode === "custom") {
-    try {
-      const content = fs.readFileSync(CUSTOM_PROMPT_PATH, "utf-8").trim();
-      if (content) {
-        extras.customSystemPrompt = content;
-      } else {
-        notify(`Custom prompt file is empty: ${CUSTOM_PROMPT_PATH}. Falling back to replace mode.`);
-      }
-    } catch (err: any) {
-      if (err.code === "ENOENT") {
-        notify(`Custom prompt file not found: ${CUSTOM_PROMPT_PATH}. Falling back to replace mode.`);
-      } else {
-        notify(`Failed to read custom prompt file: ${err.message}. Falling back to replace mode.`);
-      }
-    }
-  }
-
-  // Load AGENTS.md context files when the setting is enabled
-  if (settings.agent.includeContextFiles) {
-    try {
-      extras.contextFiles = loadProjectContextFiles({ cwd, agentDir: getAgentDir() });
-    } catch {
-      // Non-fatal: context files are supplementary
-    }
-  }
-
-  return { mode, extras };
 }
 
 function buildPrompt(
@@ -383,18 +347,15 @@ function buildPrompt(
   config: ReturnType<typeof resolveAgentConfig>,
   cwd: string,
   env: EnvInfo,
-  systemPromptMode: SystemPromptMode = "replace",
-  resolverExtras: Pick<PromptExtras, "parentSystemPrompt" | "customSystemPrompt" | "contextFiles"> = {},
+  resolverExtras: Pick<PromptExtras, "contextFiles"> = {},
 ): string {
   const extras: PromptExtras = { ...resolverExtras };
-  if (Array.isArray(agentConfig?.preloadSkills)) {
-    extras.skillBlocks = preloadSkills(agentConfig.preloadSkills, cwd);
-  }
+  const excludeSkills = config.excludeSkills ?? agentConfig?.excludeSkills;
   if (Array.isArray(config.skills)) {
-    extras.skillMetas = loadSkillMeta(config.skills, cwd);
+    extras.skillMetas = loadSkillMeta(config.skills, cwd, excludeSkills);
   }
   if (!agentConfig) throw new Error(`Unknown agent type: ${type}`);
-  return buildAgentPrompt(agentConfig, cwd, env, extras, systemPromptMode);
+  return buildAgentPrompt(agentConfig, cwd, env, extras);
 }
 
 /** Build extension name → tool names map from loaded extensions. */
@@ -432,47 +393,85 @@ function filterExtensions(
   return { filtered, matched };
 }
 
-/**
- * Override closure: keeps matching extensions (`invert=false`) or removes them
- * (`invert=true`), warning via `notify` for any requested name that matched nothing.
- */
-function filterOverride(
-  names: Set<string>,
-  invert: boolean,
-  notify?: (msg: string) => void,
-) {
-  return (result: any) => {
-    const { filtered, matched } = filterExtensions(result.extensions, names, invert);
-    for (const name of names) {
-      if (!matched.has(name)) {
-        notify?.(`extension "${name}" not found in loaded extensions`);
-      }
-    }
-    return { ...result, extensions: filtered };
-  };
-}
-
-/** Build extension override for whitelist or blacklist filtering. */
+/** Build extension override for selection-minus-exclusion filtering. */
 export function buildExtOverride(
   extensions: true | string[] | false | undefined,
   excludeExtensions?: string[],
   notify?: (msg: string) => void,
 ) {
-  if (Array.isArray(extensions)) {
-    // Whitelist entries may carry a /tool suffix; match on the extension name only.
-    const allowedNames = new Set(extensions.map((ext) => {
+  // Select the positive base first, then subtract exclusions. This keeps the
+  // extension result (and therefore binding, hooks, and extension tools) in
+  // one filtered resource-loader snapshot.
+  const allowedNames = Array.isArray(extensions)
+    ? new Set(extensions.map((ext) => {
       const slashIdx = ext.indexOf("/");
       return (slashIdx !== -1 ? ext.slice(0, slashIdx) : ext).toLowerCase();
-    }));
-    return filterOverride(allowedNames, false, notify);
-  }
+    }))
+    : undefined;
+  const excludedNames = excludeExtensions && new Set(excludeExtensions.map((ext) => {
+    const slashIdx = ext.indexOf("/");
+    return (slashIdx !== -1 ? ext.slice(0, slashIdx) : ext).toLowerCase();
+  }));
 
-  if (excludeExtensions) {
-    const excludeSet = new Set(excludeExtensions.map((n) => n.toLowerCase()));
-    return filterOverride(excludeSet, true, notify);
-  }
+  if (!allowedNames && !excludedNames) return undefined;
 
-  return undefined;
+  return (result: any) => {
+    const selected = allowedNames
+      ? filterExtensions(result.extensions, allowedNames, false)
+      : { filtered: result.extensions, matched: new Set<string>() };
+    const excluded = excludedNames
+      ? filterExtensions(result.extensions, excludedNames, true)
+      : { filtered: selected.filtered, matched: new Set<string>() };
+    const filtered = excludedNames
+      ? filterExtensions(selected.filtered, excludedNames, true).filtered
+      : selected.filtered;
+
+    // Match diagnostics against the original loaded set, not the already
+    // selected subset. A name present in the loaded catalog but removed by the
+    // positive selection is not a conflict or a missing exclusion.
+    for (const name of allowedNames ?? []) {
+      if (!selected.matched.has(name)) {
+        notify?.(`extension "${name}" not found in loaded extensions`);
+      }
+    }
+    for (const name of excludedNames ?? []) {
+      if (!excluded.matched.has(name)) {
+        notify?.(`extension "${name}" not found in loaded extensions`);
+      }
+    }
+
+    return { ...result, extensions: filtered };
+  };
+}
+
+type SkillResources = {
+  skills: Skill[];
+  diagnostics: ResourceDiagnostic[];
+};
+
+/**
+ * Build the complete skill metadata policy for DefaultResourceLoader.
+ *
+ * Pi applies this override both during reload and when an extension adds
+ * resources through resources_discover, so the policy must not be reduced to
+ * an exclusion-only filter.
+ */
+export function buildSkillsOverride(
+  skills: ReturnType<typeof resolveAgentConfig>["skills"],
+  excludeSkills?: string[],
+): (result: SkillResources) => SkillResources {
+  const allowedSkillNames = Array.isArray(skills) ? new Set(skills) : undefined;
+  const excludedSkillNames = new Set(excludeSkills ?? []);
+  const suppressMetadata = skills === false;
+
+  return (result) => ({
+    ...result,
+    skills: result.skills.filter((skill) =>
+      !suppressMetadata
+      && (allowedSkillNames === undefined || allowedSkillNames.has(skill.name))
+      && !excludedSkillNames.has(skill.name),
+    ),
+  });
 }
 
 /**
@@ -487,9 +486,8 @@ function createResourceLoader(
   notify?: (msg: string) => void,
 ) {
   const extensions = config.extensions;
-  const noSkills = config.skills === false
-    || Array.isArray(config.skills)
-    || Array.isArray(agentConfig?.preloadSkills);
+  const excludeSkills = config.excludeSkills ?? agentConfig?.excludeSkills;
+  const noSkills = config.skills === false || Array.isArray(config.skills);
   const agentDir = getAgentDir();
   const loaderOpts: ConstructorParameters<typeof DefaultResourceLoader>[0] = {
     cwd, agentDir,
@@ -497,7 +495,8 @@ function createResourceLoader(
     noPromptTemplates: true, noThemes: true, noContextFiles: true,
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
-    extensionsOverride: buildExtOverride(extensions, agentConfig?.excludeExtensions, notify),
+    extensionsOverride: buildExtOverride(extensions, config.excludeExtensions ?? agentConfig?.excludeExtensions, notify),
+    skillsOverride: buildSkillsOverride(config.skills, excludeSkills),
   };
   const loader = new DefaultResourceLoader(loaderOpts);
   return {
@@ -520,9 +519,9 @@ async function initSession(
   loader: DefaultResourceLoader,
   extToolMap: Map<string, string[]>,
 ) {
-  // Model and thinking precedence is resolved at the spawn boundary. The
-  // runner consumes those resolved values and only inherits from its parent
-  // defensively for direct callers.
+  // The spawn boundary resolves Agent Markdown model/thinking values against
+  // the parent. The runner consumes those already-resolved values and only
+  // inherits from its parent defensively for direct callers.
   const model = options.model ?? ctx.model;
   const thinkingLevel = options.thinkingLevel ?? ctx.thinkingLevel;
   const agentDir = getAgentDir();
@@ -532,8 +531,11 @@ async function initSession(
     settingsManager: SettingsManager.create(cwd, agentDir),
     model,
     tools: resolveSessionAllowedTools({
-      registeredTools: agentConfig?.registeredTools?.length ? agentConfig.registeredTools : BUILTIN_TOOL_NAMES,
+      registeredTools: agentConfig?.tools === undefined && agentConfig?.registeredTools?.length
+        ? agentConfig.registeredTools
+        : BUILTIN_TOOL_NAMES,
       tools: agentConfig?.tools,
+      excludeTools: agentConfig?.excludeTools,
       extToolMap,
     }),
     resourceLoader: loader,
@@ -677,24 +679,29 @@ async function runAgentImpl(
   }
 
   // A queued run uses the definition selected at enqueue time. Registry lookup
-  // remains only for legacy direct callers that did not provide a snapshot.
+  // remains only for direct callers that did not provide a snapshot.
   const agentConfig = options.agentConfig ?? getAgentConfig(type);
   if (!agentConfig) throw new Error(`Unknown agent type: ${type}`);
-  const config = options.agentConfig
-    ? resolveAgentConfig(options.agentConfig, settings.agent.loadSkillsImplicitly, settings.agent.loadExtensionsImplicitly)
-    : getConfig(type, settings.agent.loadSkillsImplicitly, settings.agent.loadExtensionsImplicitly);
 
-  // Buffer warnings during setup to avoid inserting custom_message entries
-  // between tool_use and tool_result in the session tree (causes Anthropic 400).
-  // Flushed after runTurnLoop completes.
+  // Direct runner callers may omit the already-resolved tunables. Resolve the
+  // Markdown values here as the same defensive fallback used by the spawn
+  // coordinator; accepted internal values still win and are carried intact.
+  const resolvedModel = options.model ?? findModelInRegistry(agentConfig.model, ctx.modelRegistry, ctx.model);
+  const resolvedThinking = options.thinkingLevel ?? normalizeThinkingLevel(
+    resolvedModel,
+    agentConfig.thinkingLevel ?? ctx.thinkingLevel,
+  );
+  options = { ...options, model: resolvedModel, thinkingLevel: resolvedThinking };
+
+  const config = options.agentConfig
+    ? resolveAgentConfig(options.agentConfig)
+    : getConfig(type);
+
+  // Buffer setup diagnostics so they do not insert custom_message entries
+  // between tool_use and tool_result in the session tree (Anthropic rejects
+  // that ordering). Selection/exclusion is intentionally silent.
   const warnings: string[] = [];
   const bufferNotify = (msg: string) => { warnings.push(msg); };
-  if (agentConfig?.excludeTools && Array.isArray(agentConfig.tools)) {
-    bufferNotify(`agent "${type}": both tools and exclude_tools set — tools (whitelist) wins`);
-  }
-  if (agentConfig?.excludeExtensions && Array.isArray(agentConfig.extensions)) {
-    bufferNotify(`agent "${type}": both extensions and exclude_extensions set — extensions (whitelist) wins`);
-  }
 
   // A worktree can be deleted, replaced, or have its symlink target swapped
   // while an accepted spawn waits in the manager queue. Revalidate immediately
@@ -714,12 +721,11 @@ async function runAgentImpl(
   }
   const env = await detectEnv(options.pi, effectiveCwd);
 
-  // Resolve system prompt mode + source prompts + context files
-  const { mode, extras: promptExtras } = resolveSystemPromptSources(ctx, effectiveCwd, bufferNotify, settings);
+  // Resolve the replacement prompt's optional project context.
+  const promptExtras = resolvePromptExtras(effectiveCwd, settings);
 
   const systemPrompt = buildPrompt(
-    type, agentConfig, config, effectiveCwd, env,
-    mode, promptExtras,
+    type, agentConfig, config, effectiveCwd, env, promptExtras,
   );
   const { loader, reloadAndMap } = createResourceLoader(config, agentConfig, effectiveCwd, systemPrompt, bufferNotify);
   const { extToolMap } = await reloadAndMap();

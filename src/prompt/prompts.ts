@@ -6,89 +6,34 @@
  */
 
 import type { EnvInfo } from "../types.js";
-import type { AgentConfig, SystemPromptMode } from "../agents/types.js";
-import type { SkillMeta, PreloadedSkill } from "./skill-loader.js";
+import type { AgentConfig } from "../agents/types.js";
+import type { SkillMeta } from "./skill-loader.js";
 import { formatSkillsForPrompt, type Skill } from "@earendil-works/pi-coding-agent";
-import { stripOrchestrationPromptBlocks } from "./orchestration.js";
 
 /** Extra sections to inject into the system prompt (skills). */
 export interface PromptExtras {
-  /** Preloaded skill contents to inject (full content + description). */
-  skillBlocks?: PreloadedSkill[];
-  /** Skill metadata for whitelist display (name, description, location only). */
+  /** Skill metadata for display (name, description, location only). */
   skillMetas?: SkillMeta[];
-  /** Parent system prompt (for inherit mode). */
-  parentSystemPrompt?: string;
-  /** Custom system prompt content (for custom mode). */
-  customSystemPrompt?: string;
-  /** Project context files (AGENTS.md) for custom mode. */
+  /** Project context files (AGENTS.md). */
   contextFiles?: Array<{ path: string; content: string }>;
-}
-
-/**
- * Strip pi scaffolding sections from a parent system prompt.
- *
- * In inherit mode, the parent's prompt already contains:
- *   - <project_context>...</project_context>  (AGENTS.md)
- *   - Skills block (text intro + <available_skills>...</available_skills>)
- *   - Current date: YYYY-MM-DD
- *   - Current working directory: /path
- *   - [subagents-lean orchestration v1]...[/subagents-lean orchestration v1]
- *
- * These are re-added by subagents-lean from the subagent's own config,
- * except orchestration guidance, which is parent-only,
- * so we strip them to avoid duplication.
- *
- * @param prompt  The parent system prompt to clean.
- * @returns       The prompt with scaffolding sections removed.
- */
-function stripScaffolding(prompt: string): string {
-  let result = prompt;
-
-  // 1. Strip <project_context>...</project_context> block
-  result = result.replace(/\n?<\s*project_context\s*>[\s\S]*?<\/\s*project_context\s*>\n?/g, "\n");
-
-  // 2. Strip skills block: optional intro text + <available_skills>...</available_skills>
-  result = result.replace(/\n?(?:The following skills provide[\s\S]*?)?<\s*available_skills\s*>[\s\S]*?<\/\s*available_skills\s*>\n?/g, "\n");
-
-  // 3. Strip Current date: line
-  result = result.replace(/\n?Current date:.*\n?/g, "\n");
-
-  // 4. Strip Current working directory: line
-  result = result.replace(/\n?Current working directory:.*\n?/g, "\n");
-
-  // 5. Never inherit a complete extension-owned delegation block. Unmatched
-  // user/custom markers are ordinary content and must remain untouched.
-  result = stripOrchestrationPromptBlocks(result);
-
-  // Clean up: collapse runs of 3+ newlines into 2
-  result = result.replace(/\n{3,}/g, "\n\n");
-
-  return result.trim();
 }
 
 /**
  * Build the system prompt for an agent from its config.
  *
- * Three modes:
- * - replace (default): generic header + env + agent's systemPrompt
- * - inherit: parent's system prompt (stripped of scaffolding) + env + agent's systemPrompt
- * - custom: content of ~/.pi/agent/subagents-lean-prompt.md + env + agent's systemPrompt
- *
- * Agent's own systemPrompt is always included in <agent_instructions> tags.
+ * The prompt base is always replaced with the extension's generic header.
+ * The agent body is always included in <agent_instructions> tags.
  *
  * @param config   Agent configuration.
  * @param cwd      Current working directory.
  * @param env      Environment info.
- * @param extras   Optional extra sections to inject (skills, parent/custom prompts).
- * @param mode     System prompt mode (replace, inherit, custom).
+ * @param extras   Optional skill and project-context sections.
  */
 export function buildAgentPrompt(
   config: AgentConfig,
   cwd: string,
   env: EnvInfo,
   extras?: PromptExtras,
-  mode: SystemPromptMode = "replace",
 ): string {
   const envLines = [
     "# Environment",
@@ -101,16 +46,19 @@ export function buildAgentPrompt(
   envLines.push(`Platform: ${env.platform}`);
   const envBlock = envLines.join("\n");
 
-  // Unified skill index — all skills in one <available_skills> block
-  const hasSkills = extras?.skillMetas?.length || extras?.skillBlocks?.length;
+  // Unified skill index — all skills in one <available_skills> block. Keep
+  // this boundary defensive as callers may construct PromptExtras directly.
+  const excludedSkillNames = new Set(config.excludeSkills ?? []);
+  const skillMetas = extras?.skillMetas?.filter((skill) => !excludedSkillNames.has(skill.name));
+  const hasSkills = skillMetas?.length;
   let extrasSuffix = "";
   if (hasSkills) {
     const skillLines: string[] = [];
 
     // Location-based skills: use Pi's formatSkillsForPrompt for XML escaping and
     // disable-model-invocation filtering, then extract the <skill> elements.
-    if (extras?.skillMetas?.length) {
-      const piSkills: Skill[] = extras.skillMetas.map((m) => ({
+    if (skillMetas?.length) {
+      const piSkills: Skill[] = skillMetas.map((m) => ({
         name: m.name,
         description: m.description,
         filePath: m.location,
@@ -121,11 +69,6 @@ export function buildAgentPrompt(
       const formatted = formatSkillsForPrompt(piSkills);
       const skillElements = formatted.match(/<skill>[\s\S]*?<\/skill>/g);
       if (skillElements) skillLines.push(...skillElements);
-    }
-
-    // Preloaded skills: content tags (not in Pi's formatSkillsForPrompt)
-    for (const skill of extras?.skillBlocks ?? []) {
-      skillLines.push(`<skill><name>${escapeXml(skill.name)}</name><description>${escapeXml(skill.description)}</description><content>${escapeXml(skill.content)}</content></skill>`);
     }
 
     const lines = [
@@ -162,18 +105,10 @@ export function buildAgentPrompt(
     contextSuffix = `\n\n${lines.join("\n")}`;
   }
 
-  // Build base prompt: mode-specific header if provided, otherwise default
+  // Every agent gets the same replacement base; no parent prompt is loaded
+  // into the child session.
   const activeAgentTag = `<active_agent name="${config.name}"/>`;
-  const rawHeader = mode === "inherit" ? extras?.parentSystemPrompt
-                 : mode === "custom"  ? extras?.customSystemPrompt
-                 : undefined;
-  // Parent/custom headers carry pi's scaffolding (context, skills, date, cwd);
-  // strip it — we re-add these from the subagent's own config. (rawHeader is
-  // undefined in replace mode, so nothing to strip there.)
-  const customHeader = rawHeader ? stripScaffolding(rawHeader) : rawHeader;
-  const basePrompt = customHeader
-    ? `${customHeader}\n\n${envBlock}`
-    : `You are a Pi, an expert coding sub-agent.\nYou have been invoked to handle a specific task autonomously.\n\n${envBlock}`;
+  const basePrompt = `You are a Pi, an expert coding sub-agent.\nYou have been invoked to handle a specific task autonomously.\n\n${envBlock}`;
 
   // active_agent goes AFTER shared prefix (header + env + context) for KV cache
   return `${basePrompt}${contextSuffix}\n${activeAgentTag}\n${agentInstructions}${extrasSuffix}`;

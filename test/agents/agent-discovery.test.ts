@@ -16,7 +16,6 @@ import {
   scanAgentFilesInDir,
   mergeAgents,
   parseExtensions,
-  toAgentConfig,
 } from "../../src/agents/agent-discovery.ts";
 import type { AgentConfigFromMd } from "../../src/agents/agent-discovery.ts";
 import { DEFAULT_AGENTS } from "../../src/agents/default-agents.ts";
@@ -91,20 +90,18 @@ describe("parseExtensions", () => {
 /* ------------------------------------------------------------------ */
 
 describe("parseAgentFile", () => {
-  it("parses supported frontmatter and ignores legacy fields", () => {
+  it("parses supported frontmatter", () => {
     const content = `---
 name: explorer
-display_name: Explorer Agent
 description: A fast exploration agent
 model: anthropic/claude-haiku-4-5-20251001
 tools: read, bash, grep
+exclude_tools: [write]
 extensions: none
+exclude_extensions: [telemetry]
 skills: all
+exclude_skills: [secret-skill]
 thinking: high
-eco_model: openai/gpt-4o-mini
-eco_thinking: low
-delegate_to: [scout, reviewer]
-max_child_agents: "2"
 hidden: "false"
 ---
 
@@ -112,20 +109,15 @@ This is the system prompt body.
 `;
     const result = parseAgentFile(content, "user");
     expect(result.name).toBe("explorer");
-    expect(result.display_name).toBe("Explorer Agent");
     expect(result.description).toBe("A fast exploration agent");
     expect(result.model).toBe("anthropic/claude-haiku-4-5-20251001");
     expect(result.tools).toEqual(["read", "bash", "grep"]);
+    expect(result.exclude_tools).toEqual(["write"]);
     expect(result.extensions).toBe(false); // "none" → false
+    expect(result.exclude_extensions).toEqual(["telemetry"]);
     expect(result.skills).toBe(true); // "all" → true
+    expect(result.exclude_skills).toEqual(["secret-skill"]);
     expect(result.thinking).toBe("high");
-    expect(result).not.toHaveProperty("eco_model");
-    expect(result).not.toHaveProperty("eco_thinking");
-    expect(toAgentConfig(result)).not.toHaveProperty("ecoModel");
-    expect(toAgentConfig(result)).not.toHaveProperty("ecoThinkingLevel");
-    // Deprecated delegation frontmatter is tolerated but ignored.
-    expect(toAgentConfig(result)).not.toHaveProperty("delegateTo");
-    expect(toAgentConfig(result)).not.toHaveProperty("maxChildAgents");
     expect(result.hidden).toBe(false);
     expect(result.systemPrompt).toBe("This is the system prompt body.");
     expect(result.source).toBe("user");
@@ -139,12 +131,13 @@ Just a body.
 `;
     const result = parseAgentFile(content, "project");
     expect(result.name).toBe("minimal");
-    expect(result.display_name).toBeUndefined();
     expect(result.description).toBeUndefined();
     expect(result.model).toBeUndefined();
     expect(result.tools).toBeUndefined();
     expect(result.extensions).toBeUndefined();
+    expect(result.exclude_extensions).toBeUndefined();
     expect(result.skills).toBeUndefined();
+    expect(result.exclude_skills).toBeUndefined();
     expect(result.thinking).toBeUndefined();
     expect(result.hidden).toBeUndefined();
     expect(result.systemPrompt).toBe("Just a body.");
@@ -194,12 +187,22 @@ body
     ["tools", "[read, write, edit, grep, bash]", ["read", "write", "edit", "grep", "bash"]],
     ["exclude_tools", "[agent]", ["agent"]],
     ["exclude_extensions", "[rpiv-todo, pi-fff]", ["rpiv-todo", "pi-fff"]],
+    ["exclude_skills", "[skill-a, skill-b]", ["skill-a", "skill-b"]],
     ["extensions", "[ext-a, ext-b]", ["ext-a", "ext-b"]],
-    ["preload_skills", "[skill-a]", ["skill-a"]],
   ] as const)("parses inline YAML array for %s", (field, value, expected) => {
     const content = `---\nname: agent\n${field}: ${value}\n---\nbody\n`;
     const result = parseAgentFile(content, "user");
     expect((result as unknown as Record<string, unknown>)[field]).toEqual(expected);
+  });
+
+  it.each([
+    ["true", true],
+    ["false", false],
+    ["all", true],
+    ["none", false],
+  ] as const)("parses tools boolean selection %s", (value, expected) => {
+    const content = `---\nname: agent\ntools: ${value}\n---\nbody\n`;
+    expect(parseAgentFile(content, "user").tools).toBe(expected);
   });
 
   it("parses extensions as boolean true", () => {
@@ -362,31 +365,6 @@ describe("scanAgentFilesInDir", () => {
 /* ------------------------------------------------------------------ */
 
 describe("mergeAgents", () => {
-
-
-  it("ignores legacy model fields while merging agent definitions", () => {
-    const defaults = new Map<string, any>([["scout", {
-      name: "scout",
-      description: "Default scout",
-      model: "default/model",
-      thinkingLevel: "high",
-      systemPrompt: "default prompt",
-    }]]);
-    const legacy = parseAgentFile(`---
-name: scout
-eco_model: old/model
-eco_thinking: low
----
-`, "user");
-
-    expect(legacy).not.toHaveProperty("eco_model");
-    expect(legacy).not.toHaveProperty("eco_thinking");
-    expect(mergeAgents(defaults, [legacy], [], []).get("scout")).toMatchObject({
-      model: "default/model",
-      thinkingLevel: "high",
-    });
-  });
-
   it("returns empty map when no agents", () => {
     const result = mergeAgents(new Map(), [], [], []);
     expect(result instanceof Map).toBe(true);
@@ -410,6 +388,33 @@ eco_thinking: low
     const result = mergeAgents(defaults, [], [], []);
     expect(result.size).toBe(1);
     expect(result.get("explorer")?.model).toBe("model/a");
+  });
+
+  it("carries exclusion fields through a merged definition", () => {
+    const override = parseAgentFile(`---
+name: reviewer
+tools: [read, bash]
+exclude_tools: [bash]
+extensions: [quality-monitor, telemetry]
+exclude_extensions: [telemetry]
+skills: [tdd, debug]
+exclude_skills: [debug]
+---
+`, "project");
+
+    const result = mergeAgents(new Map(), [], [], [override]).get("reviewer")!;
+    expect(result).toMatchObject({
+      tools: ["read", "bash"],
+      registeredTools: ["read", "bash"],
+      excludeTools: ["bash"],
+      extensions: ["quality-monitor", "telemetry"],
+      excludeExtensions: ["telemetry"],
+      skills: ["tdd", "debug"],
+      excludeSkills: ["debug"],
+    });
+
+    override.exclude_skills!.push("mutated");
+    expect(result.excludeSkills).toEqual(["debug"]);
   });
 
   it("keeps the default reviewer prompt for a bodyless partial override", () => {
@@ -439,6 +444,27 @@ Use this reviewer prompt instead.
     const reviewer = result.get("reviewer")!;
     expect(reviewer.model).toBe("test/reviewer");
     expect(reviewer.systemPrompt).toBe("Use this reviewer prompt instead.");
+  });
+
+  it("merges role names case-insensitively without a display alias", () => {
+    const defaults = new Map<string, any>([["reviewer", {
+      name: "reviewer", description: "Default", extensions: true, skills: true, systemPrompt: "default",
+    }]]);
+    const result = mergeAgents(defaults, [{
+      name: "REVIEWER", description: "Override", source: "user", systemPrompt: "override",
+    }], [], []);
+
+    expect([...result.keys()]).toEqual(["reviewer"]);
+    expect(result.get("reviewer")).toMatchObject({
+      name: "REVIEWER", description: "Override", extensions: true, skills: true,
+    });
+  });
+
+  it("resolves missing selections to false after merging", () => {
+    const result = mergeAgents(new Map(), [], [], [{
+      name: "minimal", source: "project", systemPrompt: "prompt",
+    }]);
+    expect(result.get("minimal")).toMatchObject({ skills: false, extensions: false });
   });
 
   it("user agents override defaults by name with per-field merge", () => {

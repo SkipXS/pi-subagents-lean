@@ -6,7 +6,7 @@ prompt snippets or guidelines, parameter descriptions, or runtime-generated
 enums. The required `agent` field is always a bare `Type.String()`; it never
 has a config- or registry-driven enum. Model and thinking are intentionally
 absent from the LLM-visible `Agent` schema and remain controlled through Agent
-Markdown and settings.
+Markdown or the calling parent session.
 
 ## Why
 
@@ -15,10 +15,9 @@ Calling `registerTool()` at runtime rebuilds tools and can invalidate the system
 When enabled, the parent-only orchestration block is the sole automatic catalog
 of visible agents. It is regenerated from the trusted live registry before each
 parent turn, independently of the tool schema. Disabling that block deliberately
-provides no automatic catalog. Model and thinking use the shared precedence:
-internal spawn value > session-agent > persistent agent > Agent Markdown >
-global > parent. The internal spawn level is settings plumbing, not a public
-tool override.
+provides no automatic catalog. Model and thinking come from Agent Markdown or,
+when absent, the calling parent session. Registry validation and provider
+normalization remain internal; they are not public tool overrides.
 
 ## Trade-off
 

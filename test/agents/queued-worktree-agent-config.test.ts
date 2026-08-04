@@ -16,11 +16,7 @@ vi.mock("../../src/agents/agent-runner.js", () => ({
 vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
   getStore: () => ({
-    createSubagentRuntimeSettings: () => ({
-      agent: { forceBackground: false },
-      modelFor: (_type: string, parent: string, config?: { model?: string }) => config?.model ?? parent,
-      thinkingSettingFor: () => ({ value: undefined }),
-    }),
+    createSubagentRuntimeSettings: () => ({ agent: {} }),
   }),
   getPiInstance: () => undefined,
   getSessionCtx: () => undefined,
@@ -82,7 +78,7 @@ describe("queued worktree agent configuration", () => {
       const a = await resolveWorktreeAgent("reviewer", worktreeA.dir, { disableDefaultAgents: true });
       expect(a).toBeDefined();
       const coordinator = new SpawnCoordinator(manager);
-      const ctx = { cwd: "/parent", modelRegistry: {} } as any;
+      const ctx = { cwd: "/parent", modelRegistry: { find: () => undefined } } as any;
       const pi = { exec: vi.fn() } as any;
       let unblock!: (result: ReturnType<typeof runResult>) => void;
       const blocked = new Promise<ReturnType<typeof runResult>>((resolve) => { unblock = resolve; });

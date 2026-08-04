@@ -26,6 +26,7 @@ vi.mock("../../src/agents/agent-types.js", () => ({
     tools: Array.isArray(config.tools) ? [...config.tools] : config.tools,
     extensions: Array.isArray(config.extensions) ? [...config.extensions] : config.extensions,
     skills: Array.isArray(config.skills) ? [...config.skills] : config.skills,
+    excludeSkills: config.excludeSkills && [...config.excludeSkills],
   })),
   getAgentConfig: mockAgentConfig,
   discoverNewAgents: vi.fn(async () => 0),
@@ -41,16 +42,14 @@ vi.mock("../../src/agents/agent-runner.js", () => ({
 }));
 
 vi.mock("../../src/utils.js", () => ({
-  parseModelKey: vi.fn(() => null),
-  findModelInRegistry: vi.fn(() => undefined),
-  parseThinkingLevel: vi.fn(() => undefined),
+  findModelInRegistry: vi.fn((_key: unknown, _registry: unknown, fallback: unknown) => fallback),
   errorMessage: (error: unknown) => error instanceof Error ? error.message : String(error),
 }));
 
 vi.mock("../../src/config/config-io.js", () => ({
-  loadConfig: vi.fn(() => ({ agent: { default: null, forceBackground: false }, concurrency: { default: 4 } })),
+  loadConfig: vi.fn(() => ({ agent: { default: null }, concurrency: { default: 4 } })),
   saveConfigAtomic: vi.fn(),
-  DEFAULT_CONFIG: { agent: { default: null, forceBackground: false }, concurrency: { default: 4 } },
+  DEFAULT_CONFIG: { agent: { default: null }, concurrency: { default: 4 } },
 }));
 
 // Hoist mock pi so shell mock can return it
@@ -66,11 +65,7 @@ const { mockPi, mockGetPiInstance, mockIsIdle } = vi.hoisted(() => ({
 vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
   getStore: () => ({
-    createSubagentRuntimeSettings: () => ({
-      agent: { forceBackground: false, showCost: false },
-      modelFor: (_type: string, parent: string, config?: { model?: string }) => config?.model ?? parent,
-      thinkingSettingFor: () => ({ value: undefined }),
-    }),
+    createSubagentRuntimeSettings: () => ({ agent: {} }),
   }),
   getPiInstance: () => mockGetPiInstance(),
   getSessionCtx: () => ({ isIdle: mockIsIdle }),
@@ -920,7 +915,7 @@ describe("SpawnCoordinator", () => {
       coordinator.scheduleNudge(result.agentId);
       vi.advanceTimersByTime(200);
 
-      // sendMessage was attempted once; the failed state is diagnostic until eviction.
+      // sendMessage was attempted once; the failed state is diagnostic until session shutdown.
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
       expect(result.record.delivery).toMatchObject({ state: "failed", attempts: 1, lastError: "stale context" });
     });
@@ -1075,7 +1070,7 @@ describe("SpawnCoordinator", () => {
       coordinator.scheduleNudge(result.agentId);
       vi.advanceTimersByTime(200);
 
-      // sendMessage delivered the full result to the LLM — record is safe to evict.
+      // sendMessage delivered the full result to the LLM — the delivery entry can be cleared.
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
       expect(record.lifecycle.resultConsumed).toBe(true);
     });
@@ -1105,7 +1100,7 @@ describe("SpawnCoordinator", () => {
       const record = manager.getRecord(result.agentId);
 
       // sendMessage throws — LLM never received the result, so the failure
-      // remains diagnostic until the record is evicted.
+      // remains diagnostic until session shutdown.
       mockPi.sendMessage.mockImplementation(() => { throw new Error("stale context"); });
       record.lifecycle.status = "completed";
       coordinator.scheduleNudge(result.agentId);
@@ -1208,49 +1203,5 @@ describe("SpawnCoordinator", () => {
       expect((coordinator as any).backgroundDeliveries.size).toBe(0);
     });
 
-    it("clears failed-delivery parent tracking when retention evicts its record", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const parent = new AbortController();
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "evict", runInBackground: true, signal: parent.signal,
-      });
-      result.record.lifecycle.status = "completed";
-      mockGetPiInstance.mockReturnValue(null);
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-      expect(result.record.delivery?.state).toBe("failed");
-      expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId && e.signal)).toBe(true);
 
-      coordinator.onRecordEvicted(result.record);
-      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
-    });
-
-    it("cleans failed-delivery parent tracking when only its manager is disposed", async () => {
-      const realManager = new AgentManager(undefined, { default: 1 });
-      const coordinator = new SpawnCoordinator(realManager);
-      realManager.setOnComplete((record, execution) => coordinator.onAgentComplete(record, execution));
-      realManager.setOnRecordEvicted((record) => coordinator.onRecordEvicted(record));
-      const parent = new AbortController();
-      const removeListener = vi.spyOn(parent.signal, "removeEventListener");
-      mockRunAgent.mockResolvedValueOnce({
-        responseText: "done",
-        session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() },
-        aborted: false,
-
-      });
-      mockGetPiInstance.mockReturnValue(null);
-
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "manager shutdown", runInBackground: true, signal: parent.signal,
-      });
-      await result.record.execution.promise;
-      vi.advanceTimersByTime(200);
-      expect(result.record.delivery?.state).toBe("failed");
-      expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId && e.signal)).toBe(true);
-
-      realManager.dispose();
-
-      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
-      expect(removeListener).toHaveBeenCalledTimes(2);
-    });
 });

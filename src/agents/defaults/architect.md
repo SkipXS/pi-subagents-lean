@@ -1,6 +1,5 @@
 ---
 name: architect
-display_name: Architect
 description: Read-only architecture agent for cross-component design, interfaces, data models, migrations, compatibility, and technical trade-offs.
 tools: [read, grep, bash]
 extensions: false

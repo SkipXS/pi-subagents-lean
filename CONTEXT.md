@@ -17,11 +17,11 @@ results or one completion nudge per background execution.
 
 **Agent type**
 
-A named configuration defining a subagent's instructions, display name, tools, extensions, skills, model, thinking level, and execution limits. Agent types may be bundled or loaded from Agent Markdown.
+A named configuration defining a subagent's instructions, tools, extensions, skills, model, and thinking level. Agent types may be bundled or loaded from Agent Markdown.
 
 **Agent Markdown**
 
-A `.md` agent definition with flat frontmatter and a system-prompt body. Definitions are discovered from bundled defaults, the user directory, trusted shared/project directories, and an explicitly selected trusted working tree.
+A `.md` agent definition with flat frontmatter and a system-prompt body. Definitions are discovered from bundled defaults, the user directory, trusted shared/project directories, and an explicitly selected trusted working tree. Skill selections expose metadata in the prompt; the model loads selected `SKILL.md` content on demand with `read`.
 
 **Orchestration prompt**
 
@@ -36,19 +36,16 @@ runtime-generated enum. `Agent`, `AgentContinue`, `StopAgent`, and
 
 ### Configuration
 
-**Model override**
+The JSON configuration accepts only `includeContextFiles`,
+`disableDefaultAgents`, `orchestrationPrompt`, and `concurrency.default`.
+Unknown agent keys are ignored and never interpreted as model settings.
 
-A model selection resolved internally for one spawn, the current session,
-persisted per-agent settings, or a global fallback. The public `Agent` tool has
-no model parameter. Resolution order is internal spawn value > session agent
-override > persisted agent override > Agent Markdown > global fallback >
-parent.
+**Agent model and thinking**
 
-**Thinking override**
-
-A thinking-level selection resolved through the same internal precedence chain
-as the model and normalized to the selected model's supported levels. It is not
-a public `Agent`-tool spawn parameter.
+The selected Agent Markdown definition supplies `model` and `thinking`. Missing
+fields use the parent session. Model registry validation and provider-specific
+thinking normalization remain active; queue/rendering may carry resolved values
+internally.
 
 ### Working trees
 
@@ -81,8 +78,8 @@ background execution through the normal parent message path.
 A completion message delivered to the parent after a short delay when a
 background execution reaches a terminal state. Each execution independently
 gets its own individual message and exactly one automatic `sendMessage` attempt.
-A `sendMessage` error is retained as a diagnostic delivery failure until record
-eviction; no retry is promised.
+A `sendMessage` error is retained as a diagnostic delivery failure until the
+parent session shuts down; no retry is promised.
 
 **Agent record**
 
@@ -108,7 +105,7 @@ append-only output log are the diagnostic surfaces.
 
 ## Relationships
 
-- The **parent** starts independent root **subagents** from named **agent types** using the accepted model and thinking settings.
+- The **parent** starts independent root **subagents** from named **agent types** using the Agent Markdown model and thinking settings, or its own values when those fields are absent.
 - **Agent Markdown** supplies custom or overriding agent-type configuration.
 - The **orchestration prompt** advertises visible agent types only to the parent.
 - A subagent may run at a validated **working tree path** and use its trusted **working tree overlay**.

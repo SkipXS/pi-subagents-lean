@@ -3,26 +3,19 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_AGENTS, DEFAULT_AGENT_NAMES } from "../../src/agents/default-agents.ts";
 import { parseAgentFile, toAgentConfig } from "../../src/agents/agent-discovery.ts";
-import { CONFIG_AGENT_NON_MODEL_KEYS } from "../../src/config/types.ts";
+import { CONFIG_AGENT_KEYS } from "../../src/config/types.ts";
 
-const expectedNonModelKeys = [
-  "default", "forceBackground", "systemPromptMode", "includeContextFiles",
-  "defaultThinking", "loadSkillsImplicitly", "loadExtensionsImplicitly",
-  "disableDefaultAgents", "orchestrationPrompt", "finishedRetentionMinutes",
-];
+const expectedAgentKeys = ["includeContextFiles", "disableDefaultAgents", "orchestrationPrompt"];
 
 describe("bundled agent and config contracts", () => {
-  it("keeps the non-model allowlist complete, unique, and free of agent role names", () => {
-    expect(CONFIG_AGENT_NON_MODEL_KEYS).toEqual(expectedNonModelKeys);
-    expect(new Set(CONFIG_AGENT_NON_MODEL_KEYS).size).toBe(CONFIG_AGENT_NON_MODEL_KEYS.length);
-    for (const name of DEFAULT_AGENT_NAMES) expect(CONFIG_AGENT_NON_MODEL_KEYS).not.toContain(name);
-    expect(CONFIG_AGENT_NON_MODEL_KEYS).not.toContain("defaultAgent");
+  it("keeps the persisted agent allowlist current", () => {
+    expect(CONFIG_AGENT_KEYS).toEqual(expectedAgentKeys);
+    expect(CONFIG_AGENT_KEYS).not.toContain("default");
   });
 
   it("keeps the implementer focused and non-delegating", () => {
     const prompt = DEFAULT_AGENTS.get("implementer")!.systemPrompt;
     expect(prompt).toContain("focused tests");
-    expect(prompt).not.toContain("delegate_to");
     expect(prompt).not.toContain("nested");
   });
 

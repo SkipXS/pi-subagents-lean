@@ -3,7 +3,6 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { registerAgents, getAvailableAgents, setAgentScanDirs, scanAndMerge } from "./agents/agent-types.js";
 import { AgentManager } from "./agents/agent-manager.js";
 import { SpawnCoordinator } from "./spawn/spawn-coordinator.js";
-import { toolCallListener } from "./agents/tool-execution.js";
 import {
   createAgentRenderMetadataBridge,
   type AgentRenderMetadataBridge,
@@ -43,7 +42,6 @@ export function ensureManagerAndCoordinator(): void {
     const coordinator = new SpawnCoordinator(manager);
     setCoordinator(coordinator);
     manager.setOnComplete((record, execution) => coordinator.onAgentComplete(record, execution));
-    manager.setOnRecordEvicted?.((record) => coordinator.onRecordEvicted(record));
   }
 }
 
@@ -102,7 +100,6 @@ export function setupEventListeners(
   });
   pi.on("tool_result", (event) => renderBridge.onToolResult(event));
   pi.on("message_end", (event) => renderBridge.onMessageEnd(event) as any);
-  pi.on("tool_call", toolCallListener);
 
   // Refresh only configured global/current-project directories before every
   // parent turn. This picks up edits/removals without changing the fixed tool.

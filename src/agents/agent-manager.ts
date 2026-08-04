@@ -38,25 +38,16 @@ import { errorMessage } from "../utils.js";
 import { getSubagentRuntimeContext } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 
-/** How often to check for expired agent records (milliseconds). */
-const CLEANUP_INTERVAL_MS = 60_000;
-/** Age after which a completed agent record is evicted (milliseconds). */
-const DEFAULT_RETENTION_MINUTES = 60;
 /** UUID prefix length for agent IDs stored in the agents map. */
 const AGENT_ID_PREFIX_LENGTH = 17;
 /** Default global concurrency limit when not specified in config. */
 const DEFAULT_CONCURRENCY_LIMIT = 4;
-
-function isTerminalStatus(status: AgentStatus): boolean {
-  return status !== "running" && status !== "queued";
-}
 
 export interface ConcurrencyConfig {
   default: number;
 }
 
 export type OnAgentComplete = (record: AgentRecord, execution: AgentExecutionSummary) => void;
-export type OnAgentEvicted = (record: AgentRecord) => void;
 type OnAgentStart = (record: AgentRecord) => void;
 
 interface ConcurrencySlot {
@@ -140,17 +131,13 @@ function updateCumulativeCacheHitRate(record: AgentRecord): void {
 
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
-  private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
-  private onRecordEvicted?: OnAgentEvicted;
   private onStart?: OnAgentStart;
 
-  /** Session-level cumulative agent cost. Survives record eviction. */
+  /** Session-level cumulative agent cost. */
   private totalAgentCost = 0;
-  /** Session-level cumulative accepted root count. Survives record eviction. */
+  /** Session-level cumulative accepted root count. */
   private totalAgentCount = 0;
-  private retentionMinutes = DEFAULT_RETENTION_MINUTES;
-  static readonly DEFAULT_RETENTION_MINUTES = DEFAULT_RETENTION_MINUTES;
   private concurrencySlot: ConcurrencySlot;
   /** Root executions waiting for a global concurrency slot. */
   private queue: QueueEntry[] = [];
@@ -169,12 +156,6 @@ export class AgentManager {
       limit: Math.max(1, concurrency?.default ?? DEFAULT_CONCURRENCY_LIMIT),
       running: 0,
     };
-    this.cleanupInterval = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
-    this.cleanupInterval.unref();
-  }
-
-  setRetentionMinutes(minutes: number): void {
-    this.retentionMinutes = Math.max(1, minutes);
   }
 
   setConcurrency(config: ConcurrencyConfig): void {
@@ -671,10 +652,6 @@ export class AgentManager {
     this.onComplete = cb;
   }
 
-  setOnRecordEvicted(cb: OnAgentEvicted): void {
-    this.onRecordEvicted = cb;
-  }
-
   getTotalAgentCost(): number {
     return this.totalAgentCost;
   }
@@ -881,7 +858,7 @@ export class AgentManager {
     }
 
     // A running task owns a live runner. Mark it stopped immediately for
-    // status/retention, but let the runner's completion release the slot and
+    // status reporting, but let the runner's completion release the slot and
     // compute its real (possibly partial) execution delta.
     record.execution.abortController?.abort();
     this.setStatus(record, "stopped");
@@ -907,25 +884,14 @@ export class AgentManager {
   }
 
   private removeRecord(id: string, record: AgentRecord): void {
-    try { this.onRecordEvicted?.(record); } catch { /* coordinator cleanup is best effort */ }
     this.deferredContextSamples.delete(record);
     for (const execution of record.stats.executions ?? []) this.executionBases.delete(execution.id);
     this.releaseExecution(record);
     this.agents.delete(id);
   }
 
-  private cleanup(): void {
-    const cutoff = Date.now() - this.retentionMinutes * 60_000;
-    for (const [id, record] of this.agents) {
-      if (!isTerminalStatus(record.lifecycle.status)) continue;
-      if ((record.lifecycle.completedAt ?? 0) >= cutoff) continue;
-      if (!record.lifecycle.settled) continue;
-      this.removeRecord(id, record);
-    }
-  }
-
+  /** Release every record and queued task at the end of the parent session. */
   dispose(): void {
-    clearInterval(this.cleanupInterval);
     for (const entry of this.queue) {
       if (entry.kind === "continue") entry.request.reject(new Error("Agent session shut down"));
       else entry.resolve("");

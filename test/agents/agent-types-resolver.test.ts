@@ -185,10 +185,10 @@ describe("resolveVisibleTools — allowlist mode", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  Denylist mode (excludeTools, no tools whitelist)                  */
+/*  Selection-minus-exclusion modes                                   */
 /* ------------------------------------------------------------------ */
 
-describe("resolveVisibleTools — denylist mode", () => {
+describe("resolveVisibleTools — exclusions", () => {
   it("excludes tools listed in excludeTools", () => {
     const result = resolveVisibleTools({
       activeTools: ["read", "bash", "edit", "write"],
@@ -246,14 +246,13 @@ describe("resolveVisibleTools — denylist mode", () => {
     expect(result).not.toContain("web_extract");
   });
 
-  it("excludeTools is ignored when tools whitelist is set", () => {
+  it("subtracts excludeTools after a tools whitelist", () => {
     const result = resolveVisibleTools({
       activeTools: ["read", "bash", "edit", "write", "grep"],
       tools: ["read", "bash"],
-      excludeTools: ["write"],
+      excludeTools: ["bash"],
     });
-    // tools whitelist wins — only read and bash
-    expect(result).toEqual(["read", "bash"]);
+    expect(result).toEqual(["read"]);
   });
 
   it("returns null when no filtering needed (excludeTools doesn't match any active)", () => {
@@ -299,6 +298,15 @@ describe("resolveVisibleTools — tools: true/false/undefined", () => {
     expect(result).toBeNull();
   });
 
+  it("tools: true subtracts excludeTools", () => {
+    const result = resolveVisibleTools({
+      activeTools: ["read", "bash", "edit"],
+      tools: true,
+      excludeTools: ["bash"],
+    });
+    expect(result).toEqual(["read", "edit"]);
+  });
+
   it("tools: false — returns []", () => {
     const result = resolveVisibleTools({
       activeTools: ["read", "bash", "edit"],
@@ -325,7 +333,7 @@ describe("resolveVisibleTools — tools: true/false/undefined", () => {
     expect(result).not.toContain("Agent");
   });
 
-  it("tools: undefined with excludeTools — applies denylist", () => {
+  it("tools: undefined with excludeTools — subtracts from all active tools", () => {
     const result = resolveVisibleTools({
       activeTools: ["read", "bash", "edit", "write"],
       tools: undefined,
@@ -370,84 +378,42 @@ describe("resolveVisibleTools — edge cases", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  getConfig with global implicit defaults                           */
+/*  getConfig with fixed missing selections                            */
 /* ------------------------------------------------------------------ */
 
-describe("getConfig — global implicit defaults", () => {
+describe("getConfig — fixed missing selections", () => {
   beforeEach(() => {
-    // Register a test agent with skills: true and extensions: true
     const agents = new Map<string, AgentConfig>();
-    agents.set("test-agent", {
-      name: "test-agent",
-      description: "Test agent",
-      extensions: true,
-      skills: true,
-      systemPrompt: "test",
+    agents.set("explicit-agent", {
+      name: "explicit-agent", description: "Test agent", extensions: true, skills: true, systemPrompt: "test",
     });
-    agents.set("implicit-agent", {
-      name: "implicit-agent",
-      description: "Agent with no skills/extensions set",
-      systemPrompt: "test",
+    agents.set("minimal-agent", {
+      name: "minimal-agent", description: "Minimal agent", systemPrompt: "test",
     });
-    agents.set("explicit-skills", {
-      name: "explicit-skills",
-      description: "Agent with explicit skills list",
-      // extensions intentionally omitted — uses global default
-      skills: ["tdd"],
-      systemPrompt: "test",
+    agents.set("explicit-list", {
+      name: "explicit-list", description: "List agent", skills: ["tdd"], systemPrompt: "test",
     });
     agents.set("no-skills", {
-      name: "no-skills",
-      description: "Agent with skills disabled",
-      extensions: false,
-      skills: false,
-      systemPrompt: "test",
+      name: "no-skills", description: "Disabled agent", extensions: false, skills: false, systemPrompt: "test",
     });
-    registerAgents(agents);
+    registerAgents(agents, { disableDefaultAgents: true });
   });
 
-  it("agent with explicit skills: true ignores global loadSkillsImplicitly=false", () => {
-    const result = getConfig("test-agent", false, true);
-    expect(result.skills).toBe(true);
+  it("preserves explicit true values", () => {
+    expect(getConfig("explicit-agent")).toMatchObject({ skills: true, extensions: true });
   });
 
-  it("agent with explicit extensions: true ignores global loadExtensionsImplicitly=false", () => {
-    const result = getConfig("test-agent", true, false);
-    expect(result.extensions).toBe(true);
+  it("resolves omitted skills and extensions to false", () => {
+    expect(getConfig("minimal-agent")).toMatchObject({ skills: false, extensions: false });
   });
 
-  it("agent with no skills/extensions uses global default (false)", () => {
-    const result = getConfig("implicit-agent", false, false);
-    expect(result.skills).toBe(false);
-    expect(result.extensions).toBe(false);
-  });
-
-  it("agent with no skills/extensions uses global default (true)", () => {
-    const result = getConfig("implicit-agent", true, true);
-    expect(result.skills).toBe(true);
-    expect(result.extensions).toBe(true);
-  });
-
-  it("agent with skills: true gets global loadSkillsImplicitly=true", () => {
-    const result = getConfig("test-agent", true, true);
-    expect(result.skills).toBe(true);
-  });
-
-  it("agent with explicit skills list ignores global default", () => {
-    const result = getConfig("explicit-skills", false, false);
-    expect(result.skills).toEqual(["tdd"]);
-    // extensions not explicitly set, so global default false applies
-    expect(result.extensions).toBe(false);
-  });
-
-  it("agent with skills: false ignores global default", () => {
-    const result = getConfig("no-skills", true, true);
-    expect(result.skills).toBe(false);
-    expect(result.extensions).toBe(false);
+  it("preserves explicit lists and false values", () => {
+    expect(getConfig("explicit-list")).toMatchObject({ skills: ["tdd"], extensions: false });
+    expect(getConfig("no-skills")).toMatchObject({ skills: false, extensions: false });
   });
 
   it("unknown agent type fails instead of falling back", () => {
-    expect(() => getConfig("nonexistent", false, false)).toThrow("Unknown agent type: nonexistent");
+    expect(() => getConfig("nonexistent")).toThrow("Unknown agent type: nonexistent");
   });
 });
 
@@ -523,6 +489,20 @@ describe("resolveSessionAllowedTools", () => {
     expect(result).toEqual(expect.arrayContaining([
       "read", "bash", "edit", "web_search", "web_extract", "web_crawl", "exa_search",
     ]));
+  });
+
+  it.each([
+    [undefined, "bash"],
+    [true, "web_search"],
+    [["read", "bash"], "bash"],
+  ] as const)("subtracts exclusions from registry seeding for tools=%j", (tools, excluded) => {
+    const result = resolveSessionAllowedTools({
+      registeredTools: builtins,
+      tools: (Array.isArray(tools) ? [...tools] : tools) as true | string[] | undefined,
+      excludeTools: [excluded],
+      extToolMap,
+    });
+    expect(result).not.toContain(excluded);
   });
 
   it("excludes EXCLUDED_TOOL_NAMES so the Agent tool never enters the registry", () => {

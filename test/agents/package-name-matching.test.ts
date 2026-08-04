@@ -162,11 +162,11 @@ describe("extension matching by package name — blacklist", () => {
     while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
   });
 
-  it("excludes extension by package name when directory name differs", () => {
+  it.each([true, undefined] as const)("subtracts exclusions from the %s extension base", (base) => {
     const { dir, extPath } = createPkgDir("pi-subagents", "src/index.ts", ["./src/index.ts"]);
     tmpDirs.push(dir);
 
-    const override = buildExtOverride(true, ["pi-subagents"], undefined);
+    const override = buildExtOverride(base, ["pi-subagents"], undefined);
     const result = override!({
       extensions: [
         { path: extPath, tools: new Map([["my_tool", {}]]) },

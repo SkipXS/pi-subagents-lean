@@ -39,7 +39,6 @@ vi.mock("../src/agents/agent-manager.js", () => ({
     records: any[] = [];
     dispose = vi.fn(async () => undefined);
     setOnComplete = vi.fn();
-    setOnRecordEvicted = vi.fn();
     constructor() { state.managers.push(this); }
     listAgents() { return this.records; }
   },
@@ -52,12 +51,11 @@ vi.mock("../src/spawn/spawn-coordinator.js", () => ({
       await state.coordinatorDisposePending;
     });
     onAgentComplete = vi.fn();
-    onRecordEvicted = vi.fn();
     constructor() { state.coordinators.push(this); }
   },
 }));
 
-vi.mock("../src/agents/tool-execution.js", () => ({ toolCallListener: vi.fn() }));
+vi.mock("../src/agents/tool-execution.js", () => ({}));
 vi.mock("../src/prompt/orchestration.js", () => ({ getOrchestrationPromptUpdate: () => undefined }));
 
 vi.mock("../src/shell.js", () => ({
@@ -101,7 +99,7 @@ describe("headless extension session lifecycle", () => {
 
     expect([...listeners.keys()]).toEqual([
       "tool_execution_start", "tool_execution_update", "tool_result", "message_end",
-      "tool_call", "before_agent_start", "session_start", "session_shutdown",
+      "before_agent_start", "session_start", "session_shutdown",
     ]);
     expect(listeners.has("tool_execution_start")).toBe(true);
   });

@@ -17,7 +17,7 @@
  * mode (no root files) is not exported.
  */
 
-import { readFileSync, realpathSync, readdirSync } from "node:fs";
+import { realpathSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -26,22 +26,12 @@ import {
   loadSkillsFromDir,
   type Skill,
 } from "@earendil-works/pi-coding-agent";
-import { isUnsafeName } from "../utils.js";
-
-export interface PreloadedSkill {
-  name: string;
-  description: string;
-  content: string;
-}
-
 export interface SkillMeta {
   name: string;
   description: string;
   location: string;
   /** Whether the skill should be excluded from the <available_skills> prompt block. */
   disableModelInvocation: boolean;
-  /** Full skill content — present when the skill is preloaded. */
-  content?: string;
 }
 
 /**
@@ -155,31 +145,20 @@ function canonicalizePath(filePath: string): string {
   try { return realpathSync(filePath); } catch { return filePath; }
 }
 
-export function preloadSkills(skillNames: string[], cwd: string): PreloadedSkill[] {
-  const skills = loadAllSkills(cwd);
-  return skillNames.map((name) => {
-    if (isUnsafeName(name)) {
-      return { name, description: "", content: `(Skill "${name}" skipped: name contains path traversal characters)` };
-    }
-    const match = skills.find((s) => s.name === name);
-    if (!match) {
-      return { name, description: "", content: `(Skill "${name}" not found in .pi/skills/, .agents/skills/, or global skill locations)` };
-    }
-    try {
-      return { name, description: match.description, content: readFileSync(match.filePath, "utf-8").trim() };
-    } catch {
-      return { name, description: "", content: `(Skill "${name}" not found in .pi/skills/, .agents/skills/, or global skill locations)` };
-    }
-  });
-}
-
 /**
  * Load skill metadata only (name, description, location) without full content.
  * Used for the skills whitelist — agent can read full content on-demand.
  */
-export function loadSkillMeta(skillNames: string[], cwd: string): SkillMeta[] {
+export function loadSkillMeta(
+  skillNames: string[],
+  cwd: string,
+  excludeSkills?: string[],
+): SkillMeta[] {
+  const excluded = new Set(excludeSkills ?? []);
+  const selectedNames = skillNames.filter((name) => !excluded.has(name));
+  if (selectedNames.length === 0) return [];
   const skills = loadAllSkills(cwd);
-  return skillNames.map((name) => {
+  return selectedNames.map((name) => {
     const match = skills.find((s) => s.name === name);
     if (!match) {
       return { name, description: `(Skill "${name}" not found)`, location: "", disableModelInvocation: false };

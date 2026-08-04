@@ -513,7 +513,7 @@ describe("AgentManager", () => {
       expect(manager.getTotalAgentCost()).toBe(0.05);
     });
 
-    it("persists cost after agent is evicted from map", async () => {
+    it("keeps completed records and cumulative cost for the session", async () => {
       manager = new AgentManager(onComplete);
       mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
 
@@ -526,13 +526,9 @@ describe("AgentManager", () => {
       await record.execution.promise;
 
       expect(manager.getTotalAgentCost()).toBe(0.03);
-
-      // Record is consumed (result read) — eligible for eviction when old.
-      record.lifecycle.resultConsumed = true;
       record.lifecycle.completedAt = Date.now() - 70 * 60_000;
-      (manager as any).cleanup();
 
-      expect(manager.getRecord(id)).toBeUndefined();
+      expect(manager.getRecord(id)).toBe(record);
       expect(manager.getTotalAgentCost()).toBe(0.03);
     });
 
@@ -658,163 +654,23 @@ describe("AgentManager", () => {
       expect(manager.getTotalAgentCount()).toBe(1);
     });
 
-    it("persists after an agent is evicted", async () => {
-      manager = new AgentManager(onComplete);
-      mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
-
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
-      const record = manager.getRecord(id)!;
-      await record.execution.promise;
-      record.lifecycle.resultConsumed = true;
-      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
-      (manager as any).cleanup();
-
-      expect(manager.getRecord(id)).toBeUndefined();
-      expect(manager.getTotalAgentCount()).toBe(1);
-    });
-  });
-
-  // ── Cleanup eviction ──
-
-  describe("cleanup", () => {
-    it("evicts failed-delivery completed records older than the cutoff", async () => {
-      manager = new AgentManager(onComplete);
-      mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
-
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
-      const record = manager.getRecord(id)!;
-      await record.execution.promise;
-
-      // Retention bounds result text while a failed delivery remains diagnostic.
-      record.delivery = { state: "failed", attempts: 1, lastError: "Pi unavailable" };
-      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
-      (manager as any).cleanup();
-
-      expect(manager.getRecord(id)).toBeUndefined();
-    });
-
-    it("fully evicts old unconsumed settled records and releases their session", async () => {
-      manager = new AgentManager(onComplete);
-      const session = mockAgentSession();
-      mockModules.mockRunAgent.mockResolvedValue(mockRunResult({ session }));
-
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
-      const record = manager.getRecord(id)!;
-      await record.execution.promise;
-      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
-
-      (manager as any).cleanup();
-
-      expect(manager.getRecord(id)).toBeUndefined();
-      expect(session.dispose).toHaveBeenCalledOnce();
-    });
-
-    it("does not release a stopped runner before it has actually settled", async () => {
-      manager = new AgentManager(onComplete);
-      const deferred = makeResolvablePromise();
-      mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
-      const record = manager.getRecord(id)!;
-      const session = mockAgentSession();
-      record.execution.session = session;
-      record.lifecycle.completedAt = Date.now() - 20 * 60_000;
-
-      manager.abort(id, "agent");
-      (manager as any).cleanup();
-
-      expect(record.lifecycle).toMatchObject({ status: "stopped", settled: false });
-      expect(session.dispose).not.toHaveBeenCalled();
-      expect(record.execution.abortController).toBeDefined();
-      expect(record.execution.promise).toBeDefined();
-
-      deferred.resolve(mockRunResult({ session, aborted: true }));
-      await record.execution.promise;
-    });
-
-    it("evicts consumed completed records older than the cutoff", async () => {
-      manager = new AgentManager(onComplete);
-      mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
-
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
-      const record = manager.getRecord(id)!;
-      await record.execution.promise;
-
-      // Once the LLM has read the result, the record is safe to evict when old.
-      record.lifecycle.resultConsumed = true;
-      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
-      (manager as any).cleanup();
-
-      expect(manager.getRecord(id)).toBeUndefined();
-    });
-
-    it("does not evict records younger than the cutoff", async () => {
-      manager = new AgentManager(onComplete);
-      mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
-
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
-      const record = manager.getRecord(id)!;
-      await record.execution.promise;
-      record.lifecycle.resultConsumed = true;
-      // Just completed — well within the 60-minute retention window.
-      (manager as any).cleanup();
-
-      expect(manager.getRecord(id)).toBeDefined();
-    });
-
-    it("uses configurable retention via setRetentionMinutes", async () => {
-      manager = new AgentManager(onComplete);
-      mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
-
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
-      const record = manager.getRecord(id)!;
-      await record.execution.promise;
-
-      // Set retention to 1 minute
-      manager.setRetentionMinutes(1);
-
-      // Record completed 2 minutes ago — should be evicted
-      record.lifecycle.resultConsumed = true;
-      record.lifecycle.completedAt = Date.now() - 2 * 60_000;
-      (manager as any).cleanup();
-
-      expect(manager.getRecord(id)).toBeUndefined();
-    });
-
-    it("retention update takes effect at next cleanup", async () => {
-      manager = new AgentManager(onComplete);
-      mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
-
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
-      const record = manager.getRecord(id)!;
-      await record.execution.promise;
-
-      // Record completed 70 minutes ago — would be evicted with the default 60-min retention
-      record.lifecycle.resultConsumed = true;
-      record.lifecycle.completedAt = Date.now() - 70 * 60_000;
-
-      // But bump retention to 90 minutes before cleanup
-      manager.setRetentionMinutes(90);
-      (manager as any).cleanup();
-
-      // Should survive because retention was raised
-      expect(manager.getRecord(id)).toBeDefined();
-    });
-
-    it("runs scheduled cleanup for an old settled record", async () => {
+    it("keeps old completed records available for the parent session", async () => {
       vi.useFakeTimers();
       try {
         manager = new AgentManager(onComplete);
-        mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
+        const session = mockAgentSession();
+        mockModules.mockRunAgent.mockResolvedValue(mockRunResult({ session }));
 
         const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
         const record = manager.getRecord(id)!;
         await record.execution.promise;
         record.lifecycle.completedAt = Date.now() - 70 * 60_000;
 
-        vi.advanceTimersByTime(60_000);
+        vi.advanceTimersByTime(60 * 60_000);
 
-        expect(manager.getRecord(id)).toBeUndefined();
+        expect(manager.getRecord(id)).toBe(record);
+        expect(manager.listAgents()).toContain(record);
+        expect(session.dispose).not.toHaveBeenCalled();
       } finally {
         manager?.dispose();
         vi.useRealTimers();
@@ -926,7 +782,7 @@ describe("usage accounting", () => {
     });
   });
 
-  it("disposes a late session when shutdown evicted the record before setup finished", async () => {
+  it("disposes a late session when shutdown removed the record before setup finished", async () => {
     manager = new AgentManager(onComplete);
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
@@ -1287,6 +1143,42 @@ describe("AgentManager steering and shutdown", () => {
     secondRun.resolve(mockRunResult({ aborted: true }));
   });
 
+
+  it("retains terminal records until dispose and then clears every session and queue entry", async () => {
+    const firstSession = mockAgentSession();
+    mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult({ session: firstSession }));
+    manager = new AgentManager(undefined, { default: 1 });
+
+    const completedId = manager.spawn(fakePi(), fakeCtx(), "scout", "completed", { description: "completed" });
+    await manager.getRecord(completedId)!.execution.promise;
+
+    const activeRun = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(activeRun.promise);
+    const activeId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "active", { description: "active" });
+    const activeRecord = manager.getRecord(activeId)!;
+    const activeSession = mockAgentSession();
+    mockModules.mockRunAgent.mock.calls[1]![3].onSessionCreated(activeSession);
+
+    const queuedId = manager.spawn(fakePi(), fakeCtx(), "scout", "queued", { description: "queued" });
+    const queuedRecord = manager.getRecord(queuedId)!;
+    const queuedPromise = queuedRecord.execution.promise!;
+    const activePromise = activeRecord.execution.promise!;
+
+    expect(manager.listAgents()).toHaveLength(3);
+    expect(queuedRecord.lifecycle.status).toBe("queued");
+    manager.dispose();
+
+    await expect(queuedPromise).resolves.toBe("");
+    expect(manager.listAgents()).toEqual([]);
+    expect(manager.getRecord(completedId)).toBeUndefined();
+    expect(manager.getRecord(activeId)).toBeUndefined();
+    expect(manager.getRecord(queuedId)).toBeUndefined();
+    expect(firstSession.dispose).toHaveBeenCalledOnce();
+    expect(activeSession.dispose).toHaveBeenCalledOnce();
+
+    activeRun.resolve(mockRunResult({ session: activeSession, aborted: true }));
+    await activePromise;
+  });
 
   it("forwards record callbacks and aborts an active controller on dispose", async () => {
     const deferred = makeResolvablePromise();

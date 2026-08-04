@@ -67,15 +67,15 @@ catalog and operating advice.
 | Parameter | Required | Meaning |
 |---|:---:|---|
 | `prompt` | yes | Task and relevant constraints for the root agent. |
-| `agent` | yes | Role to resolve from the current catalog. Names and `display_name` values resolve case-insensitively; use the canonical name shown by the catalog when practical. |
+| `agent` | yes | Role to resolve from the current catalog. Canonical names resolve case-insensitively; use the name shown by the catalog when practical. |
 | `description` | no | Short caller-facing label. If omitted, the first prompt line (up to 80 characters) is used. |
-| `run_in_background` | no | Return immediately; this execution receives exactly one automatic completion nudge after a short delay. `forceBackground: true` can make all root launches background. |
+| `run_in_background` | no | Return immediately; this execution receives exactly one automatic completion nudge after a short delay. |
 | `worktree_path` | no | Root-only absolute path or parent-CWD-relative path inside a worktree of the parent repository. It is validated with Git. A trusted selected worktree may add a spawn-local `.pi/agents/` overlay. |
 
 The public tool deliberately has no model or thinking parameters. Configure
-model and thinking through an agent definition or persistent/session settings;
-those values are applied internally and are not caller-controlled spawn
-overrides. Every `Agent` call is a root launch owned by the parent session.
+model and thinking only in the selected Agent Markdown definition; when a field
+is absent, the parent session's value is used. Every `Agent` call is a root
+launch owned by the parent session.
 
 In Pi's interactive tool rows, `Agent` displays the canonical role, resolved
 `provider/model-id`, normalized thinking level, and the complete prompt. The
@@ -113,7 +113,7 @@ full ID from a unique prefix when the retained record is available.
 
 Lists retained agents as `short_id (type) status`, with an optional
 `delivery:<state>` field. Delivery state is diagnostic: a `sendMessage` error
-remains visible until record eviction, with no retry promise. Use the tool for
+remains visible until the parent session shuts down, with no retry promise. Use the tool for
 discovery, not for waiting; background completion is delivered automatically.
 
 ## Agent definitions
@@ -135,7 +135,6 @@ name.
 ```markdown
 ---
 name: security-review
-display_name: Security Review
 description: Review a change for security flaws
 tools: [read, grep, bash]
 extensions: false
@@ -182,10 +181,10 @@ Once a root spawn is accepted—whether it starts now or waits in the global
 queue—it keeps an immutable copy of its effective definition. Later file edits
 do not change that run or its queued work.
 
-**Resolution and visibility.** `Agent` resolves a canonical role by name or
-`display_name`, case-insensitively. `hidden: true` omits a role from the parent
-orchestration catalog, but does not remove it from the registry: it is still
-inspectable and callable with its name or display name.
+**Resolution and visibility.** `Agent` resolves a canonical role by `name`,
+case-insensitively. `hidden: true` omits a role from the parent orchestration
+catalog, but does not remove it from the registry: it remains inspectable and
+callable by its canonical name.
 Names that cannot be represented safely in generated prompt guidance are
 omitted from that guidance, but remain resolvable through the explicit tool path.
 
@@ -204,15 +203,13 @@ follows that role's instructions and project policy.
 
 ### Frontmatter reference
 
-The following is the complete supported frontmatter. Defaults marked “global
-policy” are controlled by the configuration settings documented below.
+The following is the complete supported frontmatter.
 
 #### Identity and prompt
 
 | Field | Accepted value | Default | Behavior |
 |---|---|---|---|
 | `name` | string | filename | Canonical role name. Same-name definitions merge by [catalog precedence](#dynamic-catalog-discovery-and-trust). |
-| `display_name` | string | `name` | Human-readable catalog label and alias for role resolution. |
 | `description` | string | empty | Catalog and tool-result summary. Keep it concise: visible descriptions are included in generated parent guidance. |
 | Markdown body | text | empty | System instructions for this role. An absent/empty higher-precedence body does not erase a lower-precedence body. |
 | `hidden` | `true` or `false` | `false` | Hide from automatic parent advertising while retaining catalog inspection and explicit resolution. |
@@ -221,40 +218,52 @@ policy” are controlled by the configuration settings documented below.
 
 | Field | Accepted value | Default | Behavior |
 |---|---|---|---|
-| `tools` | list of tool references | all active tools | Whitelist visible tool schemas and session registration. `[]` exposes no work tools. Built-ins: `read`, `bash`, `edit`, `write`, `grep`, `find`. Use a bare extension tool, `extension/tool`, or `extension/*`. |
-| `exclude_tools` | list | none | Blacklist visible tool schemas. Use the same extension reference syntax. Do not combine it with `tools`; a list-valued `tools` whitelist wins. |
-| `extensions` | `true`/`all`, `false`/`none`, or list | global policy | Select extensions to load. Loading controls hooks and tool registration, **not** whether the LLM can see a tool schema. |
-| `exclude_extensions` | list | none | Load every extension except these. Do not combine it with a list-valued `extensions`; the explicit list wins. |
-| `skills` | `true`/`all`, `false`/`none`, or list | global policy | Select available skills. The prompt normally includes only each skill's metadata. |
-| `preload_skills` | list, `false`, or `none` | no preload | Put complete `SKILL.md` content for listed skills in the system prompt. A preload list suppresses implicit/all skill metadata; use an explicit `skills` list to retain metadata for selected skills. This has the highest prompt cost. |
+| `tools` | `true`/`all`, `false`/`none`, or list | all active tools | Select visible tool schemas and session registration. `[]` exposes no work tools. Built-ins: `read`, `bash`, `edit`, `write`, `grep`, `find`. Use a bare extension tool, `extension/tool`, or `extension/*`. |
+| `exclude_tools` | list | none | Subtract these from the selected tools, including when `tools` is `true` or a list. Uses the same extension reference syntax. |
+| `extensions` | `true`/`all`, `false`/`none`, or list | `false` | Select extensions to load. Loading controls hooks and tool registration, **not** whether the LLM can see a tool schema. |
+| `exclude_extensions` | list | none | Subtract these from the selected extensions. Excluded extensions are not bound, so their hooks and tools do not contribute. |
+| `skills` | `true`/`all`, `false`/`none`, or list | `false` | Select available skill metadata. The model can load selected skill contents on demand with `read`. |
+| `exclude_skills` | list | none | Subtract these from the selected skill metadata, including skills discovered by extensions. |
 
-Omitting `extensions` or `skills` does not unconditionally mean “all”: it uses
-`loadExtensionsImplicitly` or `loadSkillsImplicitly`, both of which default to
-`true`. A concrete frontmatter value always overrides the global policy.
+`exclude_extensions` is a binding policy, not an import sandbox. Pi's discovery
+may already import every extension in the base selection and execute its
+factory before this filter is applied. The excluded extension is then omitted
+from `bindExtensions()`, so its hooks and tools do not bind or contribute, but
+import-time and factory side effects may already have happened. Do not treat
+`exclude_extensions` as protection against those side effects; use Pi's project
+trust and extension-loading controls when that boundary matters.
 
-A minimal definition therefore inherits all active tools and the current
-implicit extensions/skills policy. Pi initially activates `read`, `bash`,
-`edit`, and `write`; `grep` and `find` are built-ins that must be explicitly
-selected to be active. `tools` affects what the model sees, whereas `extensions`
-affects what loads:
+Missing `extensions` and `skills` resolve to `false` after the per-field
+catalog merge. Explicit `true`, `false`, and list values remain available. A
+minimal definition therefore loads no extensions or skills. Skills are exposed
+as metadata only; the model loads selected `SKILL.md` contents on demand with
+`read`.
+
+Pi initially activates `read`, `bash`, `edit`, and `write`; `grep` and `find`
+are built-ins that must be explicitly selected to be active. `tools` affects
+what the model sees, whereas `extensions` affects what loads:
 
 ```yaml
 # Read-only tools; no extension hooks or skills.
 tools: [read, grep, bash]
+exclude_tools: [bash]
 extensions: false
 skills: false
+```
 
-# Keep most tools but hide one extension's tools; its hooks still load.
-exclude_tools: [tavily/*]
-# Use exclude_extensions: [tavily] instead to prevent that extension loading.
+```yaml
+# Select extension tools, then subtract one tool from the selection.
+tools: [read, bash, tavily/*]
+exclude_tools: [bash]
+# Use exclude_extensions: [tavily] to prevent that extension's hooks/tools loading.
 ```
 
 #### Model and reasoning
 
 | Field | Accepted value | Default | Behavior |
 |---|---|---|---|
-| `model` | `provider/model-id` | resolved precedence | Role-level model candidate. Session and persistent overrides can take precedence; the parent model is the final fallback. |
-| `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | resolved precedence | Role-level reasoning candidate; invalid values are ignored. Provider capability normalization may adjust the selected level. |
+| `model` | `provider/model-id` | parent session | Role-level model. Invalid or unavailable registry entries fall back to the parent model. |
+| `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | parent session | Role-level reasoning level; invalid values are ignored. Provider capability normalization may adjust the selected level. |
 
 ### Parent orchestration guidance
 
@@ -308,40 +317,28 @@ never registered in a subagent session.
 
 ### Model and thinking resolution
 
-Model and thinking use the same highest-to-lowest precedence:
-
-1. Extension-internal spawn value (not a public tool parameter)
-2. Session per-role override
-3. Persisted per-role override in `subagents-lean.json`
-4. Agent Markdown `model` or `thinking`
-5. Session global default, then persisted global default
-6. Calling parent value
-
-The public `Agent` schema does not expose model or thinking spawn overrides.
-The first level describes only the internal settings plumbing used while the
-extension prepares a tool call. A missing frontmatter model or thinking value
-therefore does not necessarily inherit the parent: any higher global or
-per-role setting can win.
+The selected Agent Markdown definition is the only subagent-specific source for
+`model` and `thinking`. If either field is absent, the calling parent session's
+value is used. A model key is validated against Pi's model registry; malformed or
+unavailable entries fall back to the parent model. Thinking levels are normalized
+to the selected provider's supported levels. Queueing and rendering may carry
+the already-resolved values internally, while `AgentContinue` reuses the
+original session rather than resolving a new model or thinking level.
 
 ### System prompt and context
 
-`systemPromptMode` controls the prompt base; the agent Markdown body is always
-added as `<agent_instructions>`.
-
-| Mode | Base prompt |
-|---|---|
-| `replace` (default) | Minimal generic prompt plus this role's instructions. Lowest token cost and strongest isolation. |
-| `inherit` | Parent system prompt with duplicated Pi scaffolding and extension-owned orchestration blocks stripped, plus this role's instructions. |
-| `custom` | `~/.pi/agent/subagents-lean-prompt.md` plus this role's instructions. |
+Every subagent uses replacement mode: a minimal generic header, environment
+information, the role's Markdown body in `<agent_instructions>`, and optional
+skills/context sections. No parent system prompt is read.
 
 When `includeContextFiles` is `true` (default), applicable project-root and
 user `AGENTS.md` files are included as `<project_context>` before the role
 instructions. Set it to `false` to reduce static prompt context.
 
-For narrow agents, prefer metadata-only skills over `preload_skills`, restrict
-tools when appropriate, and disable unneeded extensions. Full skill preloads
-usually cost the most prompt space; tool schemas recur every turn; extension
-hooks run every turn; ordinary skill metadata is comparatively small.
+For narrow agents, select only the needed skill metadata, restrict tools when
+appropriate, and disable unneeded extensions. The model can use `read` to load a
+selected `SKILL.md` only when its description matches the task; ordinary skill
+metadata is comparatively small.
 
 ## Headless operation and logs
 
@@ -352,74 +349,43 @@ viewer, or manual steering surface. Use the four tools from the parent session:
 records. Each background execution delivers one automatic nudge through Pi's
 normal message path, including every background continuation.
 
-Finished records are retained for `finishedRetentionMinutes`. Thinking output is
-written to the append-only output log at turn end. These settings are useful for
-headless diagnostics and do not require a custom UI.
+Finished records remain available to `AgentStatus` and `AgentContinue` until the
+parent session shuts down. Thinking output is written to the append-only output
+log at turn end. These diagnostics do not require a custom UI.
 
 ## Configuration reference
 
 `~/.pi/agent/subagents-lean.json` is edited directly or by another host-side
-configuration writer. Per-role model overrides are dynamic keys inside `agent`,
-and per-role thinking overrides live in `thinkingOverrides`.
+configuration writer. Only current runtime settings are accepted and persisted;
+unknown `agent` keys are ignored and never treated as model selections.
 
-### Execution, catalog, model, and prompt settings
+### Execution, catalog, and prompt settings
 
 | JSON path | Default | Behavior |
 |---|---:|---|
-| `agent.default` | `null` | Persisted global model fallback (`provider/model-id`); `null` lets lower precedence continue to the parent. |
-| `agent.<role>` | absent | Persisted model override for that role. A string wins at its precedence level; `null` does not select a model. |
-| `agent.defaultThinking` | absent | Persisted global thinking fallback. |
-| `thinkingOverrides.<role>` | absent | Persisted thinking override for that role. |
-| `agent.forceBackground` | `false` | Make every root spawn background, even when its call requests foreground. |
 | `concurrency.default` | `4` | Global simultaneous-root-agent limit; excess root spawns queue. |
 | `agent.disableDefaultAgents` | `false` | Exclude bundled roles from the next parent refresh and on-demand discovery. |
 | `agent.orchestrationPrompt` | `true` | Add the generated parent-only routing guidance and visible catalog, or remove the extension's existing block when false. |
-| `agent.systemPromptMode` | `replace` | `replace`, `inherit`, or `custom`; custom reads `~/.pi/agent/subagents-lean-prompt.md`. |
 | `agent.includeContextFiles` | `true` | Include applicable project and user `AGENTS.md` context. |
-| `agent.loadSkillsImplicitly` | `true` | Default for a definition that omits `skills`. |
-| `agent.loadExtensionsImplicitly` | `true` | Default for a definition that omits `extensions`. |
 
-### Runtime and compatibility settings
+Model and thinking are configured in Agent Markdown, not in this JSON file.
+Missing `skills` and `extensions` frontmatter fields resolve to `false` after
+catalog merging.
 
-| JSON path | Default | Behavior |
-|---|---:|---|
-| `agent.finishedRetentionMinutes` | `60` | Retain completed records for `AgentStatus` and `AgentContinue`. |
-
-Older UI-only keys such as `widgetMaxLines`, `widgetCompact`, `showCost`, and
-`showTools` are accepted and ignored when loading existing files. Deprecated
-nested-delegation fields (`delegate_to`, `max_child_agents`, and
-`maxNestingDepth`) are also accepted for migration compatibility, but have no
-effect and are removed from newly written configuration. Legacy `mode`,
-`ecoModelOverrides`, and `ecoThinkingOverrides` keys are also tolerated and
-removed from normalized writes. `finishedRetentionMinutes` remains functional
-because it governs record retention, not presentation.
 Example configuration:
 
 ```json
 {
   "agent": {
-    "default": "zai/glm-5.2",
-    "defaultThinking": "medium",
-    "forceBackground": false,
     "orchestrationPrompt": true,
     "includeContextFiles": true,
-    "loadSkillsImplicitly": false,
-    "loadExtensionsImplicitly": false,
-    "scout": "xiaomi/mimo-v2.5"
-  },
-  "thinkingOverrides": {
-    "scout": "medium"
+    "disableDefaultAgents": false
   },
   "concurrency": {
     "default": 4
   }
 }
 ```
-
-**Migration from 1.5.x:** Role selection is explicit. Calls that omitted
-`agent` or used `general-purpose` must choose a role. The old built-in `Explore`
-model key migrates to `scout` unless `scout` is already configured, including an
-explicit `null` inheritance value.
 
 > **Reload safety:** A session or extension reload can terminate running agents.
 > Output logs and completed results already written to disk remain available.

@@ -13,7 +13,65 @@ import {
   resolveWorktreeAgent,
   resolveAgentCatalog,
   resolveTypeInCatalog,
+  snapshotAgentConfig,
 } from "../../src/agents/agent-types.js";
+
+describe("agent config snapshots", () => {
+  it("detaches every selection and exclusion list", () => {
+    const config = {
+      name: "snapshot",
+      description: "Snapshot",
+      systemPrompt: "",
+      registeredTools: ["read"],
+      tools: ["read"],
+      excludeTools: ["bash"],
+      extensions: ["one"],
+      excludeExtensions: ["two"],
+      skills: ["skill-a"],
+      excludeSkills: ["skill-b"],
+    };
+    const snapshot = snapshotAgentConfig(config);
+    expect(snapshot).not.toBe(config);
+    expect(snapshot.registeredTools).not.toBe(config.registeredTools);
+    expect(snapshot.excludeSkills).not.toBe(config.excludeSkills);
+
+    config.registeredTools.push("write");
+    config.excludeSkills.push("skill-d");
+    expect(snapshot.registeredTools).toEqual(["read"]);
+    expect(snapshot.excludeSkills).toEqual(["skill-b"]);
+  });
+
+  it("registers and returns detached configs", () => {
+    const config = {
+      name: "detached",
+      description: "Detached",
+      systemPrompt: "",
+      excludeSkills: ["secret"],
+    };
+    const catalog = new Map([["detached", config]]);
+    registerAgents(catalog, { disableDefaultAgents: true });
+    config.excludeSkills.push("later");
+    catalog.get("detached")!.excludeSkills!.push("catalog-mutation");
+    expect(getAgentConfig("detached")?.excludeSkills).toEqual(["secret"]);
+    const returned = getAgentConfig("detached")!;
+    returned.excludeSkills!.push("caller-mutation");
+    expect(getAgentConfig("detached")?.excludeSkills).toEqual(["secret"]);
+  });
+});
+
+describe("catalog role resolution", () => {
+  beforeEach(() => {
+    registerAgents(new Map([["reviewer", {
+      name: "reviewer", description: "Reviewer", systemPrompt: "",
+    }]]), { disableDefaultAgents: true });
+  });
+
+  it("matches only canonical names case-insensitively", () => {
+    expect(resolveType("REVIEWER")).toBe("reviewer");
+    expect(resolveType("Reviewer")).toBe("reviewer");
+    expect(resolveType("Reviewer label")).toBeUndefined();
+  });
+});
 
 describe("worktree-local agent resolution", () => {
   beforeEach(() => {
