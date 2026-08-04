@@ -33,8 +33,6 @@ export interface AgentConfigFromMd {
   preload_skills?: string[] | false;
   model?: string;
   thinking?: ThinkingLevel;
-  max_turns?: number;
-  max_tokens?: number;
   hidden?: boolean;
   /** Prompt body, when the Markdown file contains non-empty content after frontmatter. */
   systemPrompt?: string;
@@ -229,20 +227,6 @@ function parseBoolean(
   return undefined;
 }
 
-/** Extract a number from frontmatter (number or numeric string). */
-function parseNumber(
-  frontmatter: Record<string, unknown>,
-  key: string,
-): number | undefined {
-  const v = frontmatter[key];
-  if (typeof v === "number") return v;
-  if (typeof v === "string" && v.length > 0) {
-    const n = Number(v);
-    if (!Number.isNaN(n)) return n;
-  }
-  return undefined;
-}
-
 /**
  * Build an object containing only the entries whose value is not undefined.
  * Used to transform AgentConfigFromMd fields into a Partial<AgentConfig>
@@ -279,8 +263,6 @@ export function parseAgentFile(
     preload_skills: parsePreloadSkills(frontmatter.preload_skills),
     model: parseString(frontmatter, "model"),
     thinking: parseThinkingLevel(parseString(frontmatter, "thinking")),
-    max_turns: parseNumber(frontmatter, "max_turns"),
-    max_tokens: parseNumber(frontmatter, "max_tokens"),
     hidden: parseBoolean(frontmatter, "hidden"),
     // An absent body is not an override: retain a lower-precedence prompt.
     systemPrompt: body || undefined,
@@ -418,8 +400,6 @@ function fromMd(md: AgentConfigFromMd): Partial<AgentConfig> {
     preloadSkills: md.preload_skills,
     model: md.model,
     thinkingLevel: md.thinking,
-    maxTurns: md.max_turns,
-    maxTokens: md.max_tokens,
     hidden: md.hidden,
     systemPrompt: md.systemPrompt,
     source: md.source === "user" ? "global" : md.source,

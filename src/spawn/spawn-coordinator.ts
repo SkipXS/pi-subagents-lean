@@ -23,8 +23,6 @@ export interface SpawnIntent extends SpawnConfig {
   runInBackground: boolean;
   /** Parent abort signal forwarded to the agent manager. */
   signal?: AbortSignal;
-  /** Narrowed to required — all callers resolve this before spawn. */
-  graceTurns: number;
   /** Runtime settings snapshot captured by callers that resolve fields before entering the coordinator. */
   runtimeSettingsSnapshot?: SubagentRuntimeSettings;
 }
@@ -41,8 +39,6 @@ export interface ContinueIntent {
   runInBackground: boolean;
   /** Parent abort signal forwarded to the agent manager. */
   signal?: AbortSignal;
-  /** Turn budget for the continued execution. */
-  graceTurns?: number;
 }
 
 export interface ContinueResult {
@@ -204,7 +200,6 @@ export class SpawnCoordinator {
     const { executionId, record, promise } = this.manager.continueAgent(intent.agentId, intent.prompt, {
       isBackground: intent.runInBackground,
       signal: intent.signal,
-      graceTurns: intent.graceTurns,
     });
 
     if (intent.runInBackground) {

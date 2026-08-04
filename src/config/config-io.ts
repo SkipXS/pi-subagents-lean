@@ -10,12 +10,12 @@ import { randomUUID } from "node:crypto";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SubagentsConfig } from "../models/model-precedence.js";
 import { parseThinkingLevel } from "../utils.js";
+import { normalizeAgentEntries } from "./types.js";
 
 const CONFIG_DIR = getAgentDir();
 const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lean.json");
 
 export const CUSTOM_PROMPT_PATH = path.join(CONFIG_DIR, "subagents-lean-prompt.md");
-export const DEFAULT_GRACE_TURNS = 6;
 export const VALID_SYSTEM_PROMPT_MODES = new Set<string>(["replace", "inherit", "custom"]);
 export const DEFAULT_CONCURRENCY: SubagentsConfig["concurrency"] = { default: 4 };
 /** Persisted configuration changes fail promptly rather than block on lock contention. */
@@ -29,7 +29,6 @@ const REMOVED_AGENT_KEYS = [
   "showOutput",
   "showContext",
   "showTime",
-  "defaultMaxTurns",
   "widgetMaxLines",
   "widgetMaxLinesCompact",
   "widgetDescLengthFull",
@@ -49,12 +48,10 @@ const REMOVED_AGENT_KEYS = [
 const DEFAULT_AGENT: SubagentsConfig["agent"] = {
   default: null,
   forceBackground: false,
-  graceTurns: DEFAULT_GRACE_TURNS,
   systemPromptMode: "replace",
   includeContextFiles: true,
   disableDefaultAgents: false,
   orchestrationPrompt: true,
-  outputThinkingBufferSize: 0,
   finishedRetentionMinutes: 60,
 };
 
@@ -209,9 +206,10 @@ export function createConfigFileIO(configDir: string = CONFIG_DIR, options: Conf
           throw new ConfigPersistenceUnavailableError("Cannot repair config: no archivable corrupt primary and valid backup are available.");
         }
         const archivePath = `${configPath}.corrupt-${now()}-${randomUUID()}`;
+        const normalizedBackup = normalizeConfig(backup.config!);
         atomicWrite(archivePath, primary.bytes);
-        atomicWrite(configPath, backup.bytes);
-        return { config: backup.config!, health: "healthy", canRepair: false };
+        atomicWrite(configPath, Buffer.from(JSON.stringify(normalizedBackup, null, 2), "utf8"));
+        return { config: normalizedBackup, health: "healthy", canRepair: false };
       });
     },
   };
@@ -283,15 +281,19 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
   };
   const rawAgent = { ...(raw.agent ?? {}) } as Record<string, unknown>;
   for (const key of REMOVED_AGENT_KEYS) delete rawAgent[key];
-  const agent = { ...DEFAULT_AGENT, ...rawAgent } as SubagentsConfig["agent"];
+  const agent = {
+    ...DEFAULT_AGENT,
+    ...normalizeAgentEntries(rawAgent),
+  } as SubagentsConfig["agent"];
   if (!Object.hasOwn(rawAgent, "scout") && typeof rawAgent.Explore === "string") agent.scout = rawAgent.Explore;
-  const defaultThinking = parseThinkingLevel(agent.defaultThinking);
+  const typedAgent = agent;
+  const defaultThinking = parseThinkingLevel(typedAgent.defaultThinking);
   if (defaultThinking === undefined) delete agent.defaultThinking;
-  else agent.defaultThinking = defaultThinking;
+  else typedAgent.defaultThinking = defaultThinking;
   // Legacy root mode/Eco keys are deliberately not read. Keeping them out of
   // the normalized object makes every subsequent write a migration boundary.
   return {
-    agent,
+    agent: typedAgent,
     thinkingOverrides: { ...(raw.thinkingOverrides ?? {}) },
     concurrency,
   };

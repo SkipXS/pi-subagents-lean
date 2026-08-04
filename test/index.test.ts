@@ -159,14 +159,6 @@ describe("Agent tool schema — fixed public contract", () => {
     expect(hasParam(agentTool()!.parameters, "agent")).toBe(true);
   });
 
-  it("excludes max_turns from schema (config-only, not LLM-controlled)", () => {
-    expect(hasParam(agentTool()!.parameters, "max_turns")).toBe(false);
-  });
-
-  it("excludes max_tokens from schema (config-only, not LLM-controlled)", () => {
-    expect(hasParam(agentTool()!.parameters, "max_tokens")).toBe(false);
-  });
-
   it("includes run_in_background param (optional)", () => {
     expect(hasParam(agentTool()!.parameters, "run_in_background")).toBe(true);
   });

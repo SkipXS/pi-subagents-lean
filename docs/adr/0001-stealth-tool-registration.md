@@ -6,7 +6,7 @@ prompt snippets or guidelines, parameter descriptions, or runtime-generated
 enums. The required `agent` field is always a bare `Type.String()`; it never
 has a config- or registry-driven enum. Model and thinking are intentionally
 absent from the LLM-visible `Agent` schema and remain controlled through Agent
-Markdown and settings. Turn and token limits are likewise configuration-only.
+Markdown and settings.
 
 ## Why
 

@@ -19,16 +19,13 @@ export interface ToolActivity {
 }
 
 /**
- * Resolved model + run-limit tunables shared by every spawn/run shape
- * (RunOptions, SpawnOptions, SpawnIntent). Add a tunable here once and it
- * flows through the whole chain.
+ * Resolved model tunables shared by every spawn/run shape (RunOptions,
+ * SpawnOptions, SpawnIntent). Add a tunable here once and it flows through
+ * the whole chain.
  */
 export interface RunTunables {
   model?: Model<any>;
-  maxTurns?: number;
-  maxTokens?: number;
   thinkingLevel?: ThinkingLevel;
-  graceTurns?: number;
 }
 
 export interface AgentRecord {
@@ -43,7 +40,7 @@ export interface AgentRecord {
   display: AgentDisplayInfo;
   /** Execution internals: session, abort controller, and output-log lifecycle. */
   execution: AgentExecutionState;
-  /** Accumulated statistics: usage, tool uses, turns. */
+  /** Accumulated statistics: usage, context, and compactions. */
   stats: AgentAccumulatedStats;
 }
 
@@ -61,7 +58,6 @@ export interface RunCallbacks {
   onToolActivity?: (activity: ToolActivity) => void;
   onTextDelta?: (delta: string, fullText: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
-  onTurnEnd?: (turnCount: number) => void;
   onAssistantUsage?: (usage: AgentUsage) => void;
   onCompaction?: (info: CompactionInfo) => void;
 }
@@ -116,7 +112,7 @@ export interface CompactionReasonMetadata {
 // ---------------------------------------------------------------------------
 
 /** Possible agent lifecycle statuses. */
-export type AgentStatus = "queued" | "running" | "completed" | "turn_limited" | "aborted" | "stopped" | "error";
+export type AgentStatus = "queued" | "running" | "completed" | "aborted" | "stopped" | "error";
 
 /** Who initiated an agent stop: a control tool, the agent, or its parent turn. */
 export type StopInitiator = "user" | "agent" | "parent";
@@ -128,10 +124,10 @@ export type BackgroundDeliveryState = "pending" | "accepted" | "failed" | "aband
 export type AgentExecutionMode = "foreground" | "background";
 
 /**
- * Per-execution summary retained on the record for every turn executed on an
- * agent session (the initial spawn plus each AgentContinue execution). Each
+ * Per-execution summary retained on the record for each prompt execution on
+ * an agent session (the initial spawn plus each AgentContinue execution). Each
  * entry carries its own generation (response text), delivery (text handed to
- * the caller), usage delta, and turn count so continuation history stays
+ * the caller), usage delta, and compaction data so continuation history stays
  * inspectable after the session is gone.
  */
 export interface AgentExecutionSummary {
@@ -150,10 +146,6 @@ export interface AgentExecutionSummary {
   deliveredText?: string;
   /** Usage delta accumulated during this execution only. */
   usage?: AgentUsage;
-  /** Turns consumed by this execution only. */
-  turnCount?: number;
-  /** Tool uses accumulated during this execution only. */
-  toolUses?: number;
   /** Compactions that occurred during this execution only. */
   compactionCount?: number;
   /** Terminal error for this execution, when failed. */
@@ -224,8 +216,8 @@ export interface AgentExecutionState {
 }
 
 /**
- * Accumulated statistics: usage breakdown, tool uses, turn count.
- * Accumulated statistics used by lifecycle tracking and tool results.
+ * Accumulated usage and context statistics used by lifecycle tracking and tool
+ * results.
  */
 export interface AgentAccumulatedStats {
   /**
@@ -234,13 +226,6 @@ export interface AgentAccumulatedStats {
    * excluded — see issue #38). Initialized to zeros at spawn.
    */
   lifetimeUsage: LifetimeUsage;
-  toolUses: number;
-  /** Final turn count (set on completion). */
-  turnCount?: number;
-  /** Max turns limit (from invocation or default). */
-  maxTurns?: number;
-  /** Grace turns limit captured at spawn; continuations reuse it per execution. */
-  graceTurns?: number;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /** Previous input token count for delta estimation (vLLM doesn't report cache hits). */

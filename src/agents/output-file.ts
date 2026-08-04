@@ -14,24 +14,11 @@ import { formatCost, formatTokens } from "./usage.js";
 import { summarizeToolArgs } from "../utils.js";
 
 
-/** Find the last sentence boundary in text. Returns the index of the
- * terminal punctuation character, or -1 if none found. */
-function findLastSentenceBoundary(text: string): number {
-  // Search backward for the most recent sentence-ending punctuation
-  for (let i = text.length - 1; i >= 0; i--) {
-    const ch = text[i];
-    if ([".", "!", "?", ",", "\n"].includes(ch)) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-/** Format the [DONE] summary line with final stats. */
-function formatDoneLine(stats: { turnCount: number; toolUseCount: number; totalTokens: number; cost: number }): string {
+/** Format the [DONE] summary line with final usage stats. */
+function formatDoneLine(stats: { totalTokens: number; cost: number }): string {
   const tokensStr = `${formatTokens(stats.totalTokens)} tokens`;
   const costStr = formatCost(stats.cost);
-  return `${timestamp()} [DONE] ${stats.turnCount} turns, ${stats.toolUseCount} tool uses, ${tokensStr}, ${costStr}\n`;
+  return `${timestamp()} [DONE] ${tokensStr}, ${costStr}\n`;
 }
 /** Max content length for a full tool result log entry — longer results get a summary line. */
 const MAX_TOOL_RESULT_DISPLAY_LENGTH = 500;
@@ -132,14 +119,12 @@ function formatToolResult(toolName: string, content: ReadonlyArray<Record<string
 function formatMessageLine(
   role: "ASSISTANT" | "TOOL" | "USER",
   content: string | ReadonlyArray<Record<string, unknown>> | undefined,
-  skipThinkingCount: number = 0,
 ): string {
   if (typeof content === "string") {
     return splitAndPrefix(content, role);
   }
 
   if (Array.isArray(content)) {
-    let thinkingSkipped = 0;
     return content
       .map((item) => {
         if (item.type === "text" && typeof item.text === "string") {
@@ -149,10 +134,6 @@ function formatMessageLine(
           return formatToolItem(item);
         }
         if (item.type === "thinking" && typeof item.thinking === "string") {
-          if (thinkingSkipped < skipThinkingCount) {
-            thinkingSkipped++;
-            return ""; // Already streamed, skip
-          }
           const text = item.redacted ? "[redacted]" : item.thinking;
           return splitAndPrefix(text, "THINKING");
         }
@@ -165,10 +146,10 @@ function formatMessageLine(
 }
 /**
  * Subscribe to session events and flush new messages to the output file
- * on each turn_end. Returns a cleanup function that writes the DONE line
- * and unsubscribes.
+ * when a session turn completes. Returns a cleanup function that writes the
+ * DONE line and unsubscribes.
  *
- * The optional stats parameter provides final summary data for the DONE line.
+ * The optional stats parameter provides final usage data for the DONE line.
  * `startIndex` selects the first session message still missing from the file;
  * continuation attaches reuse the current message count so earlier executions
  * are never rewritten.
@@ -176,30 +157,17 @@ function formatMessageLine(
 export function streamToOutputFile(
   session: AgentSession,
   path: string,
-  stats?: { turnCount: number; toolUseCount: number; totalTokens: number; cost: number },
-  bufferSize: number = 0,
+  stats?: { totalTokens: number; cost: number },
   startIndex: number = 1,
 ): () => void {
   let writtenCount = startIndex; // initial user prompt (or prior executions) already written
-  let thinkingBuffer = "";
-  let streamedThinkingBlocks = 0; // thinking blocks written live; skipped in the final flush
-  let streamedThinkingChars = 0; // track total chars streamed for deduplication
-  let thinkingBlockInProgress = false; // true between thinking_start and thinking_end
-
-  const flushThinkingBuffer = () => {
-    if (thinkingBuffer.length > 0) {
-      safeAppend(path, `${timestamp()} [THINKING] ${thinkingBuffer}\n`);
-      streamedThinkingChars += thinkingBuffer.length;
-      thinkingBuffer = "";
-    }
-  };
 
   const flush = () => {
     const messages = session.messages;
     while (writtenCount < messages.length) {
       const msg = messages[writtenCount];
       if (msg.role === "assistant") {
-        const lines = formatMessageLine("ASSISTANT", msg.content as any, streamedThinkingBlocks);
+        const lines = formatMessageLine("ASSISTANT", msg.content as any);
         if (lines) safeAppend(path, lines);
       } else if (msg.role === "user") {
         const text = extractUserText(msg.content as any);
@@ -219,59 +187,15 @@ export function streamToOutputFile(
   };
 
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-    if (event.type === "turn_end") {
-      flushThinkingBuffer();
-      // If thinking_end never fired, treat this as if it did to avoid duplicates
-      if (thinkingBlockInProgress) {
-        streamedThinkingBlocks++;
-        thinkingBlockInProgress = false;
-      }
-      flush();
-    }
-
-    if (bufferSize > 0 && event.type === "message_update") {
-      const assistantEvent = event.assistantMessageEvent;
-      if (assistantEvent.type === "thinking_start") {
-        // Reset counter for new thinking block
-        streamedThinkingChars = 0;
-        thinkingBlockInProgress = true;
-      } else if (assistantEvent.type === "thinking_delta") {
-        thinkingBuffer += assistantEvent.delta;
-        if (thinkingBuffer.length >= bufferSize) {
-          // Round down to nearest sentence boundary when possible
-          const boundary = findLastSentenceBoundary(thinkingBuffer);
-          if (boundary >= 0) {
-            const flushText = thinkingBuffer.slice(0, boundary + 1);
-            thinkingBuffer = thinkingBuffer.slice(boundary + 1);
-            safeAppend(path, `${timestamp()} [THINKING] ${flushText}\n`);
-            streamedThinkingChars += flushText.length;
-          } else {
-            // No sentence boundary found, flush at buffer limit
-            flushThinkingBuffer();
-          }
-        }
-      } else if (assistantEvent.type === "thinking_end") {
-        // thinking_end carries the full block. Flush the buffered tail first
-        // (counted in streamedThinkingChars), then stream whatever remains.
-        flushThinkingBuffer();
-        if (assistantEvent.content && assistantEvent.content.length > streamedThinkingChars) {
-          const remaining = assistantEvent.content.slice(streamedThinkingChars);
-          safeAppend(path, `${timestamp()} [THINKING] ${remaining}\n`);
-          streamedThinkingChars = assistantEvent.content.length;
-        }
-        streamedThinkingBlocks++;
-        thinkingBlockInProgress = false;
-      }
-    }
+    if (event.type === "turn_end") flush();
   });
 
   return () => {
     // Final flush
-    flushThinkingBuffer();
     flush();
 
     // Write DONE line
-    const doneStats = stats ?? { turnCount: 0, toolUseCount: 0, totalTokens: 0, cost: 0 };
+    const doneStats = stats ?? { totalTokens: 0, cost: 0 };
     safeAppend(path, formatDoneLine(doneStats));
 
     // Unsubscribe from session events
@@ -283,10 +207,8 @@ export function streamToOutputFile(
 //  AgentOutputLog — lifecycle wrapper for per-agent output streaming
 // ---------------------------------------------------------------------------
 
-/** Final stats written to the DONE line at agent completion. */
+/** Final usage stats written to the DONE line at agent completion. */
 export interface OutputFinalStats {
-  turnCount: number;
-  toolUseCount: number;
   totalTokens: number;
   cost: number;
 }
@@ -304,9 +226,8 @@ export class AgentOutputLog {
   readonly path: string;
   private cleanup?: () => void;
   private statsRef?: OutputFinalStats;
-  private bufferSize: number;
 
-  constructor(agentId: string, prompt: string, baseDir?: string, bufferSize: number = 0, append: boolean = false) {
+  constructor(agentId: string, prompt: string, baseDir?: string, append: boolean = false) {
     this.path = createOutputFilePath(agentId, baseDir);
     if (append) {
       // Continuation: reuse the existing file and append the new prompt.
@@ -314,7 +235,6 @@ export class AgentOutputLog {
     } else {
       writeInitialEntry(this.path, prompt);
     }
-    this.bufferSize = bufferSize;
   }
 
   /**
@@ -327,7 +247,7 @@ export class AgentOutputLog {
 
   /**
    * Subscribe to session events so messages stream to the output file.
-   * Internally passes a mutable stats reference that `finalize()` populates
+   * Internally passes a mutable usage reference that `finalize()` populates
    * before the DONE line is written.
    *
    * `startIndex` is the first session message that still needs flushing;
@@ -335,8 +255,8 @@ export class AgentOutputLog {
    * messages from earlier executions are not duplicated.
    */
   attach(session: AgentSession, startIndex: number = 1): void {
-    this.statsRef = { turnCount: 0, toolUseCount: 0, totalTokens: 0, cost: 0 };
-    this.cleanup = streamToOutputFile(session, this.path, this.statsRef, this.bufferSize, startIndex);
+    this.statsRef = { totalTokens: 0, cost: 0 };
+    this.cleanup = streamToOutputFile(session, this.path, this.statsRef, startIndex);
   }
 
   /**
@@ -349,8 +269,6 @@ export class AgentOutputLog {
     if (this.cleanup && this.statsRef) {
       // Populate the mutable stats ref so streamToOutputFile's cleanup
       // writes the actual final values to the DONE line.
-      this.statsRef.turnCount = stats.turnCount;
-      this.statsRef.toolUseCount = stats.toolUseCount;
       this.statsRef.totalTokens = stats.totalTokens;
       this.statsRef.cost = stats.cost;
       this.cleanup();

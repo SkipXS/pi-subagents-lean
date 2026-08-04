@@ -13,7 +13,7 @@ vi.mock("../src/spawn/worktree-validator.js", () => ({
 
 vi.mock("../src/agents/agent-types.js", () => ({
   resolveType: boundary.resolveType,
-  getAgentConfig: vi.fn(() => ({ maxTurns: 1 })),
+  getAgentConfig: vi.fn(() => ({})),
   discoverNewAgents: boundary.discoverNewAgents,
   resolveAgentCatalog: vi.fn(),
   resolveTypeInCatalog: vi.fn(),
@@ -23,7 +23,7 @@ vi.mock("../src/shell.js", () => ({
   getPiInstance: () => ({ exec: vi.fn() }),
   getSessionCtx: () => ({ cwd: "/project" }),
   getStore: () => ({
-    agent: { graceTurns: 1, forceBackground: false },
+    agent: { forceBackground: false },
     modelSettingFor: () => ({ value: undefined }),
     thinkingSettingFor: () => ({ value: undefined }),
   }),

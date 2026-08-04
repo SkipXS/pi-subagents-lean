@@ -119,8 +119,6 @@ describe("streamToOutputFile", () => {
 
     const session = setupSession([]);
     const cleanup = streamToOutputFile(session, path, {
-      turnCount: 3,
-      toolUseCount: 5,
       totalTokens: 12400,
       cost: 0.024,
     });
@@ -128,8 +126,6 @@ describe("streamToOutputFile", () => {
 
     const lastLine = readFileSync(path, "utf-8").trim().split("\n").at(-1)!;
     expect(lastLine).toMatch(/\[DONE\]/);
-    expect(lastLine).toContain("3 turns");
-    expect(lastLine).toContain("5 tool uses");
     expect(lastLine).toContain("12k tokens");
     expect(lastLine).toContain("$0.024");
   });
@@ -141,7 +137,7 @@ describe("streamToOutputFile", () => {
 
     const session = setupSession([]);
     const cleanup = streamToOutputFile(session, path, {
-      turnCount: 2, toolUseCount: 3, totalTokens: 15000, cost: 0.123456,
+      totalTokens: 15000, cost: 0.123456,
     });
     cleanup();
 
@@ -478,11 +474,11 @@ describe("AgentOutputLog", () => {
     const session = createMockSession() as any;
     Object.defineProperty(session, "messages", { get: () => [], configurable: true });
     log.attach(session);
-    log.finalize({ turnCount: 3, toolUseCount: 5, totalTokens: 12400, cost: 0.024 });
+    log.finalize({ totalTokens: 12400, cost: 0.024 });
 
     const lastLine = readFileSync(log.path, "utf-8").trim().split("\n").at(-1)!;
     expect(lastLine).toMatch(/\[DONE\]/);
-    expect(lastLine).toContain("3 turns");
+    expect(lastLine).toContain("12k tokens");
     expect(lastLine).toContain("$0.024");
   });
 
@@ -498,7 +494,7 @@ describe("AgentOutputLog", () => {
       configurable: true,
     });
     log.attach(session);
-    log.finalize({ turnCount: 1, toolUseCount: 0, totalTokens: 500, cost: 0 });
+    log.finalize({ totalTokens: 500, cost: 0 });
 
     const content = readFileSync(log.path, "utf-8");
     expect(content).toContain("Final answer.");
@@ -511,14 +507,14 @@ describe("AgentOutputLog", () => {
     const session = createMockSession() as any;
     Object.defineProperty(session, "messages", { get: () => [], configurable: true });
     log.attach(session);
-    log.finalize({ turnCount: 0, toolUseCount: 0, totalTokens: 0, cost: 0 });
+    log.finalize({ totalTokens: 0, cost: 0 });
     expect(session._getListeners().length).toBe(0);
   });
 
   it("does not throw when finalize is called without attach", () => {
     const dir = fixture.getDir();
     const log = new AgentOutputLog(testAgentId, "test", dir);
-    expect(() => log.finalize({ turnCount: 0, toolUseCount: 0, totalTokens: 0, cost: 0 })).not.toThrow();
+    expect(() => log.finalize({ totalTokens: 0, cost: 0 })).not.toThrow();
   });
 
   it("exposes the output file path as a readonly property", () => {

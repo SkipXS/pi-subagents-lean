@@ -4,7 +4,7 @@
  * Absorbs config-io.ts and config-mutator.ts. See
  * docs/adr/0004-composition-root-over-shared-state.md.
  *
- * - Reads return defaults baked in (no `?? 6` at call sites).
+ * - Reads return defaults baked in rather than duplicating fallback logic at call sites.
  * - Each persisted mutate method is mutate + persist + its side effect, so a
  *   side effect cannot be forgotten.
  * - The manager is injected after construction (it is created lazily).
@@ -21,7 +21,7 @@ import type {
 } from "../models/model-precedence.js";
 import { resolveModelSetting, resolveThinkingSetting } from "../models/model-precedence.js";
 import type { AgentManager } from "../agents/agent-manager.js";
-import { CONFIG_AGENT_NON_MODEL_KEYS } from "./types.js";
+import { CONFIG_AGENT_NON_MODEL_KEYS, normalizeAgentEntries } from "./types.js";
 import type { SystemPromptMode } from "../agents/types.js";
 import type { ThinkingLevel } from "../types.js";
 import { parseThinkingLevel } from "../utils.js";
@@ -60,7 +60,6 @@ export interface ResolvedAgentSettings {
   /** null = inherit parent. Kept nullable to preserve resolveModel's null-skip. */
   readonly defaultModel: string | null;
   readonly forceBackground: boolean;
-  readonly graceTurns: number;
   /** System prompt mode: replace (default), inherit parent, or custom file. */
   readonly systemPromptMode: SystemPromptMode;
   /** Whether to include AGENTS.md context files in the subagent system prompt. */
@@ -75,8 +74,6 @@ export interface ResolvedAgentSettings {
   readonly disableDefaultAgents: boolean;
   /** Whether to append dynamic parent-agent orchestration guidance. */
   readonly orchestrationPrompt: boolean;
-  /** Buffer size for streaming thinking blocks to output file. 0 = disabled. */
-  readonly outputThinkingBufferSize: number;
   /** Minutes to retain finished agents before cleanup eviction. */
   readonly finishedRetentionMinutes: number;
 }
@@ -137,7 +134,6 @@ export class ConfigStore {
     return {
       defaultModel: a.default ?? null,
       forceBackground: a.forceBackground === true,
-      graceTurns: a.graceTurns ?? 6,
       systemPromptMode: VALID_SYSTEM_PROMPT_MODES.has(a.systemPromptMode as string) ? (a.systemPromptMode as SystemPromptMode) : "replace",
       includeContextFiles: a.includeContextFiles ?? true,
       defaultThinking: parseThinkingLevel(a.defaultThinking),
@@ -145,7 +141,6 @@ export class ConfigStore {
       loadExtensionsImplicitly: a.loadExtensionsImplicitly !== false,
       disableDefaultAgents: a.disableDefaultAgents === true,
       orchestrationPrompt: a.orchestrationPrompt !== false,
-      outputThinkingBufferSize: a.outputThinkingBufferSize ?? 0,
       finishedRetentionMinutes: a.finishedRetentionMinutes ?? 60,
     };
   }
@@ -302,10 +297,6 @@ export class ConfigStore {
         this.config.agent.forceBackground = enabled;
         this.persist();
       },
-      setGraceTurns: (n: number): void => {
-        this.config.agent.graceTurns = n;
-        this.persist();
-      },
       setSystemPromptMode: (mode: SystemPromptMode): void => {
         this.config.agent.systemPromptMode = mode;
         this.persist();
@@ -336,10 +327,6 @@ export class ConfigStore {
       },
       setOrchestrationPrompt: (enabled: boolean): void => {
         this.config.agent.orchestrationPrompt = enabled;
-        this.persist();
-      },
-      setOutputThinkingBufferSize: (size: number): void => {
-        this.config.agent.outputThinkingBufferSize = size;
         this.persist();
       },
       setFinishedRetentionMinutes: (minutes: number): void => {
@@ -476,13 +463,14 @@ export class ConfigStore {
 
 /** Apply only this store mutation's changed fields to a freshly locked snapshot. */
 const REMOVED_AGENT_FIELDS = [
-  "defaultMaxTurns", "maxNestingDepth", "max_nesting_depth", "delegate_to", "delegateTo", "max_child_agents", "maxChildAgents",
+  "maxNestingDepth", "max_nesting_depth", "delegate_to", "delegateTo", "max_child_agents", "maxChildAgents",
 ] as const;
 
 function stripRemovedAgentFields(config: SubagentsConfig): SubagentsConfig {
   const sanitized = structuredClone(config);
   const agent = sanitized.agent as Record<string, unknown>;
   for (const field of REMOVED_AGENT_FIELDS) delete agent[field];
+  sanitized.agent = normalizeAgentEntries(agent) as SubagentsConfig["agent"];
   const root = sanitized as unknown as Record<string, unknown>;
   delete root.mode;
   delete root.ecoModelOverrides;
@@ -493,11 +481,13 @@ function stripRemovedAgentFields(config: SubagentsConfig): SubagentsConfig {
 function applyConfigDelta(latest: SubagentsConfig, before: SubagentsConfig, desired: SubagentsConfig): void {
   const latestAgent = latest.agent as Record<string, unknown>;
   for (const field of REMOVED_AGENT_FIELDS) delete latestAgent[field];
+  latest.agent = normalizeAgentEntries(latestAgent) as SubagentsConfig["agent"];
+  const normalizedAgent = latest.agent as Record<string, unknown>;
   const latestRoot = latest as unknown as Record<string, unknown>;
   delete latestRoot.mode;
   delete latestRoot.ecoModelOverrides;
   delete latestRoot.ecoThinkingOverrides;
-  applyObjectDelta(latestAgent, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
+  applyObjectDelta(normalizedAgent, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
   applyObjectDelta(latest.concurrency as Record<string, unknown>, before.concurrency as Record<string, unknown>, desired.concurrency as Record<string, unknown>);
   latest.thinkingOverrides ??= {};
   applyObjectDelta(

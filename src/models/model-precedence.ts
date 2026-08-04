@@ -33,7 +33,6 @@ export interface SubagentsConfig {
   agent: {
     default: string | null;
     forceBackground: boolean;
-    graceTurns?: number;
     systemPromptMode?: SystemPromptMode;
     includeContextFiles?: boolean;
     defaultThinking?: ThinkingLevel;
@@ -42,7 +41,6 @@ export interface SubagentsConfig {
     disableDefaultAgents?: boolean;
     /** Whether to append dynamic parent-agent orchestration guidance. */
     orchestrationPrompt?: boolean;
-    outputThinkingBufferSize?: number;
     finishedRetentionMinutes?: number;
     [agentType: string]: string | null | undefined | boolean | number;
   };

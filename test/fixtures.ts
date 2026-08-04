@@ -62,7 +62,7 @@ export function shellMock(fns: ShellMockFns = {}) {
   const pi = fns.pi ?? { sendMessage: vi.fn(), exec: vi.fn() };
   const sessionCtx = fns.sessionCtx ?? { cwd: "/home/test" };
   const store = fns.store ?? {
-    agent: { graceTurns: 6, forceBackground: false },
+    agent: { forceBackground: false },
     modelFor: () => "",
   };
   const coordinator = fns.coordinator ?? { spawn: vi.fn() };
@@ -315,7 +315,6 @@ export function makeAgentMd(overrides: Record<string, unknown> = {}): string {
     extensions: "true",
     skills: "true",
     thinking: "off",
-    max_turns: "25",
     disallowed_tools: "",
     enabled: "true",
   };

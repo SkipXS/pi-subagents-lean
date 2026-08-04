@@ -70,6 +70,29 @@ describe("config I/O paths", () => {
     expect(loadConfig().config.concurrency).toEqual({ default: 4 });
   });
 
+  it("normalizes dynamic agent entries at the file boundary", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      agent: {
+        default: null,
+        forceBackground: false,
+        dynamicModel: "provider/model",
+        dynamicNull: null,
+        dynamicNumber: 42,
+        dynamicBoolean: true,
+      },
+      concurrency: { default: 4 },
+    }));
+    vi.resetModules();
+
+    const { loadConfig } = await import("../../src/config/config-io.ts");
+    const config = loadConfig().config;
+    expect(config.agent.dynamicModel).toBe("provider/model");
+    expect(config.agent.dynamicNull).toBeNull();
+    expect(config.agent).not.toHaveProperty("dynamicNumber");
+    expect(config.agent).not.toHaveProperty("dynamicBoolean");
+  });
+
   it("normalizes legacy provider and model limits out of saved config", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({
@@ -141,7 +164,6 @@ describe("config I/O paths", () => {
         widgetShowModelThinking: false,
         widgetShowStartTime: false,
         showCost: true,
-        defaultMaxTurns: 40,
         delegate_to: ["scout"],
         max_child_agents: 2,
         maxNestingDepth: 2,
@@ -155,7 +177,6 @@ describe("config I/O paths", () => {
     expect(config.agent).not.toHaveProperty("widgetShowModelThinking");
     expect(config.agent).not.toHaveProperty("widgetShowStartTime");
     expect(config.agent).not.toHaveProperty("showCost");
-    expect(config.agent).not.toHaveProperty("defaultMaxTurns");
     expect(config.agent).not.toHaveProperty("delegate_to");
     expect(config.agent).not.toHaveProperty("max_child_agents");
     expect(config.agent).not.toHaveProperty("maxNestingDepth");
@@ -173,24 +194,32 @@ describe("config I/O paths", () => {
     const { updateConfigAtomic } = await import("../../src/config/config-io.ts");
     const result = updateConfigAtomic((config) => {
       (config.agent as Record<string, unknown>).widgetCompact = true;
-      (config.agent as Record<string, unknown>).defaultMaxTurns = 40;
       (config.agent as Record<string, unknown>).delegate_to = ["scout"];
       (config.agent as Record<string, unknown>).max_child_agents = 2;
       (config.agent as Record<string, unknown>).maxNestingDepth = 2;
+      (config.agent as Record<string, unknown>).dynamicModel = "provider/model";
+      (config.agent as Record<string, unknown>).dynamicNull = null;
+      (config.agent as Record<string, unknown>).dynamicNumber = 42;
+      (config.agent as Record<string, unknown>).dynamicBoolean = true;
       config.agent.forceBackground = true;
     });
     expect(result.config.agent.forceBackground).toBe(true);
     expect(result.config.agent).not.toHaveProperty("widgetCompact");
-    expect(result.config.agent).not.toHaveProperty("defaultMaxTurns");
     expect(result.config.agent).not.toHaveProperty("delegate_to");
     expect(result.config.agent).not.toHaveProperty("max_child_agents");
     expect(result.config.agent).not.toHaveProperty("maxNestingDepth");
+    expect(result.config.agent.dynamicModel).toBe("provider/model");
+    expect(result.config.agent.dynamicNull).toBeNull();
+    expect(result.config.agent).not.toHaveProperty("dynamicNumber");
+    expect(result.config.agent).not.toHaveProperty("dynamicBoolean");
     const configWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
     expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("widgetCompact");
-    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("defaultMaxTurns");
     expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("delegate_to");
     expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("max_child_agents");
     expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("maxNestingDepth");
+    expect(JSON.parse(String(configWrite![1])).agent).toMatchObject({ dynamicModel: "provider/model", dynamicNull: null });
+    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("dynamicNumber");
+    expect(JSON.parse(String(configWrite![1])).agent).not.toHaveProperty("dynamicBoolean");
   });
 
   it("rejects repair when neither a primary nor backup config exists", async () => {

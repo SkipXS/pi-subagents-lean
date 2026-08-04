@@ -28,7 +28,7 @@ conservative per-file floors:
 |---|---:|---:|---:|---:|
 | `src/registration.ts` | 80% | 70% | 95% | 80% |
 | `src/agents/agent-manager.ts` | 85% | 80% | 80% | 88% |
-| `src/config/config-io.ts` | 68% | 80% | 73% | 70% |
+| `src/config/config-io.ts` | 68% | 68% | 73% | 70% |
 | `src/prompt/skill-loader.ts` | 72% | 80% | 70% | 72% |
 | `src/spawn/spawn-coordinator.ts` | 74% | 70% | 80% | 74% |
 

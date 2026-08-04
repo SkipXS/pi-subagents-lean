@@ -43,7 +43,6 @@ type MockRunResult = {
   responseText: string;
   session: ReturnType<typeof mockAgentSession>;
   aborted: boolean;
-  turnLimited: boolean;
 };
 
 function mockRunResult(overrides?: Partial<MockRunResult>): MockRunResult {
@@ -51,7 +50,6 @@ function mockRunResult(overrides?: Partial<MockRunResult>): MockRunResult {
     responseText: "done",
     session: mockAgentSession(),
     aborted: false,
-    turnLimited: false,
     ...overrides,
   };
 }
@@ -138,7 +136,7 @@ describe("AgentManager", () => {
       expect(() => manager.spawn(pi, ctx, "scout", "bypass", { description: "bypass" }))
         .toThrow("Root agent spawning is unavailable from a child runtime");
       await expect(coordinator.spawn(pi, ctx, {
-        type: "scout", prompt: "bypass", description: "bypass", graceTurns: 6, runInBackground: false,
+        type: "scout", prompt: "bypass", description: "bypass", runInBackground: false,
       })).rejects.toThrow("Root agent spawning is unavailable from a child runtime");
     });
 
@@ -170,7 +168,7 @@ describe("AgentManager", () => {
       expect(() => manager.spawn(pi, ctx, "scout", "bypass", { description: "bypass" }))
         .toThrow("Root agent spawning is unavailable from a child runtime");
       await expect(coordinator.spawn(pi, ctx, {
-        type: "scout", prompt: "bypass", description: "bypass", graceTurns: 6, runInBackground: false,
+        type: "scout", prompt: "bypass", description: "bypass", runInBackground: false,
       })).rejects.toThrow("Root agent spawning is unavailable from a child runtime");
     };
 
@@ -589,7 +587,6 @@ describe("AgentManager", () => {
         responseText: "",
         session: mockAgentSession(),
         aborted: true,
-        turnLimited: false,
       });
 
       await manager.getRecord(id)!.execution.promise;
@@ -1309,7 +1306,7 @@ describe("AgentManager steering and shutdown", () => {
     expect(onToolActivity).toHaveBeenCalledWith({ type: "end", toolName: "read" });
     expect(onAssistantUsage).toHaveBeenCalledOnce();
     expect(onCompaction).toHaveBeenCalledOnce();
-    expect(manager.getRecord(id)!.stats).toMatchObject({ toolUses: 1, compactionCount: 1 });
+    expect(manager.getRecord(id)!.stats).toMatchObject({ compactionCount: 1 });
 
     const signal = callbacks.signal as AbortSignal;
     expect(signal.aborted).toBe(false);

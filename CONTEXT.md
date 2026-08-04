@@ -50,14 +50,6 @@ A thinking-level selection resolved through the same internal precedence chain
 as the model and normalized to the selected model's supported levels. It is not
 a public `Agent`-tool spawn parameter.
 
-**Soft turn limit**
-
-The turn count at which a subagent receives an instruction to wrap up and return a final answer.
-
-**Grace turns**
-
-Additional turns allowed after the soft turn limit before the session is hard-aborted. The default is 6.
-
 ### Working trees
 
 **Working tree path**
@@ -105,7 +97,7 @@ An append-only, human-readable transcript under the system temporary directory. 
 The extension exposes only four public tools:
 
 - `Agent` starts one root agent in the foreground or background. Its public
-  schema does not expose model, thinking, turn, or token spawn overrides.
+  schema does not expose model, thinking, or token spawn overrides.
 - `AgentContinue` resumes one retained, successfully completed root session.
   A background continuation owns a separate automatic nudge claim.
 - `StopAgent` stops one running or queued root agent.
@@ -123,4 +115,3 @@ append-only output log are the diagnostic surfaces.
 - Foreground results return inline; each background execution receives its own **nudge**.
 - Root records are scheduled by one global queue and concurrency limit. `AgentContinue` reuses a retained completed root session and consumes a normal slot.
 - AsyncLocalStorage isolates each subagent session while it is created and while extensions are bound. No subagent receives an `Agent` custom tool or any root control tool.
-- The **soft turn limit** triggers wrap-up guidance; **grace turns** bound the remaining execution.

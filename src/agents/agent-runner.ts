@@ -36,7 +36,7 @@ import { type CompactionInfo, type EnvInfo, type RunCallbacks, type RunTunables,
 import { type AgentConfig, type SubagentType, type SystemPromptMode } from "./types.js";
 import { createSubagentRuntimeContext, getStore, getSubagentRuntimeContext, runWithSubagentRuntime } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
-import { DEFAULT_GRACE_TURNS, CUSTOM_PROMPT_PATH } from "../config/config-io.js";
+import { CUSTOM_PROMPT_PATH } from "../config/config-io.js";
 import { revalidateWorktreePath } from "../spawn/worktree-validator.js";
 
 // Cache: extension path → unscoped package name (lowercased), or undefined if not found
@@ -97,12 +97,6 @@ function resolvePackageShortName(extPath: string): string | undefined {
   }
 }
 
-/** Normalize max turns. undefined or 0 = unlimited, otherwise minimum 1. */
-function normalizeMaxTurns(n: number | undefined): number | undefined {
-  if (n == null || n === 0) return undefined;
-  return Math.max(1, n);
-}
-
 /**
  * Internal usage channel for billable work that is not an assistant turn.
  * These usages must not affect assistant-only input-delta metrics.
@@ -133,10 +127,8 @@ export interface RunOptions extends RunTunables, RunCallbacks, SupplementalUsage
 interface RunResult {
   responseText: string;
   session: AgentSession;
-  /** True if the agent was hard-aborted (max_turns + grace exceeded). */
+  /** True when the execution was aborted through its AbortSignal. */
   aborted: boolean;
-  /** True if the agent hit the soft turn limit and wrapped up within grace turns. */
-  turnLimited: boolean;
 }
 
 /**
@@ -549,19 +541,6 @@ async function initSession(
   if (thinkingLevel) sessionOpts.thinkingLevel = thinkingLevel;
   const result = await createAgentSession(sessionOpts);
 
-  // Inject max_tokens into provider request payloads.
-  // Spawn-time value wins over agent config (frontmatter).
-  const maxTokens = options.maxTokens ?? agentConfig?.maxTokens;
-  if (maxTokens != null && maxTokens > 0 && model) {
-    const field = (model.compat as any)?.maxTokensField ?? "max_tokens";
-    const origOnPayload = result.session.agent.onPayload;
-    result.session.agent.onPayload = async (payload, m) => {
-      const applied = origOnPayload ? (await origOnPayload(payload, m)) ?? payload : payload;
-      const obj = typeof applied === "object" && applied && !Array.isArray(applied) ? applied : {};
-      return { ...obj, [field]: maxTokens };
-    };
-  }
-
   return result;
 }
 
@@ -605,44 +584,12 @@ async function createAndConfigureSession(
   }
 }
 /**
- * Phase 4: Subscribe to turn_end events for graceful max_turns enforcement.
- * Returns an unsubscribe function and state getters.
- */
-function wireTurnTracking(
-  session: AgentSession,
-  options: Pick<RunOptions, "maxTurns" | "graceTurns" | "onTurnEnd">,
-) {
-  let turnCount = 0;
-  const maxTurns = normalizeMaxTurns(options.maxTurns);
-  let softLimitReached = false;
-  let aborted = false;
-  const graceTurns = options.graceTurns ?? DEFAULT_GRACE_TURNS;
-
-  const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-    if (event.type !== "turn_end") return;
-    turnCount++;
-    options.onTurnEnd?.(turnCount);
-    if (maxTurns == null) return;
-    if (!softLimitReached && turnCount >= maxTurns) {
-      softLimitReached = true;
-      session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
-    } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
-      aborted = true;
-      session.abort();
-    }
-  });
-
-  return { unsubscribe, getAborted: () => aborted, getTurnLimited: () => softLimitReached };
-}
-
-/**
- * Phase 5: Execute the prompt turn loop with event wiring and cleanup.
+ * Execute the prompt with event wiring and cleanup.
  */
 async function runTurnLoop(
   session: AgentSession,
   prompt: string,
   options: AgentTurnOptions,
-  unsubTurns: () => void,
 ) {
   const unsubEvents = subscribeToSessionEvents(session, options);
   const collector = collectResponseText(session, options.onTextDelta);
@@ -650,7 +597,6 @@ async function runTurnLoop(
   try {
     await session.prompt(prompt);
   } finally {
-    unsubTurns();
     unsubEvents();
     collector.unsubscribe();
     cleanupAbort();
@@ -664,8 +610,7 @@ async function runTurnLoop(
  * pi/ctx/config/catalog inputs are needed.
  */
 export type AgentTurnOptions = Pick<RunOptions,
-  | "maxTurns" | "graceTurns" | "signal"
-  | "onTurnEnd" | "onToolActivity" | "onAssistantUsage" | "onSupplementalUsage" | "onCompaction" | "onTextDelta"
+  | "signal" | "onToolActivity" | "onAssistantUsage" | "onSupplementalUsage" | "onCompaction" | "onTextDelta"
 > & {
   /**
    * When the current turn emits no text, fall back to the last non-empty
@@ -679,23 +624,21 @@ export type AgentTurnOptions = Pick<RunOptions,
  * Execute one prompt turn on an already-created session.
  *
  * Shared by the initial spawn (runAgent) and every AgentContinue execution so
- * event wiring, turn tracking, and response collection behave identically on
- * the same session. Turn limits apply per execution.
+ * event wiring and response collection behave identically on the same session.
  */
 export async function executeAgentTurn(
   session: AgentSession,
   prompt: string,
   options: AgentTurnOptions,
-): Promise<{ responseText: string; aborted: boolean; turnLimited: boolean }> {
-  const { unsubscribe: unsubTurns, getAborted, getTurnLimited } = wireTurnTracking(session, options);
-  const text = await runTurnLoop(session, prompt, options, unsubTurns);
+): Promise<{ responseText: string; aborted: boolean }> {
+  const text = await runTurnLoop(session, prompt, options);
   // The history fallback is opt-in (initial runs only): a continuation that
   // produces no output must return an empty result rather than the previous
   // execution's assistant text.
   const responseText = options.fallbackToLastAssistantText === true
     ? text || getLastAssistantText(session)
     : text;
-  return { responseText, aborted: getAborted(), turnLimited: getTurnLimited() };
+  return { responseText, aborted: options.signal?.aborted === true };
 }
 
 // ── main entry ─────────────────────────────────────────────────────
@@ -793,9 +736,8 @@ async function runAgentImpl(
   }
   options.onSessionCreated?.(session);
 
-  const { responseText, aborted, turnLimited } = await executeAgentTurn(session, prompt, {
+  const { responseText, aborted } = await executeAgentTurn(session, prompt, {
     ...options,
-    maxTurns: options.maxTurns ?? agentConfig?.maxTurns,
     fallbackToLastAssistantText: true,
   });
 
@@ -805,5 +747,5 @@ async function runAgentImpl(
     else console.warn(`[pi-subagents-lean] ${msg}`);
   }
 
-  return { responseText, session, aborted, turnLimited };
+  return { responseText, session, aborted };
 }

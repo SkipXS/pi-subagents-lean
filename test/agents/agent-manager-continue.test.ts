@@ -48,7 +48,6 @@ type MockRunResult = {
   responseText: string;
   session: ReturnType<typeof mockAgentSession>;
   aborted: boolean;
-  turnLimited: boolean;
 };
 
 function mockRunResult(overrides?: Partial<MockRunResult>): MockRunResult {
@@ -56,7 +55,6 @@ function mockRunResult(overrides?: Partial<MockRunResult>): MockRunResult {
     responseText: "done",
     session: mockAgentSession(),
     aborted: false,
-    turnLimited: false,
     ...overrides,
   };
 }
@@ -110,10 +108,9 @@ describe("AgentManager.continueAgent", () => {
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
       responseText: "follow-up result",
       aborted: false,
-      turnLimited: false,
     });
 
-    const { executionId, record, promise } = manager.continueAgent(id, "follow up", { graceTurns: 6 });
+    const { executionId, record, promise } = manager.continueAgent(id, "follow up", {});
     const result = await promise;
 
     expect(result).toBe("follow-up result");
@@ -125,10 +122,6 @@ describe("AgentManager.continueAgent", () => {
     expect(turnPrompt).toBe("follow up");
     expect(turnOptions.signal).toBeInstanceOf(AbortSignal);
     expect(turnOptions.signal!.aborted).toBe(false);
-    expect(typeof turnOptions.onTurnEnd).toBe("function");
-    // The record's spawn turn budget is reused per execution.
-    expect(turnOptions.maxTurns).toBeUndefined();
-    expect(turnOptions.graceTurns).toBe(6); // explicit per-execution override
 
     expect(record.lifecycle.status).toBe("completed");
     expect(record.result).toBe("follow-up result");
@@ -164,7 +157,7 @@ describe("AgentManager.continueAgent", () => {
     const { promise } = manager.continueAgent(id, "second task", {});
     const turnOptions = mockModules.mockExecuteAgentTurn.mock.calls[0]![2];
     turnOptions.onAssistantUsage({ input: 20, output: 6, cacheWrite: 1, cacheRead: 4, cost: 0.02 });
-    secondRun.resolve({ responseText: "second", aborted: false, turnLimited: false });
+    secondRun.resolve({ responseText: "second", aborted: false });
     await promise;
 
     expect(record.stats.executions![0]!.usage).toMatchObject({ input: 10, output: 5, cacheWrite: 2, cacheRead: 3 });
@@ -176,25 +169,21 @@ describe("AgentManager.continueAgent", () => {
     expect(manager.getTotalAgentCost()).toBeCloseTo(0.03);
   });
 
-  it("records per-execution tool-use and compaction deltas against nonzero initial totals", async () => {
+  it("records per-execution usage and compaction deltas against nonzero initial totals", async () => {
     manager = new AgentManager(onComplete);
     const firstRun = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(firstRun.promise);
     const id = manager.spawn(fakePi(), fakeCtx(), "scout", "initial task", { description: "initial" });
     const record = manager.getRecord(id)!;
 
-    // Initial execution accumulates real usage, tool uses, and compactions.
+    // Initial execution accumulates real usage and compactions.
     const runOptions = mockModules.mockRunAgent.mock.calls[0]![3];
     runOptions.onAssistantUsage({ input: 10, output: 5, cacheWrite: 2, cacheRead: 3, cost: 0.01 });
-    runOptions.onToolActivity({ type: "start", toolName: "read" });
-    runOptions.onToolActivity({ type: "end", toolName: "read" });
-    runOptions.onToolActivity({ type: "end", toolName: "grep" });
     runOptions.onCompaction({ reason: "threshold", tokensBefore: 100 });
     firstRun.resolve(mockRunResult());
     await record.execution.promise;
 
     // The initial execution summary carries its own delta only.
-    expect(record.stats.executions![0]!.toolUses).toBe(2);
     expect(record.stats.executions![0]!.compactionCount).toBe(1);
 
     // Continuation runs on top of the nonzero initial totals.
@@ -203,48 +192,19 @@ describe("AgentManager.continueAgent", () => {
     const { promise } = manager.continueAgent(id, "second task", {});
     const turnOptions = mockModules.mockExecuteAgentTurn.mock.calls[0]![2];
     turnOptions.onAssistantUsage({ input: 20, output: 6, cacheWrite: 1, cacheRead: 4, cost: 0.02 });
-    turnOptions.onToolActivity({ type: "end", toolName: "read" });
-    turnOptions.onToolActivity({ type: "end", toolName: "read" });
-    turnOptions.onToolActivity({ type: "end", toolName: "read" });
     turnOptions.onCompaction({ reason: "overflow", tokensBefore: 200 });
-    secondRun.resolve({ responseText: "second", aborted: false, turnLimited: false });
+    secondRun.resolve({ responseText: "second", aborted: false });
     await promise;
 
     // The continuation summary reports only its own delta, never the initial
     // (or cumulative) totals.
-    expect(record.stats.executions![1]!.toolUses).toBe(3);
     expect(record.stats.executions![1]!.compactionCount).toBe(1);
     expect(record.stats.executions![1]!.usage).toMatchObject({ input: 20, output: 6, cacheWrite: 1, cacheRead: 4 });
     expect(record.stats.executions![1]!.usage!.cost).toBeCloseTo(0.02);
-    // Cumulative record totals and the session cost keep lifetime semantics.
-    expect(record.stats.toolUses).toBe(5);
+    // Cumulative usage and compaction totals keep lifetime semantics.
     expect(record.stats.compactionCount).toBe(2);
     expect(record.stats.lifetimeUsage).toEqual({ input: 30, output: 11, cacheWrite: 3, cost: 0.03 });
     expect(manager.getTotalAgentCost()).toBeCloseTo(0.03);
-  });
-
-  it("accumulates per-execution turn counts into the cumulative record total", async () => {
-    manager = new AgentManager(onComplete);
-    const firstRun = makeResolvablePromise();
-    mockModules.mockRunAgent.mockReturnValueOnce(firstRun.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "initial task", { description: "initial" });
-    const record = manager.getRecord(id)!;
-
-    const runOptions = mockModules.mockRunAgent.mock.calls[0]![3];
-    runOptions.onTurnEnd(2);
-    firstRun.resolve(mockRunResult());
-    await record.execution.promise;
-
-    const secondRun = makeResolvablePromise();
-    mockModules.mockExecuteAgentTurn.mockReturnValueOnce(secondRun.promise);
-    const { promise } = manager.continueAgent(id, "second task", {});
-    mockModules.mockExecuteAgentTurn.mock.calls[0]![2].onTurnEnd(3);
-    secondRun.resolve({ responseText: "second", aborted: false, turnLimited: false });
-    await promise;
-
-    expect(record.stats.executions![0]!.turnCount).toBe(2);
-    expect(record.stats.executions![1]!.turnCount).toBe(3);
-    expect(record.stats.turnCount).toBe(5);
   });
 
   it("rejects a continuation while the agent is running", async () => {
@@ -288,10 +248,6 @@ describe("AgentManager.continueAgent", () => {
     expect(() => manager.continueAgent(aborted.id, "nope", {}))
       .toThrow("is aborted and cannot be continued");
 
-    const turnLimited = await spawnCompletedAgent("limited", { runResult: { turnLimited: true } });
-    expect(() => manager.continueAgent(turnLimited.id, "nope", {}))
-      .toThrow("is turn_limited and cannot be continued");
-
     mockModules.mockRunAgent.mockRejectedValueOnce(new Error("boom"));
     const failedId = manager.spawn(fakePi(), fakeCtx(), "scout", "fail", { description: "fail" });
     await manager.getRecord(failedId)!.execution.promise;
@@ -334,7 +290,7 @@ describe("AgentManager.continueAgent", () => {
     expect(() => manager.continueAgent(firstId, "again", {}))
       .toThrow("is running and cannot be continued");
 
-    continuationRun.resolve({ responseText: "continued", aborted: false, turnLimited: false });
+    continuationRun.resolve({ responseText: "continued", aborted: false });
     const result = await promise;
     expect(result).toBe("continued");
     expect(record.lifecycle.status).toBe("completed");
@@ -357,7 +313,7 @@ describe("AgentManager.continueAgent", () => {
     expect(record.stats.executions![1]).toMatchObject({ mode: "background", status: "running" });
     expect(executionId).toBe(record.stats.executions![1]!.id);
 
-    bg.resolve({ responseText: "bg done", aborted: false, turnLimited: false });
+    bg.resolve({ responseText: "bg done", aborted: false });
     await promise;
     expect(record.stats.executions![1]).toMatchObject({ mode: "background", status: "completed" });
     expect(record.lifecycle.status).toBe("completed");
@@ -367,13 +323,13 @@ describe("AgentManager.continueAgent", () => {
     manager = new AgentManager(onComplete);
     const { id } = await spawnCompletedAgent("initial task");
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "first follow-up", aborted: false, turnLimited: false,
+      responseText: "first follow-up", aborted: false,
     });
     const first = manager.continueAgent(id, "follow-up one", {});
     await first.promise;
 
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "second follow-up", aborted: false, turnLimited: false,
+      responseText: "second follow-up", aborted: false,
     });
     const second = manager.continueAgent(id, "follow-up two", {});
     await second.promise;
@@ -394,8 +350,6 @@ describe("AgentManager.continueAgent", () => {
     const initialRecord = manager.getRecord(id)!;
     initialRecord.stats.lifetimeUsage = { input: 101, output: 202, cacheWrite: 303, cost: 0.404 };
     initialRecord.stats.cacheRead = 505;
-    initialRecord.stats.toolUses = 6;
-    initialRecord.stats.turnCount = 7;
     initialRecord.stats.compactionCount = 8;
 
     const blocker = makeResolvablePromise();
@@ -413,8 +367,6 @@ describe("AgentManager.continueAgent", () => {
     expect(record.stats.executions![1]).toMatchObject({
       status: "stopped",
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
-      turnCount: 0,
-      toolUses: 0,
       compactionCount: 0,
     });
     const foregroundDetails = buildAgentDetails(record, { includeStats: true });
@@ -424,11 +376,9 @@ describe("AgentManager.continueAgent", () => {
       cacheRead: 0,
       cacheWrite: 0,
       cost: 0,
-      turnCount: 0,
-      toolUses: 0,
       compactions: 0,
       compactionCount: 0,
-      currentExecution: { status: "stopped", turnCount: 0, toolUses: 0, compactionCount: 0 },
+      currentExecution: { status: "stopped", compactionCount: 0 },
     });
     expect(foregroundDetails.durationMs).toBeGreaterThanOrEqual(0);
     expect(mockModules.mockExecuteAgentTurn).not.toHaveBeenCalled();
@@ -452,7 +402,7 @@ describe("AgentManager.continueAgent", () => {
     expect(manager.abort(id, "agent")).toBe(true);
     expect(manager.getRecord(id)!.lifecycle.status).toBe("stopped");
 
-    running.resolve({ responseText: "partial", aborted: true, turnLimited: false });
+    running.resolve({ responseText: "partial", aborted: true });
     await promise;
     const record = manager.getRecord(id)!;
     expect(record.lifecycle.status).toBe("stopped");
@@ -494,8 +444,6 @@ describe("AgentManager.continueAgent", () => {
       status: "error",
       error: "start boom",
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
-      turnCount: 0,
-      toolUses: 0,
       compactionCount: 0,
     });
     expect(record.execution.outputLog).toBeUndefined();
@@ -587,8 +535,6 @@ describe("AgentManager.continueAgent", () => {
     expect(record.stats.executions![1]).toMatchObject({
       status: "stopped",
       usage: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
-      turnCount: 0,
-      toolUses: 0,
       compactionCount: 0,
     });
     expect(mockModules.mockExecuteAgentTurn).not.toHaveBeenCalled();
@@ -603,7 +549,7 @@ describe("AgentManager.continueAgent", () => {
     manager = new AgentManager(onComplete);
     const { id } = await spawnCompletedAgent("initial task");
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "partial", aborted: true, turnLimited: false,
+      responseText: "partial", aborted: true,
     });
     const { promise } = manager.continueAgent(id, "second", {});
     await promise;
@@ -655,7 +601,7 @@ describe("AgentManager.continueAgent", () => {
 
     // A short prefix matching exactly one retained record resolves.
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "ok", aborted: false, turnLimited: false,
+      responseText: "ok", aborted: false,
     });
     const { promise } = manager.continueAgent("agent-0000000", "short id", {});
     await promise;
@@ -697,7 +643,7 @@ describe("AgentManager.continueAgent", () => {
     expect(mockModules.fsMock.writeFileSync).toHaveBeenCalledTimes(1); // initial [USER] entry
 
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "second", aborted: false, turnLimited: false,
+      responseText: "second", aborted: false,
     });
     const { promise } = manager.continueAgent(id, "second task", {});
     await promise;
@@ -723,7 +669,7 @@ describe("AgentManager.continueAgent", () => {
     record.execution.outputLog = outputLog as any;
 
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "continued", aborted: false, turnLimited: false,
+      responseText: "continued", aborted: false,
     });
     const { promise } = manager.continueAgent(id, "second task", {});
     expect(outputLog.append).toHaveBeenCalledWith("second task");
@@ -744,27 +690,10 @@ describe("AgentManager.continueAgent", () => {
     const first = manager.continueAgent(id, "second", {});
     expect(record.execution.outputLog).toBeDefined();
 
-    secondRun.resolve({ responseText: "second done", aborted: false, turnLimited: false });
+    secondRun.resolve({ responseText: "second done", aborted: false });
     await first.promise;
     // Terminal again: the continuation log is finalized and detached.
     expect(record.execution.outputLog).toBeUndefined();
-  });
-
-  it("reuses the spawn's stored maxTurns and graceTurns per continuation execution", async () => {
-    manager = new AgentManager(onComplete);
-    mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "initial", {
-      description: "initial", maxTurns: 4, graceTurns: 9,
-    });
-    await manager.getRecord(id)!.execution.promise;
-
-    mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "second", aborted: false, turnLimited: false,
-    });
-    const { promise } = manager.continueAgent(id, "second", {});
-    await promise;
-    expect(mockModules.mockExecuteAgentTurn.mock.calls[0]![2].maxTurns).toBe(4);
-    expect(mockModules.mockExecuteAgentTurn.mock.calls[0]![2].graceTurns).toBe(9);
   });
 
   it("starts the continuation immediately on a completed record", async () => {
@@ -772,7 +701,7 @@ describe("AgentManager.continueAgent", () => {
     const session = mockAgentSession(["user"]);
     const { id } = await spawnCompletedAgent("initial task", { session });
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "immediate", aborted: false, turnLimited: false,
+      responseText: "immediate", aborted: false,
     });
 
     const { promise } = manager.continueAgent(id, "follow up", {});
@@ -780,41 +709,6 @@ describe("AgentManager.continueAgent", () => {
     expect(manager.getRecord(id)!.lifecycle.status).toBe("running");
     await promise;
     expect(manager.getRecord(id)!.lifecycle.status).toBe("completed");
-  });
-
-  it("persists the effective configured maxTurns and default graceTurns for continuations", async () => {
-    manager = new AgentManager(onComplete);
-    // No per-spawn override: the runner's effective budget comes from the
-    // agent config (maxTurns) and the global default (graceTurns). The record
-    // must persist those effective values so continuations reuse them.
-    mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "initial", {
-      description: "initial",
-      agentConfig: { name: "scout", description: "", systemPrompt: "", maxTurns: 7 },
-    });
-    const record = manager.getRecord(id)!;
-    expect(record.stats.maxTurns).toBe(7);
-    expect(record.stats.graceTurns).toBe(6); // DEFAULT_GRACE_TURNS
-    await record.execution.promise;
-
-    mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "second", aborted: false, turnLimited: false,
-    });
-    const { promise } = manager.continueAgent(id, "second", {});
-    await promise;
-    // The continuation reuses the persisted effective budget.
-    expect(mockModules.mockExecuteAgentTurn.mock.calls[0]![2].maxTurns).toBe(7);
-    expect(mockModules.mockExecuteAgentTurn.mock.calls[0]![2].graceTurns).toBe(6);
-  });
-
-  it("normalizes a zero maxTurns to unlimited when persisting the effective budget", async () => {
-    manager = new AgentManager(onComplete);
-    mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "initial", {
-      description: "initial", maxTurns: 0,
-    });
-    expect(manager.getRecord(id)!.stats.maxTurns).toBeUndefined();
-    await manager.getRecord(id)!.execution.promise;
   });
 
   it("sets the queued initial execution summary to running when the runner starts", async () => {
@@ -885,79 +779,38 @@ describe("AgentManager.continueAgent", () => {
     expect(onComplete).toHaveBeenCalledTimes(2); // initial + failed continuation
   });
 
-  it("ignores captured stale onTurnEnd and onTextDelta callbacks from an older execution", async () => {
+  it("ignores captured stale text callbacks from an older execution", async () => {
     manager = new AgentManager(onComplete);
     const { id } = await spawnCompletedAgent("initial task");
     const onTextDelta = vi.fn();
 
-    // Execution 1: capture its callbacks, drive its turn end, complete it.
     const firstRun = makeResolvablePromise();
     mockModules.mockExecuteAgentTurn.mockReturnValueOnce(firstRun.promise);
     const first = manager.continueAgent(id, "first follow-up", { onTextDelta });
     const firstCallbacks = mockModules.mockExecuteAgentTurn.mock.calls[0]![2];
-    firstCallbacks.onTurnEnd(2);
-    firstRun.resolve({ responseText: "first", aborted: false, turnLimited: false });
+    firstRun.resolve({ responseText: "first", aborted: false });
     await first.promise;
-    const record = manager.getRecord(id)!;
-    expect(record.stats.turnCount).toBe(3); // 1 initial default + 2
 
-    // Execution 2 claims the record and runs on the same session.
     const secondRun = makeResolvablePromise();
     mockModules.mockExecuteAgentTurn.mockReturnValueOnce(secondRun.promise);
     const second = manager.continueAgent(id, "second follow-up", { onTextDelta });
     const secondCallbacks = mockModules.mockExecuteAgentTurn.mock.calls[1]![2];
     onTextDelta.mockClear();
 
-    // A late turn-end/text delta from execution 1 arrives while execution 2
-    // runs: it must not mutate the cumulative total or the older summary, and
-    // must never reach the caller's result callback.
-    firstCallbacks.onTurnEnd(9);
     firstCallbacks.onTextDelta("stale", "stale full text");
     await Promise.resolve();
-    expect(record.stats.turnCount).toBe(3);
-    expect(record.stats.executions![1]!.turnCount).toBe(2);
     expect(onTextDelta).not.toHaveBeenCalled();
 
-    // The active execution's own callbacks still work.
-    secondCallbacks.onTurnEnd(1);
     secondCallbacks.onTextDelta("a", "second text");
     expect(onTextDelta).toHaveBeenCalledWith("a", "second text");
-    expect(record.stats.executions![2]!.turnCount).toBe(1);
 
-    secondRun.resolve({ responseText: "second", aborted: false, turnLimited: false });
+    secondRun.resolve({ responseText: "second", aborted: false });
     await second.promise;
-    expect(record.stats.turnCount).toBe(4); // 3 + 1
-    expect(record.stats.executions![2]).toMatchObject({ status: "completed", turnCount: 1, responseText: "second" });
+    expect(manager.getRecord(id)!.stats.executions![2]).toMatchObject({
+      status: "completed",
+      responseText: "second",
+    });
   });
-
-  it("ignores a stale initial-spawn onTurnEnd callback during a continuation", async () => {
-    manager = new AgentManager(onComplete);
-    const initialRun = makeResolvablePromise();
-    mockModules.mockRunAgent.mockReturnValueOnce(initialRun.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "initial task", { description: "initial" });
-    const record = manager.getRecord(id)!;
-    const initialCallbacks = mockModules.mockRunAgent.mock.calls[0]![3];
-    initialCallbacks.onTurnEnd(2);
-    initialRun.resolve(mockRunResult());
-    await record.execution.promise;
-    expect(record.stats.turnCount).toBe(2);
-
-    // The continuation claims the record; the initial spawn's delayed
-    // turn-end callback must not overwrite the cumulative total or the
-    // initial execution summary afterwards.
-    const contRun = makeResolvablePromise();
-    mockModules.mockExecuteAgentTurn.mockReturnValueOnce(contRun.promise);
-    const cont = manager.continueAgent(id, "follow-up", {});
-    initialCallbacks.onTurnEnd(7);
-    expect(record.stats.turnCount).toBe(2);
-    expect(record.stats.executions![0]!.turnCount).toBe(2);
-
-    contRun.resolve({ responseText: "done", aborted: false, turnLimited: false });
-    await cont.promise;
-    expect(record.stats.executions![1]).toMatchObject({ status: "completed", responseText: "done" });
-    expect(record.stats.turnCount).toBe(2); // unchanged by the stale callback
-  });
-
   it("ignores a stale usage callback from a finished execution during a later execution", async () => {
     manager = new AgentManager(onComplete);
     const getContextUsage = vi.fn(() => ({ percent: 10, contextWindow: 1000 }));
@@ -973,7 +826,7 @@ describe("AgentManager.continueAgent", () => {
     mockModules.mockExecuteAgentTurn.mockReturnValueOnce(firstRun.promise);
     const first = manager.continueAgent(id, "first follow-up", {});
     const firstCallbacks = mockModules.mockExecuteAgentTurn.mock.calls[0]![2];
-    firstRun.resolve({ responseText: "first", aborted: false, turnLimited: false });
+    firstRun.resolve({ responseText: "first", aborted: false });
     await first.promise;
     const record = manager.getRecord(id)!;
     const samplesAfterFirst = record.stats.contextStats?.count ?? 0;
@@ -987,20 +840,17 @@ describe("AgentManager.continueAgent", () => {
     // Late events from execution 1 arrive while execution 2 runs. They must
     // not mutate the record, observe the session, or reach a live consumer.
     const usageBefore = { ...record.stats.lifetimeUsage };
-    const toolUsesBefore = record.stats.toolUses;
     const compactionsBefore = record.stats.compactionCount;
     firstCallbacks.onAssistantUsage({ input: 1, output: 1, cacheWrite: 0, cacheRead: 0, cost: 0 });
-    firstCallbacks.onToolActivity({ type: "end", toolName: "stale" });
     firstCallbacks.onSupplementalUsage({ input: 2, output: 2, cacheWrite: 0, cacheRead: 0, cost: 0 });
     firstCallbacks.onCompaction({ reason: "threshold", tokensBefore: 500 });
     await Promise.resolve();
     expect(getContextUsage).not.toHaveBeenCalled();
     expect(record.stats.contextStats?.count ?? 0).toBe(samplesAfterFirst);
     expect(record.stats.lifetimeUsage).toEqual(usageBefore);
-    expect(record.stats.toolUses).toBe(toolUsesBefore);
     expect(record.stats.compactionCount).toBe(compactionsBefore);
 
-    secondRun.resolve({ responseText: "second", aborted: false, turnLimited: false });
+    secondRun.resolve({ responseText: "second", aborted: false });
     await second.promise;
     expect(record.stats.executions![2]).toMatchObject({ status: "completed", responseText: "second" });
   });
@@ -1013,7 +863,7 @@ describe("AgentManager.continueAgent", () => {
       throw new Error("output stream unavailable");
     });
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "continued", aborted: false, turnLimited: false,
+      responseText: "continued", aborted: false,
     });
 
     const { promise, record } = manager.continueAgent(id, "follow-up", {});
@@ -1028,7 +878,7 @@ describe("AgentManager.continueAgent", () => {
     const session = mockAgentSession();
     const { id } = await spawnCompletedAgent("initial task", { session });
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "continued", aborted: false, turnLimited: false,
+      responseText: "continued", aborted: false,
     });
     const { promise, record } = manager.continueAgent(id, "follow-up", {});
     await promise;
@@ -1071,7 +921,7 @@ describe("AgentManager.continueAgent", () => {
     expect(manager.getRecord(id)!.result).toBe("done");
 
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
-      responseText: "", aborted: false, turnLimited: false,
+      responseText: "", aborted: false,
     });
     const { promise, record } = manager.continueAgent(id, "empty turn", {});
     await promise;

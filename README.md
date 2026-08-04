@@ -72,11 +72,10 @@ catalog and operating advice.
 | `run_in_background` | no | Return immediately; this execution receives exactly one automatic completion nudge after a short delay. `forceBackground: true` can make all root launches background. |
 | `worktree_path` | no | Root-only absolute path or parent-CWD-relative path inside a worktree of the parent repository. It is validated with Git. A trusted selected worktree may add a spawn-local `.pi/agents/` overlay. |
 
-The public tool deliberately has no model, thinking, turn, or token
-parameters. Configure model and thinking through an agent definition or
-persistent/session settings; those values are applied internally and are not
-caller-controlled spawn overrides. Turn and token limits come from the agent
-definition. Every `Agent` call is a root launch owned by the parent session.
+The public tool deliberately has no model or thinking parameters. Configure
+model and thinking through an agent definition or persistent/session settings;
+those values are applied internally and are not caller-controlled spawn
+overrides. Every `Agent` call is a root launch owned by the parent session.
 
 In Pi's interactive tool rows, `Agent` displays the canonical role, resolved
 `provider/model-id`, normalized thinking level, and the complete prompt. The
@@ -89,19 +88,18 @@ its complete prompt.
 
 `AgentContinue({ agent_id, prompt, run_in_background })` continues a
 finished agent on its existing session, reusing its model, working directory,
-output log, and stored `max_turns`/`grace_turns` limits. `run_in_background`
-is a mandatory boolean (strict-mode tool schemas cannot declare optional
-parameters): pass `true` to acknowledge immediately and receive exactly one
-automatic completion nudge for this execution, or `false` to await the new
-execution's result. Delivery claims are per execution, so each background
-continuation gets its own nudge. Only retained root
-agents that completed successfully can be continued; running, queued, unsettled,
-stopped, aborted, turn-limited, or failed agents are rejected. A short `agent_id`
+and output log. `run_in_background` is a mandatory boolean (strict-mode tool
+schemas cannot declare optional parameters): pass `true` to acknowledge
+immediately and receive exactly one automatic completion nudge for this
+execution, or `false` to await the new execution's result. Delivery claims are
+per execution, so each background continuation gets its own nudge. Only
+retained root agents that completed successfully can be continued; running,
+queued, unsettled, stopped, aborted, or failed agents are rejected. A short `agent_id`
 prefix is accepted only when it matches
 exactly one retained agent; ambiguous prefixes are rejected. Each execution is
-retained as its own entry (`id`, `mode`, `status`, `usage`, `turnCount`) in the
-record's `executions` history and the accumulated usage, cost, tool, turn, and
-compaction totals stay cumulative across executions.
+retained as its own entry (`id`, `mode`, `status`, `usage`, `compactionCount`) in
+the record's `executions` history and usage, cost, and compaction totals stay
+cumulative across executions.
 
 ### `StopAgent`
 
@@ -144,7 +142,6 @@ extensions: false
 skills: false
 model: zai/glm-5.2
 thinking: high
-max_turns: 80
 ---
 
 Review only the delegated change. Focus on injection, authorization, and
@@ -252,14 +249,12 @@ exclude_tools: [tavily/*]
 # Use exclude_extensions: [tavily] instead to prevent that extension loading.
 ```
 
-#### Model, reasoning, and limits
+#### Model and reasoning
 
 | Field | Accepted value | Default | Behavior |
 |---|---|---|---|
 | `model` | `provider/model-id` | resolved precedence | Role-level model candidate. Session and persistent overrides can take precedence; the parent model is the final fallback. |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | resolved precedence | Role-level reasoning candidate; invalid values are ignored. Provider capability normalization may adjust the selected level. |
-| `max_turns` | number | unlimited | Soft limit. At the limit the agent is instructed to wrap up; it is hard-aborted after `graceTurns` more turns (`0` aborts on the next turn). |
-| `max_tokens` | number | unlimited | Maximum output tokens per model response, passed through as the provider's completion-token limit. |
 
 ### Parent orchestration guidance
 
@@ -357,10 +352,9 @@ viewer, or manual steering surface. Use the four tools from the parent session:
 records. Each background execution delivers one automatic nudge through Pi's
 normal message path, including every background continuation.
 
-Finished records are retained for `finishedRetentionMinutes`, and thinking
-output can be streamed to the append-only output log with
-`outputThinkingBufferSize`. These settings are useful for headless diagnostics
-and do not require a custom UI.
+Finished records are retained for `finishedRetentionMinutes`. Thinking output is
+written to the append-only output log at turn end. These settings are useful for
+headless diagnostics and do not require a custom UI.
 
 ## Configuration reference
 
@@ -376,7 +370,6 @@ and per-role thinking overrides live in `thinkingOverrides`.
 | `agent.<role>` | absent | Persisted model override for that role. A string wins at its precedence level; `null` does not select a model. |
 | `agent.defaultThinking` | absent | Persisted global thinking fallback. |
 | `thinkingOverrides.<role>` | absent | Persisted thinking override for that role. |
-| `agent.graceTurns` | `6` | Extra turns after a soft limit before hard abort. |
 | `agent.forceBackground` | `false` | Make every root spawn background, even when its call requests foreground. |
 | `concurrency.default` | `4` | Global simultaneous-root-agent limit; excess root spawns queue. |
 | `agent.disableDefaultAgents` | `false` | Exclude bundled roles from the next parent refresh and on-demand discovery. |
@@ -391,19 +384,15 @@ and per-role thinking overrides live in `thinkingOverrides`.
 | JSON path | Default | Behavior |
 |---|---:|---|
 | `agent.finishedRetentionMinutes` | `60` | Retain completed records for `AgentStatus` and `AgentContinue`. |
-| `agent.outputThinkingBufferSize` | `0` | Thinking-log buffer in characters: `0` writes at turn end; positive values flush during streaming near sentence boundaries. |
 
 Older UI-only keys such as `widgetMaxLines`, `widgetCompact`, `showCost`, and
 `showTools` are accepted and ignored when loading existing files. Deprecated
 nested-delegation fields (`delegate_to`, `max_child_agents`, and
 `maxNestingDepth`) are also accepted for migration compatibility, but have no
-effect and are removed from newly written configuration. The former
-`agent.defaultMaxTurns` field is ignored and dropped during config
-normalization; it never supplies a root turn-limit fallback. Legacy `mode`,
+effect and are removed from newly written configuration. Legacy `mode`,
 `ecoModelOverrides`, and `ecoThinkingOverrides` keys are also tolerated and
-removed from normalized writes. Use `max_turns` in Agent Markdown for a role
-limit. `finishedRetentionMinutes` and `outputThinkingBufferSize` remain
-functional because they govern retention and output logs, not presentation.
+removed from normalized writes. `finishedRetentionMinutes` remains functional
+because it governs record retention, not presentation.
 Example configuration:
 
 ```json
@@ -412,7 +401,6 @@ Example configuration:
     "default": "zai/glm-5.2",
     "defaultThinking": "medium",
     "forceBackground": false,
-    "graceTurns": 6,
     "orchestrationPrompt": true,
     "includeContextFiles": true,
     "loadSkillsImplicitly": false,
@@ -454,7 +442,7 @@ newlines can continue on an unprefixed log line.
 2026-05-27T12:00:00.000Z [USER] Find all authentication files
 2026-05-27T12:00:02.000Z [TOOL] read("src/auth/index.ts")
 2026-05-27T12:00:15.000Z [ASSISTANT] I found the authentication module...
-2026-05-27T12:00:45.000Z [DONE] 5 turns, 12 tool uses, 12.3k tokens, $0.024
+2026-05-27T12:00:45.000Z [DONE] 12.3k tokens, $0.024
 ```
 
 ### Requirements
