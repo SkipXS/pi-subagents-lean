@@ -281,7 +281,7 @@ describe("executeAgentTool — explicit agent type", () => {
       display: { type: "general-purpose", description: "Test agent" },
       lifecycle: { status: "completed", startedAt: 0, completedAt: 1 },
       execution: {},
-      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, cacheRead: 0, compactionCount: 0 },
     });
 
     const result = await executeAgentTool("tc-empty-result", makeParams(), undefined, undefined, ctx);
@@ -297,7 +297,7 @@ describe("executeAgentTool — explicit agent type", () => {
       display: { type: "general-purpose", description: "Test agent" },
       lifecycle: { status: "stopped", stoppedBy: "agent", startedAt: 0, completedAt: 1 },
       execution: {},
-      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, cacheRead: 0, compactionCount: 0 },
     });
 
     expect(text).toBe(
