@@ -235,6 +235,7 @@ export class AgentManager {
           id: executionId,
           prompt,
           mode: options.isBackground ? "background" : "foreground",
+          kind: "new",
           status,
           startedAt: now,
         }],
@@ -401,6 +402,7 @@ export class AgentManager {
       id: executionId,
       prompt,
       mode: request.isBackground ? "background" : "foreground",
+      kind: "continued",
       status: queued ? "queued" : "running",
       startedAt,
     };

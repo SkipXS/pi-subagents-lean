@@ -127,10 +127,12 @@ describe("AgentManager.continueAgent", () => {
     expect(record.result).toBe("follow-up result");
     expect(record.lifecycle.settled).toBe(true);
     expect(record.stats.executions).toHaveLength(2);
+    expect(record.stats.executions![0]!.kind).toBe("new");
     expect(executionId).toBe(record.stats.executions![1]!.id);
     expect(record.stats.executions![1]).toMatchObject({
       prompt: "follow up",
       mode: "foreground",
+      kind: "continued",
       status: "completed",
       responseText: "follow-up result",
       deliveredText: "follow-up result",

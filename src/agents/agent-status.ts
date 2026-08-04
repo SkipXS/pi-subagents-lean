@@ -10,6 +10,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 import { getCoordinator, getManager } from "../shell.js";
+import { executionKind, formatExecutionLabels } from "./execution-display.js";
 
 /**
  * Format a single agent record as "short_id (type) status [delivery state]".
@@ -17,7 +18,12 @@ import { getCoordinator, getManager } from "../shell.js";
 function formatAgent(record: AgentRecord): string {
   const shortId = record.id.slice(0, SHORT_ID_LENGTH);
   const delivery = record.delivery ? ` delivery:${record.delivery.state}` : "";
-  return `${shortId} (${record.display.type}) ${record.lifecycle.status}${delivery}`;
+  const executions = record.stats?.executions;
+  const latest = executions?.at(-1);
+  const execution = latest
+    ? ` | ${formatExecutionLabels(latest.mode, executionKind(latest, (executions?.length ?? 1) - 1))}`
+    : "";
+  return `${shortId} (${record.display.type}) ${record.lifecycle.status}${execution}${delivery}`;
 }
 
 /**

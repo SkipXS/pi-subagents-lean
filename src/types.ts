@@ -123,6 +123,9 @@ export type BackgroundDeliveryState = "pending" | "accepted" | "failed" | "aband
 /** Whether an execution runs in the foreground (awaited) or background (notification). */
 export type AgentExecutionMode = "foreground" | "background";
 
+/** Whether an execution starts a new session or continues an existing one. */
+export type AgentExecutionKind = "new" | "continued";
+
 /**
  * Per-execution summary retained on the record for each prompt execution on
  * an agent session (the initial spawn plus each AgentContinue execution). Each
@@ -136,6 +139,8 @@ export interface AgentExecutionSummary {
   /** Prompt that started this execution. */
   prompt: string;
   mode: AgentExecutionMode;
+  /** Optional so records persisted before this field was introduced remain valid. */
+  kind?: AgentExecutionKind;
   /** "queued" | "running" while active; terminal status after completion. */
   status: AgentStatus;
   startedAt: number;

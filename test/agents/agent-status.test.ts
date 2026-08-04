@@ -63,7 +63,16 @@ describe("AgentStatus tool execute behavior", () => {
 
   it("formats each agent as {shortId} ({type}) {status}", async () => {
     mockListAgents.mockReturnValue([
-      { id: "abc123def456ghi", display: { type: "builder" }, lifecycle: { status: "running" } },
+      {
+        id: "abc123def456ghi",
+        display: { type: "builder" },
+        lifecycle: { status: "running" },
+        // Legacy summaries omit kind; the second execution is safely derived as continued.
+        stats: { executions: [
+          { id: "first", prompt: "one", mode: "foreground", status: "completed", startedAt: 1 },
+          { id: "second", prompt: "two", mode: "background", status: "running", startedAt: 2 },
+        ] },
+      },
     ]);
 
     const { executeAgentStatusTool } = await import("../../src/agents/agent-status.js");
@@ -79,6 +88,7 @@ describe("AgentStatus tool execute behavior", () => {
     const text = result.content[0].text;
     // Contract: agent entries use "id (type) status" format, short ID is 8 chars
     expect(text).toMatch(/[a-z0-9]{8} \(builder\) running/);
+    expect(text).toContain("Mode: Background | Run: Continued");
     expect(text).toContain("Don't poll");
   });
 

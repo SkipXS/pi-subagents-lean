@@ -10,6 +10,7 @@ import type { AgentManager, SpawnOptions } from "../agents/agent-manager.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import { getAgentConfig, resolveType, snapshotAgentConfig } from "../agents/agent-types.js";
 import { buildAgentDetails } from "../agents/tool-execution.js";
+import { executionKind, formatExecutionLabels } from "../agents/execution-display.js";
 
 /**
  * spawn-coordinator.ts — Spawn-and-track coordination for subagents.
@@ -247,7 +248,26 @@ export class SpawnCoordinator {
     const entry = this.latestDelivery(agentId);
     if (this.disposed || !entry || !record || !isTerminal(record) || entry.state !== "pending") return;
     entry.completed = true;
-    entry.payload ??= this.capturePayload(record, record.lifecycle.status);
+    const executions = record.stats.executions;
+    const retained = executions?.find((candidate) => candidate.id === entry.executionId) ?? executions?.at(-1);
+    const index = retained ? (executions?.indexOf(retained) ?? 0) : 0;
+    const execution: AgentExecutionSummary = retained
+      ? {
+        ...retained,
+        kind: executionKind(retained, index),
+        status: record.lifecycle.status,
+        responseText: record.result ?? retained.responseText,
+      }
+      : {
+        id: entry.executionId,
+        prompt: "",
+        mode: "background",
+        kind: "new",
+        status: record.lifecycle.status,
+        startedAt: record.lifecycle.startedAt,
+        responseText: record.result,
+      };
+    entry.payload ??= this.capturePayload(record, execution);
     this.scheduleEntry(entry);
   }
 
@@ -260,7 +280,7 @@ export class SpawnCoordinator {
       const entry = this.backgroundDeliveries.get(execution.id);
       if (!entry || entry.completed) return;
       entry.completed = true;
-      entry.payload = this.capturePayload(record, execution.status);
+      entry.payload = this.capturePayload(record, execution);
       if (this.disposed || entry.signal?.aborted) {
         this.abandonBackgroundDelivery(entry, record);
         return;
@@ -383,15 +403,18 @@ export class SpawnCoordinator {
   }
 
   /** Freeze the completion-time payload; delivery never re-reads the mutable record. */
-  private capturePayload(record: AgentRecord, status: AgentStatus): BackgroundPayload {
-    const result = record.result ?? "";
+  private capturePayload(record: AgentRecord, execution: AgentExecutionSummary): BackgroundPayload {
+    const executions = record.stats.executions;
+    const index = executions?.indexOf(execution) ?? 0;
+    const labels = formatExecutionLabels(execution.mode, executionKind(execution, index));
+    const result = execution.responseText ?? record.result ?? "";
     return {
       agentId: record.id,
       type: record.display.type,
-      status,
+      status: execution.status,
       result,
-      content: `[Subagent "${record.display.type}" ${record.id.slice(0, SHORT_ID_LENGTH)} ${status}]\n\n${result}${getStatusNote(record.lifecycle)}`,
-      details: buildAgentDetails(record, { includeStats: true, includeStatus: true }),
+      content: `[Subagent "${record.display.type}" ${record.id.slice(0, SHORT_ID_LENGTH)} ${execution.status} | ${labels}]\n\nResponse:\n${result}${getStatusNote({ ...record.lifecycle, status: execution.status })}`,
+      details: buildAgentDetails(record, { includeStats: true, includeStatus: true, execution }),
     };
   }
 

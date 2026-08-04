@@ -131,7 +131,10 @@ vi.mock("../../src/agents/usage.js", () => ({
 }));
 
 // Import after mocks are in place
-import { executeAgentTool } from "../../src/agents/tool-execution.js";
+import {
+  executeAgentTool,
+  formatForegroundAgentResultContent,
+} from "../../src/agents/tool-execution.js";
 import { AGENT_RENDER_DETAILS_KEY } from "../../src/agents/agent-renderer.js";
 import * as agentTypes from "../../src/agents/agent-types.js";
 import * as utils from "../../src/utils.js";
@@ -254,16 +257,52 @@ describe("executeAgentTool — explicit agent type", () => {
           model: "openai/gpt-4o",
           thinking: "high",
           prompt,
+          mode: "foreground",
+          kind: "new",
         },
       },
     });
-    expect(result.content[0].text).toBe("done");
+    expect(result.content[0].text).toBe("Agent ID: agent-render-details\n\nResponse:\ndone");
+    expect(result.details.agentId).toBe("agent-render-details");
     expect(result.details[AGENT_RENDER_DETAILS_KEY]).toEqual({
       role: "general-purpose",
       model: "openai/gpt-4o",
       thinking: "low",
       prompt,
+      mode: "foreground",
+      kind: "new",
     });
+  });
+
+  it("keeps the canonical ID visible when a foreground agent returns no text", async () => {
+    mockGetRecord.mockReturnValueOnce({
+      id: "agent-empty-result",
+      result: "",
+      display: { type: "general-purpose", description: "Test agent" },
+      lifecycle: { status: "completed", startedAt: 0, completedAt: 1 },
+      execution: {},
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
+    });
+
+    const result = await executeAgentTool("tc-empty-result", makeParams(), undefined, undefined, ctx);
+
+    expect(result.content[0].text).toBe("Agent ID: agent-empty-result\n\nResponse:\n");
+    expect(result.details.agentId).toBe("agent-empty-result");
+  });
+
+  it("preserves an existing status note after the canonical ID", () => {
+    const text = formatForegroundAgentResultContent({
+      id: "agent-partial-result",
+      result: "partial",
+      display: { type: "general-purpose", description: "Test agent" },
+      lifecycle: { status: "stopped", stoppedBy: "agent", startedAt: 0, completedAt: 1 },
+      execution: {},
+      stats: { lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 }, compactionCount: 0 },
+    });
+
+    expect(text).toBe(
+      "Agent ID: agent-partial-result\n\nResponse:\npartial (stopped before completion — output is partial; the task was NOT finished)",
+    );
   });
 
   it("ignores non-schema model and thinking fields from the caller", async () => {
@@ -633,7 +672,8 @@ describe("executeAgentTool — worktree_path validation", () => {
     );
 
     expect(result.isError).toBeUndefined();
-    expect(result.content[0].text).toBe("Agent completed successfully");
+    expect(result.content[0].text).toBe("Agent ID: agent-id-123\n\nResponse:\nAgent completed successfully");
+    expect(result.details.agentId).toBe("agent-id-123");
   });
 
   it("does not crash the parent when validator throws unexpectedly", async () => {

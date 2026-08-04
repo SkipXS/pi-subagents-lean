@@ -193,6 +193,7 @@ describe("offline extension headless lifecycle", () => {
     }, undefined, undefined, ctx);
     expect(firstSpawn.isError).toBeUndefined();
     expect(firstSpawn.content[0].text).toMatch(/^\[Agent running\]/);
+    expect(firstSpawn.content[0].text).not.toContain("Response:");
     expect(api.api.sendMessage).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(sessions).toHaveLength(1));
     await vi.waitFor(() => expect(sessions[0].prompt).toHaveBeenCalledWith("Find the relevant files"));
@@ -206,7 +207,7 @@ describe("offline extension headless lifecycle", () => {
     expect(api.api.sendMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({
         customType: "subagent-result",
-        content: expect.stringContaining("First result"),
+        content: expect.stringContaining("\n\nResponse:\nFirst result"),
         display: true,
       }),
       { deliverAs: "followUp", triggerTurn: true },
@@ -228,7 +229,7 @@ describe("offline extension headless lifecycle", () => {
     expect(api.api.sendMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({
         customType: "subagent-result",
-        content: expect.stringContaining("Second result"),
+        content: expect.stringContaining("\n\nResponse:\nSecond result"),
         display: true,
       }),
       { deliverAs: "steer", triggerTurn: true },
@@ -256,7 +257,7 @@ describe("offline extension headless lifecycle", () => {
     expect(api.api.sendMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({
         customType: "subagent-result",
-        content: expect.stringContaining("Continued result"),
+        content: expect.stringContaining("\n\nResponse:\nContinued result"),
         display: true,
       }),
       { deliverAs: "steer", triggerTurn: true },
@@ -275,7 +276,7 @@ describe("offline extension headless lifecycle", () => {
     sessions[0].finish("FG result");
     const fgResult = await fgContinue;
     expect(fgResult.isError).toBeUndefined();
-    expect(fgResult.content[0].text).toContain("FG result");
+    expect(fgResult.content[0].text).toBe(`Agent ID: ${firstRecord.id}\n\nResponse:\nFG result`);
     // Foreground completions never produce a notification.
     expect(api.api.sendMessage).toHaveBeenCalledTimes(3);
 
@@ -345,7 +346,7 @@ describe("offline extension headless lifecycle", () => {
       sessions[0].finish("Foreground result");
       const result = await foreground;
       expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain("Foreground result");
+      expect(result.content[0].text).toBe(`Agent ID: ${result.details.agentId}\n\nResponse:\nForeground result`);
       expect(api.api.sendMessage).not.toHaveBeenCalled();
 
       const completed = await agentStatusTool.execute("status-completed", {}, undefined, undefined, ctx);
