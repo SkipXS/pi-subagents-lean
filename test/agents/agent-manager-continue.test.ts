@@ -66,7 +66,7 @@ import {
   createSubagentRuntimeContext,
   runWithSubagentRuntime,
 } from "../../src/shell.js";
-import { buildAgentDetails } from "../../src/agents/tool-execution.js";
+import { buildAgentDetails } from "../../src/agents/agent-details.js";
 
 describe("AgentManager.continueAgent", () => {
   let manager: AgentManager;

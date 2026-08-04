@@ -1,14 +1,24 @@
 # Composition root over module-level shared state
 
-Shared runtime state (config, the manager, coordinator, pi instance, and
-session context) lives on a single composition-root **shell** object that PI's
-fixed-signature callbacks capture by closure, rather than as module-level
-mutable `let`/`Map` bindings. Model and thinking are not shell or ConfigStore
-overrides: they come from Agent Markdown or the parent session. Per-session
-services (config store, agent manager, and spawn coordinator) are constructed at
-`session_start` and mounted onto the shell; `session_shutdown` disposes them.
-Owned domain state moves into the module that owns the concern: config into the
-ConfigStore and background delivery into the spawn coordinator.
+Shared runtime state is held by the process-local module singleton `shell` in
+`src/shell.ts`. PI's fixed-signature callbacks read that shell through getters,
+rather than keeping separate mutable `let`/`Map` bindings in each handler.
+Model and thinking are not shell or ConfigStore overrides: they come from Agent
+Markdown or the parent session.
+
+The shell's `ConfigStore` is constructed when the module is loaded and lives for
+the extension lifetime. `session_start` reloads its config and creates the
+session-scoped `AgentManager` and `SpawnCoordinator`, mounting them on the
+shell. `session_shutdown` disposes and clears the coordinator and manager; the
+store remains and only drops its manager dependency. The session context is
+set at start and cleared at shutdown, while the PI instance is set during
+extension initialization. Owned domain state stays in the module that owns the
+concern: config in ConfigStore and background delivery in SpawnCoordinator.
+
+Getters always read the shell's current fields. The manager and coordinator
+getters return `null` in a child AsyncLocalStorage context, while root-only
+getters reject child access. AsyncLocalStorage therefore marks the child
+runtime boundary; it does not create another shell or another ConfigStore.
 
 ## Why
 
@@ -29,25 +39,28 @@ makes those dependencies real parameters of the handler (captured, not
 positional), so a test substitutes one shell (or one service) instead of mocking
 the world.
 
-The shell is a composition root, not a god object: it is small (~the surviving
-holder functions), survives across sessions, and owns nothing itself. Owned
-domain state sits on the per-session services.
+The shell is a composition root, not a god object: it is small, survives across
+sessions, and holds only the long-lived ConfigStore plus current session
+collaborators. Domain state remains owned by ConfigStore, AgentManager, and
+SpawnCoordinator.
 
 ## Trade-off
 
-Closures capture the shell at registration time (factory load), but the
-per-session services are only populated at `session_start`. This reintroduces a
-temporal coupling: a callback firing before the first `session_start` would see
-unpopulated fields. In practice every callback that reads session services fires
-during or after `session_start`, and `session_shutdown` disposes them, so the
-shell fields are populated exactly when they're read. The contract is "callbacks
-run inside a session" — true for all current handlers. It must be upheld when
-adding new event handlers.
+Callbacks read the shell through getters captured at registration time, but the
+fields have explicit lifecycle boundaries. Before the first `session_start`,
+and after `session_shutdown`, the manager and coordinator are unavailable; the
+ConfigStore still exists. At `session_start` the store is reloaded and the
+session services are mounted. At shutdown the coordinator is claimed and
+disposed, the store's manager dependency is dropped, the manager is disposed
+and cleared, and the session context is cleared. Startup/shutdown epochs prevent
+an asynchronous startup scan from publishing state after its session ended.
 
-The shell is a process-local singleton for the lifetime of the extension. That's
-acceptable here (one extension instance per pi process) but would be wrong in a
-multi-instance setting. If pi ever ran multiple extension instances in one
-process, the shell would need to become per-instance.
+The contract for handlers that need session services is therefore "run during or
+after a current session and before its shutdown cleanup completes". New event
+handlers must preserve that boundary and must use the getters rather than
+caching session collaborators. The shell remains a process-local singleton for
+the lifetime of the extension; that is acceptable for one extension instance
+per pi process, but would need to become per-instance in a multi-instance host.
 
 ## Considered Options
 

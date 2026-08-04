@@ -4,7 +4,7 @@ import { getStatusNote } from "../status-note.js";
  *
  * Contains the execute callbacks registered for the public control tools.
  * Spawn coordination and nudge scheduling live in spawn-coordinator.ts;
- * buildAgentDetails remains a pure result-details helper.
+ * result details are built by the neutral agent-details module.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -18,8 +18,8 @@ import type { AgentRenderMetadataBridge } from "./agent-render-bridge.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 import type { AgentConfig } from "./types.js";
 import { resolveType, getAgentConfig, discoverNewAgents, resolveAgentCatalog, resolveTypeInCatalog } from "./agent-types.js";
-import { executionKind } from "./execution-display.js";
-import { getSessionUsageSnapshot } from "./usage.js";
+import { buildAgentDetails } from "./agent-details.js";
+export { buildAgentDetails } from "./agent-details.js";
 import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-validator.js";
 
 import { findModelInRegistry } from "../utils.js";
@@ -222,123 +222,6 @@ function resolveControlRecord(
 // ============================================================================
 // Activity tracking
 // ============================================================================
-
-/**
- * Build a details Record from an AgentRecord, controlled by options.
- *
- * Always includes canonical `agentId`, `type`, and `description`. Optional groups:
- * - `includeStatus`: adds `status`, `outputFile`
- * - `includeStats`: adds turn/token/cost/context/compaction/model fields
- *
- * Consolidates the identical field-selection logic previously duplicated
- * across emitIndividualNudge, executeSpawnForeground, and executeSpawnBackground.
- */
-export function buildAgentDetails(
-  record: AgentRecord,
-  opts?: { includeStats?: boolean; includeStatus?: boolean; execution?: NonNullable<AgentRecord["stats"]["executions"]>[number] },
-): Record<string, unknown> {
-  const details: Record<string, unknown> = {
-    agentId: record.id,
-    type: record.display.type,
-    description: record.display.description,
-  };
-
-  if (record.display.worktreePath) {
-    details.worktreePath = record.display.worktreePath;
-  }
-
-  if (opts?.includeStatus) {
-    details.status = opts.execution?.status ?? record.lifecycle.status;
-    details.outputFile = record.display.outputFile;
-  }
-
-  if (opts?.includeStats) {
-    // Only the current execution's compact delta/result is exposed: never
-    // execution history, execution ids, timestamps, or prior responses. The
-    // initial spawn's summary stays lifetime-cumulative; every continuation
-    // reports the exact per-execution usage/compaction deltas instead of
-    // cumulative record totals.
-    const executions = record.stats.executions;
-    const current = opts.execution ?? executions?.at(-1);
-    const currentIndex = current ? (executions?.indexOf(current) ?? 0) : 0;
-    const currentKind = executionKind(current, currentIndex);
-    const continuation = current && currentKind === "continued" ? current : undefined;
-    const usage = continuation?.usage;
-    const elapsedMs = continuation
-      ? (continuation.completedAt !== undefined ? continuation.completedAt - continuation.startedAt : 0)
-      : (record.lifecycle.completedAt ? record.lifecycle.completedAt - record.lifecycle.startedAt : 0);
-
-    const terminal = record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
-    // Terminal records retain manager-populated telemetry; their session may
-    // already be disposed, so never perform a live branch read here.
-    const liveSnapshot = terminal ? undefined : getSessionUsageSnapshot(record.execution.session);
-    const terminalSnapshot = {
-      contextPercent: record.stats.contextPercent,
-      contextWindow: record.stats.contextWindow,
-      autoCompactionEnabled: record.stats.autoCompactionEnabled,
-      usingSubscription: record.stats.usingSubscription,
-    };
-    const hasLiveSample = liveSnapshot != null
-      && (liveSnapshot.contextWindow !== undefined || liveSnapshot.contextPercent !== null);
-    const usageSnapshot = terminal
-      ? terminalSnapshot
-      : {
-        contextPercent: hasLiveSample
-          ? liveSnapshot!.contextPercent
-          : (terminalSnapshot.contextPercent ?? liveSnapshot?.contextPercent ?? null),
-        contextWindow: liveSnapshot?.contextWindow ?? terminalSnapshot.contextWindow,
-        autoCompactionEnabled: liveSnapshot?.autoCompactionEnabled ?? terminalSnapshot.autoCompactionEnabled,
-        usingSubscription: liveSnapshot?.usingSubscription ?? terminalSnapshot.usingSubscription,
-      };
-
-    details.input = usage?.input ?? record.stats.lifetimeUsage.input;
-    details.output = usage?.output ?? record.stats.lifetimeUsage.output;
-    details.cacheRead = usage?.cacheRead ?? record.stats.cacheRead;
-    details.cacheWrite = usage?.cacheWrite ?? record.stats.lifetimeUsage.cacheWrite;
-    details.latestCacheHitRate = record.stats.latestCacheHitRate;
-    const contextStats = record.stats.contextStats?.count ? record.stats.contextStats : undefined;
-    // Keep the explicit live/terminal snapshot so shared formatting can prefer
-    // a newly measured response without losing context history telemetry.
-    details.contextPercent = usageSnapshot.contextPercent ?? null;
-    // The explicit current/live window wins over historical telemetry from
-    // an earlier model or branch.
-    details.contextWindow = usageSnapshot.contextWindow ?? contextStats?.window;
-    details.autoCompactionEnabled = usageSnapshot.autoCompactionEnabled;
-    details.usingSubscription = usageSnapshot.usingSubscription;
-    if (contextStats) {
-      details.contextStats = { ...contextStats };
-      details.contextCurrent = contextStats.current;
-      details.contextLastKnown = contextStats.lastKnown;
-      details.contextPeak = contextStats.peak;
-      details.contextCount = contextStats.count;
-    }
-    details.durationMs = elapsedMs;
-    details.compactions = continuation?.compactionCount ?? record.stats.compactionCount;
-    details.compactionCount = continuation?.compactionCount ?? record.stats.compactionCount;
-    details.modelName = record.display.invocation?.modelName;
-    // The session is the source of truth: Pi may normalize the requested
-    // invocation level for the selected model when it creates the session.
-    details.thinkingLevel = record.execution.session?.thinkingLevel ?? record.display.invocation?.thinkingLevel;
-    details.cost = usage?.cost ?? record.stats.lifetimeUsage.cost;
-    // Only the current execution's compact delta/result is exposed: never
-    // execution history, execution ids, timestamps, or prior responses. The
-    // caller authored the current prompt and can recover earlier context from
-    // the record itself.
-    if (current) {
-      details.currentExecution = {
-        mode: current.mode,
-        kind: currentKind,
-        status: current.status,
-        ...(current.responseText !== undefined ? { responseText: current.responseText } : {}),
-        ...(current.usage !== undefined ? { usage: current.usage } : {}),
-        ...(current.compactionCount !== undefined ? { compactionCount: current.compactionCount } : {}),
-        ...(current.error !== undefined ? { error: current.error } : {}),
-      };
-    }
-  }
-
-  return details;
-}
 
 /**
  * Result text plus status note, for tool delivery.

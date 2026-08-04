@@ -100,6 +100,25 @@ describe("ConfigStore persistence and manager effects", () => {
     expect(store.agent.includeContextFiles).toBe(true);
   });
 
+  it("rolls back an update failure and refreshes persistence health", () => {
+    const { io, current } = memIO();
+    let updateFailed = false;
+    io.load = () => updateFailed
+      ? { config: structuredClone(current()), health: "using-backup", canRepair: true }
+      : { config: structuredClone(current()), health: "healthy", canRepair: false };
+    io.update = () => {
+      updateFailed = true;
+      throw new Error("disk full");
+    };
+    const store = new ConfigStore(io);
+
+    expect(() => store.mutate.agent.setIncludeContextFiles(false)).toThrow("disk full");
+
+    expect(store.agent.includeContextFiles).toBe(true);
+    expect(store.health).toBe("using-backup");
+    expect(store.canRepair).toBe(true);
+  });
+
   it("does not persist unknown agent keys or interpret them as models", () => {
     const { io, current } = memIO();
     const store = new ConfigStore(io);
@@ -119,6 +138,47 @@ describe("ConfigStore lifecycle", () => {
     current().agent.includeContextFiles = true;
     store.reload();
     expect(store.agent.includeContextFiles).toBe(true);
+  });
+
+  it("reloads health and concurrency and re-syncs the manager", () => {
+    const { io, current } = memIO();
+    let useBackup = false;
+    io.load = () => useBackup
+      ? { config: structuredClone(current()), health: "using-backup", canRepair: true }
+      : { config: structuredClone(current()), health: "healthy", canRepair: false };
+    const { manager, concurrencies } = managerStub();
+    const store = new ConfigStore(io);
+    store.setDeps({ manager });
+    concurrencies.length = 0;
+
+    current().concurrency.default = 2;
+    useBackup = true;
+    store.reload();
+
+    expect(store.health).toBe("using-backup");
+    expect(store.canRepair).toBe(true);
+    expect(store.concurrency).toEqual({ default: 2 });
+    expect(concurrencies).toEqual([{ default: 2 }]);
+  });
+
+  it("preserves a newer disk snapshot during a transactional update", () => {
+    const { io, current } = memIO();
+    io.update = (change) => {
+      const latest = current();
+      change(latest);
+      return { config: structuredClone(latest), health: "healthy", canRepair: false };
+    };
+    const store = new ConfigStore(io);
+
+    current().agent.disableDefaultAgents = true;
+    current().agent.orchestrationPrompt = false;
+    current().concurrency.default = 9;
+    store.mutate.agent.setIncludeContextFiles(false);
+
+    expect(current()).toEqual({
+      agent: { includeContextFiles: false, disableDefaultAgents: true, orchestrationPrompt: false },
+      concurrency: { default: 9 },
+    });
   });
 
   it("drops the manager dependency on dispose", () => {

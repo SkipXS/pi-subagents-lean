@@ -1,13 +1,14 @@
 /**
  * shell.ts — Composition root shell.
  *
- * Per ADR 0004, the Shell is the single mutable container for all per-session
- * state. Created at session_start, disposed at session_shutdown. Handler
- * modules read from shell via the getter functions — no module-level mutable
- * globals.
+ * Per ADR 0004, the shell is the process-local mutable container for the
+ * long-lived ConfigStore and current per-session state. The manager and
+ * coordinator are mounted at session_start and disposed/cleared at
+ * session_shutdown. Handler modules read from shell via getter functions — no
+ * separate module-level mutable globals.
  *
- * index.ts populates the shell at session_start; handler modules import
- * getManager() / getCoordinator() / etc.
+ * index.ts sets the PI instance at init and lifecycle handlers populate/clear
+ * session fields; handler modules import getManager() / getCoordinator() / etc.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -29,7 +30,7 @@ interface Shell {
 }
 
 // ============================================================================
-// Mutable module-level shell (populated by index.ts at session_start)
+// Mutable module-level shell (PI is set at init; session state at session_start)
 // ============================================================================
 
 const shell: Shell = {
