@@ -6,6 +6,8 @@
  * below owns only the plaintext wrapping needed by this row.
  */
 
+import type { AgentExecutionKind, AgentExecutionMode } from "../types.js";
+import { formatExecutionLabels } from "./execution-display.js";
 import { formatCost, formatTokens } from "./usage.js";
 
 /**
@@ -36,6 +38,9 @@ export interface AgentCallRenderMetadata {
   prompt: string;
   /** Canonical full root-agent id for AgentContinue/StopAgent rows. */
   agentId?: string;
+  /** Execution display fields; omitted for StopAgent because stopping is not an execution. */
+  mode?: AgentExecutionMode;
+  kind?: AgentExecutionKind;
 }
 
 /** Pi's structural component contract, kept local to avoid a TUI import. */
@@ -284,6 +289,8 @@ function metadataFromUnknown(value: unknown): AgentCallRenderMetadata | undefine
     ...(nonEmptyString(value.thinking) !== undefined ? { thinking: value.thinking as string } : {}),
     prompt,
     ...(nonEmptyString(value.agentId) !== undefined ? { agentId: value.agentId as string } : {}),
+    ...(value.mode === "foreground" || value.mode === "background" ? { mode: value.mode } : {}),
+    ...(value.kind === "new" || value.kind === "continued" ? { kind: value.kind } : {}),
   };
 }
 
@@ -292,7 +299,9 @@ function metadataEqual(a: AgentCallRenderMetadata | undefined, b: AgentCallRende
     && a?.model === b.model
     && a?.thinking === b.thinking
     && a?.prompt === b.prompt
-    && a?.agentId === b.agentId;
+    && a?.agentId === b.agentId
+    && a?.mode === b.mode
+    && a?.kind === b.kind;
 }
 
 function stateFor(context: AgentRendererContext): AgentRendererState {
@@ -333,6 +342,8 @@ function mergeMetadata(
     ...(incoming.agentId ?? previous?.agentId
       ? { agentId: incoming.agentId ?? previous?.agentId }
       : {}),
+    ...(incoming.mode ?? previous?.mode ? { mode: incoming.mode ?? previous?.mode } : {}),
+    ...(incoming.kind ?? previous?.kind ? { kind: incoming.kind ?? previous?.kind } : {}),
   };
 }
 
@@ -366,7 +377,9 @@ export function formatAgentCallText(
     metadata?.prompt ?? (typeof args?.prompt === "string" ? args.prompt : ""),
     true,
   );
-  return `Rolle: ${role} | Modell: ${model} | Thinking: ${thinking}${prompt.length > 0 ? `\n${prompt}` : ""}`;
+  const mode = metadata?.mode ?? (args?.run_in_background === true ? "background" : "foreground");
+  const labels = formatExecutionLabels(mode, metadata?.kind ?? "new");
+  return `Role: ${role} | Model: ${model} | Thinking: ${thinking} | ${labels}\n\nPrompt:\n${prompt}`;
 }
 
 /**
@@ -389,7 +402,14 @@ export function formatAgentControlCallText(
       true,
     )
     : "";
-  return `Agent ID: ${agentId} | Rolle: ${role} | Modell: ${model} | Thinking: ${thinking}${prompt.length > 0 ? `\n${prompt}` : ""}`;
+  const executionLabels = toolName === "AgentContinue"
+    ? ` | ${formatExecutionLabels(
+      metadata?.mode ?? (args?.run_in_background === true ? "background" : "foreground"),
+      metadata?.kind ?? "continued",
+    )}`
+    : "";
+  const promptSection = toolName === "AgentContinue" ? `\n\nPrompt:\n${prompt}` : "";
+  return `Agent ID: ${agentId} | Role: ${role} | Model: ${model} | Thinking: ${thinking}${executionLabels}${promptSection}`;
 }
 
 /** Convenience formatter for the AgentContinue row. */
@@ -492,7 +512,14 @@ function resultTextWithUsage(
 ): string {
   if (!completed) return text;
   const usage = formatAgentUsageLine(details);
-  return usage ? `${text}${text.length > 0 ? "\n" : ""}${usage}` : text;
+  if (!usage) return text;
+  if (text.length === 0) return usage;
+
+  // Keep exactly one empty line between response content and the footer. A
+  // response may already end in a newline, so normalize only that separator;
+  // when no footer exists the original text is returned unchanged above.
+  const content = text.replace(/\n+$/u, "");
+  return content.length > 0 ? `${content}\n\n${usage}` : usage;
 }
 
 /** Render a completed background notification with the same result footer. */

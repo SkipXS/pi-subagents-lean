@@ -10,6 +10,8 @@ const metadata: AgentCallRenderMetadata = {
   model: "openai/gpt-4o",
   thinking: "high",
   prompt: "inspect everything",
+  mode: "background",
+  kind: "new",
 };
 
 function message(
@@ -93,12 +95,30 @@ describe("Agent render metadata bridge", () => {
     bridge.start("continue", "AgentContinue");
     bridge.start("stop", "StopAgent");
     bridge.start("status", "AgentStatus");
-    bridge.update("continue", { ...metadata, agentId: "full-continue", prompt: "follow up" });
-    bridge.update("stop", { ...metadata, agentId: "full-stop", prompt: "" });
+    bridge.update("continue", {
+      ...metadata,
+      agentId: "full-continue",
+      prompt: "follow up",
+      kind: "continued",
+    });
+    bridge.update("stop", {
+      role: metadata.role,
+      model: metadata.model,
+      thinking: metadata.thinking,
+      agentId: "full-stop",
+      prompt: "",
+    });
 
     expect(bridge.pendingCount()).toBe(2);
-    expect(bridge.metadataFor("continue")).toMatchObject({ agentId: "full-continue", prompt: "follow up" });
+    expect(bridge.metadataFor("continue")).toMatchObject({
+      agentId: "full-continue",
+      prompt: "follow up",
+      mode: "background",
+      kind: "continued",
+    });
     expect(bridge.metadataFor("stop")).toMatchObject({ agentId: "full-stop", prompt: "" });
+    expect(bridge.metadataFor("stop")).not.toHaveProperty("mode");
+    expect(bridge.metadataFor("stop")).not.toHaveProperty("kind");
     expect(bridge.metadataFor("status")).toBeUndefined();
 
     const continued = bridge.onToolResult({
@@ -111,7 +131,11 @@ describe("Agent render metadata bridge", () => {
       toolCallId: "stop",
       details: { downstream: true },
     });
-    expect(continued?.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({ agentId: "full-continue" });
+    expect(continued?.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({
+      agentId: "full-continue",
+      mode: "background",
+      kind: "continued",
+    });
     expect(stopped?.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({ agentId: "full-stop" });
 
     bridge.onMessageEnd({ message: message("continue", continued?.details, "AgentContinue") });

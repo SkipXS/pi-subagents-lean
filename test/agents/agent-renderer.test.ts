@@ -50,13 +50,32 @@ describe("Agent call renderer", () => {
     const component = renderAgentContinueCall(ctx.args, theme, ctx);
 
     expect(visibleLines(component)).toEqual([
-      "Agent ID: abc12345 | Rolle: — | Modell: — | Thinking: —",
+      "Agent ID: abc12345 | Role: — | Model: — | Thinking: — | Mode: Foreground | Run: Continued",
+      "",
+      "Prompt:",
       "First line",
       "Second line with Unicode: 日本語 🚀",
       "Final line",
     ]);
     expect(formatAgentContinueCallText(undefined, ctx.args)).toBe(
-      `Agent ID: abc12345 | Rolle: — | Modell: — | Thinking: —\n${prompt}`,
+      `Agent ID: abc12345 | Role: — | Model: — | Thinking: — | Mode: Foreground | Run: Continued\n\nPrompt:\n${prompt}`,
+    );
+  });
+
+  it("formats background Agent and AgentContinue calls consistently", () => {
+    expect(formatAgentCallText(undefined, {
+      agent: "scout",
+      prompt: "inspect",
+      run_in_background: true,
+    })).toBe(
+      "Role: scout | Model: — | Thinking: — | Mode: Background | Run: New\n\nPrompt:\ninspect",
+    );
+    expect(formatAgentContinueCallText(undefined, {
+      agent_id: "abc12345",
+      prompt: "continue",
+      run_in_background: true,
+    })).toBe(
+      "Agent ID: abc12345 | Role: — | Model: — | Thinking: — | Mode: Background | Run: Continued\n\nPrompt:\ncontinue",
     );
   });
 
@@ -65,10 +84,10 @@ describe("Agent call renderer", () => {
     const component = renderStopAgentCall(ctx.args, theme, ctx);
 
     expect(visibleLines(component)).toEqual([
-      "Agent ID: prefix | Rolle: — | Modell: — | Thinking: —",
+      "Agent ID: prefix | Role: — | Model: — | Thinking: —",
     ]);
     expect(formatStopAgentCallText(undefined, ctx.args)).toBe(
-      "Agent ID: prefix | Rolle: — | Modell: — | Thinking: —",
+      "Agent ID: prefix | Role: — | Model: — | Thinking: —",
     );
   });
 
@@ -98,12 +117,14 @@ describe("Agent call renderer", () => {
 
     const hydrated = renderAgentContinueCall(ctx.args, theme, { ...ctx, lastComponent: initial });
     expect(visibleLines(hydrated)).toEqual([
-      "Agent ID: abc1234567890full | Rolle: reviewer | Modell: anthropic/claude-sonnet-4 | Thinking: high",
+      "Agent ID: abc1234567890full | Role: reviewer | Model: anthropic/claude-sonnet-4 | Thinking: high | Mode: Foreground | Run: Continued",
+      "",
+      "Prompt:",
       prompt,
     ]);
   });
 
-  it("uses the exact two-part format and preserves the full multiline prompt", () => {
+  it("uses the metadata/prompt format and preserves the full multiline prompt", () => {
     const prompt = "First line\nSecond line with Unicode: 日本語 🚀\nFinal line";
     const ctx = context({ agent: "reviewer", prompt });
 
@@ -111,13 +132,15 @@ describe("Agent call renderer", () => {
 
     expect(component).toBeInstanceOf(AgentCallDetailsComponent);
     expect(visibleLines(component)).toEqual([
-      "Rolle: reviewer | Modell: — | Thinking: —",
+      "Role: reviewer | Model: — | Thinking: — | Mode: Foreground | Run: New",
+      "",
+      "Prompt:",
       "First line",
       "Second line with Unicode: 日本語 🚀",
       "Final line",
     ]);
     expect(formatAgentCallText(undefined, ctx.args)).toBe(
-      `Rolle: reviewer | Modell: — | Thinking: —\n${prompt}`,
+      `Role: reviewer | Model: — | Thinking: — | Mode: Foreground | Run: New\n\nPrompt:\n${prompt}`,
     );
   });
 
@@ -126,7 +149,7 @@ describe("Agent call renderer", () => {
     const ctx = context({ agent: "scout", prompt });
     const component = renderAgentCall(ctx.args, theme, ctx);
     const lines = visibleLines(component, 24);
-    const renderedPrompt = lines.slice(1).join(" ").replace(/\s+/gu, " ").trim();
+    const renderedPrompt = lines.slice(3).join(" ").replace(/\s+/gu, " ").trim();
 
     expect(renderedPrompt).toContain(prompt.replace(/\s+/gu, " "));
     expect(lines.every((line) => visibleWidth(line) <= 24)).toBe(true);
@@ -184,11 +207,34 @@ describe("Agent call renderer", () => {
 
     expect(visibleLines(component)).toEqual([
       "agent output",
+      "",
       "↑6.8k ↓487 R8.2k CH83.4% $0.053 (sub) 2.1%/272k (auto)",
     ]);
     expect(result.content).toEqual([{ type: "text", text: "agent output" }]);
     expect(formatAgentUsageLine({ ...completeUsageDetails, cacheWrite: 1_536 }))
       .toBe("↑6.8k ↓487 R8.2k W1.5k CH83.4% $0.053 (sub) 2.1%/272k (auto)");
+  });
+
+  it("normalizes footer spacing without adding a gap when no footer exists", () => {
+    const withFooter = renderAgentResult(
+      { content: [{ type: "text", text: "answer\n" }], details: completeUsageDetails },
+      { isPartial: false },
+      theme,
+      context(),
+    );
+    expect(visibleLines(withFooter)).toEqual([
+      "answer",
+      "",
+      "↑6.8k ↓487 R8.2k CH83.4% $0.053 (sub) 2.1%/272k (auto)",
+    ]);
+
+    const withoutFooter = renderAgentResult(
+      { content: [{ type: "text", text: "answer" }], details: undefined },
+      { isPartial: false },
+      theme,
+      context(),
+    );
+    expect(visibleLines(withoutFooter)).toEqual(["answer"]);
   });
 
   it("uses ? for a null context sample and waits for the completed result", () => {
@@ -210,6 +256,7 @@ describe("Agent call renderer", () => {
     );
     expect(visibleLines(complete)).toEqual([
       "done",
+      "",
       "↑6.8k ↓487 R8.2k CH83.4% $0.053 (sub) ?/272k",
     ]);
   });
@@ -236,7 +283,7 @@ describe("Agent call renderer", () => {
   });
 
   it("uses the same footer renderer for background subagent-result messages", () => {
-    const content = "[Subagent \"scout\" abc completed]\n\nbackground output";
+    const content = "[Subagent \"scout\" abc completed]\n\nResponse:\nbackground output";
     const message = {
       customType: "subagent-result",
       content,
@@ -248,7 +295,9 @@ describe("Agent call renderer", () => {
     expect(visibleLines(component)).toEqual([
       "[Subagent \"scout\" abc completed]",
       "",
+      "Response:",
       "background output",
+      "",
       "↑6.8k ↓487 R8.2k CH83.4% $0.053 (sub) 2.1%/272k (auto)",
     ]);
     expect(message.content).toBe(content);
@@ -279,7 +328,9 @@ describe("Agent call renderer", () => {
 
     const hydrated = renderAgentCall(ctx.args, theme, { ...ctx, lastComponent: initial });
     expect(visibleLines(hydrated)).toEqual([
-      "Rolle: reviewer | Modell: anthropic/claude-sonnet-4 | Thinking: high",
+      "Role: reviewer | Model: anthropic/claude-sonnet-4 | Thinking: high | Mode: Foreground | Run: New",
+      "",
+      "Prompt:",
       "inspect",
       "all files",
     ]);
@@ -312,8 +363,8 @@ describe("Agent call renderer", () => {
 
     renderAgentResult({ content: [], details: undefined }, { isPartial: false }, theme, first);
 
-    expect(visibleLines(firstCall)[0]).toBe("Rolle: first | Modell: — | Thinking: —");
-    expect(visibleLines(secondCall)[0]).toBe("Rolle: second | Modell: — | Thinking: —");
+    expect(visibleLines(firstCall)[0]).toBe("Role: first | Model: — | Thinking: — | Mode: Foreground | Run: New");
+    expect(visibleLines(secondCall)[0]).toBe("Role: second | Model: — | Thinking: — | Mode: Foreground | Run: New");
     expect(first.state[AGENT_RENDER_DETAILS_KEY]).toBeUndefined();
     expect(second.state[AGENT_RENDER_DETAILS_KEY]).toBeUndefined();
   });

@@ -690,8 +690,8 @@ describe("SpawnCoordinator", () => {
     it("reports per-execution deltas, not lifetime totals, in background continuation details", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const execution = {
-        id: "exec-1", mode: "background", status: "completed", startedAt: 10_000, completedAt: 11_250,
-        compactionCount: 1,
+        id: "exec-1", mode: "background", kind: "continued", status: "completed", startedAt: 10_000, completedAt: 11_250,
+        responseText: "bg result", compactionCount: 1,
         usage: { input: 20, output: 6, cacheWrite: 1, cacheRead: 4, cost: 0.02 },
       };
       const record = continuedRecord({
@@ -722,10 +722,19 @@ describe("SpawnCoordinator", () => {
 
       record.lifecycle.status = "completed";
       coordinator.onAgentComplete(record, execution as any);
+      // A later execution may mutate the record before this delivery timer fires.
+      record.result = "later result";
+      record.stats.executions!.push({
+        id: "exec-2", prompt: "later", mode: "foreground", kind: "continued", status: "running", startedAt: 12_000,
+      });
       vi.advanceTimersByTime(200);
 
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-      const details = mockPi.sendMessage.mock.calls[0]![0].details;
+      const message = mockPi.sendMessage.mock.calls[0]![0];
+      expect(message.content).toContain("Mode: Background | Run: Continued");
+      expect(message.content).toContain("\n\nResponse:\nbg result");
+      expect(message.content).not.toContain("later result");
+      const details = message.details;
       // The continuation delivery exposes the exact execution summary deltas,
       // never the cumulative lifetime totals on the record.
       expect(details.input).toBe(20);
@@ -737,7 +746,7 @@ describe("SpawnCoordinator", () => {
       expect(details.compactionCount).toBe(1);
       expect(details.durationMs).toBe(1250);
       expect(details.currentExecution).toMatchObject({
-        mode: "background", status: "completed", compactionCount: 1,
+        mode: "background", kind: "continued", status: "completed", compactionCount: 1,
       });
       // No execution ids or history leak into delivery details.
       expect((details.currentExecution as Record<string, unknown>).id).toBeUndefined();
@@ -1039,7 +1048,7 @@ describe("SpawnCoordinator", () => {
         expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
         const content = mockPi.sendMessage.mock.calls[0][0].content;
         const shortId = result.agentId.slice(0, 8);
-        expect(content).toContain(`[Subagent "builder" ${shortId} ${expected}]`);
+        expect(content).toContain(`[Subagent "builder" ${shortId} ${expected} | Mode: Background | Run: New]`);
       }
     });
   });

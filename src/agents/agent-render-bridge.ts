@@ -32,7 +32,9 @@ function sameMetadata(a: AgentCallRenderMetadata | undefined, b: AgentCallRender
     && a?.model === b.model
     && a?.thinking === b.thinking
     && a?.prompt === b.prompt
-    && a?.agentId === b.agentId;
+    && a?.agentId === b.agentId
+    && a?.mode === b.mode
+    && a?.kind === b.kind;
 }
 
 /**
@@ -78,6 +80,8 @@ export class AgentRenderMetadataBridge {
       ...(metadata.agentId ?? previous?.agentId
         ? { agentId: metadata.agentId ?? previous?.agentId }
         : {}),
+      ...(metadata.mode ?? previous?.mode ? { mode: metadata.mode ?? previous?.mode } : {}),
+      ...(metadata.kind ?? previous?.kind ? { kind: metadata.kind ?? previous?.kind } : {}),
     };
     if (!sameMetadata(previous, merged)) entry.metadata = merged;
     this.entries.set(toolCallId, entry);

@@ -98,7 +98,7 @@ describe("AgentContinue and StopAgent control rendering", () => {
       expect.anything(),
       expect.objectContaining({ agentId: fullId, prompt }),
     );
-    expect(result.content[0].text).toBe("completed result");
+    expect(result.content[0].text).toBe("Agent ID: agent-full-id-123\n\nResponse:\ncompleted result");
     expect(result.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({
       agentId: fullId,
       role: "reviewer",
@@ -179,6 +179,8 @@ describe("AgentContinue and StopAgent control rendering", () => {
       agentId: "missing-prefix",
       role: "—",
       prompt: "try again",
+      mode: "foreground",
+      kind: "continued",
     });
     expect(state.continueAgent).not.toHaveBeenCalled();
   });

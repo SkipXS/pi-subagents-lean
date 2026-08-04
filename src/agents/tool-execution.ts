@@ -18,6 +18,7 @@ import type { AgentRenderMetadataBridge } from "./agent-render-bridge.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 import type { AgentConfig } from "./types.js";
 import { resolveType, getAgentConfig, discoverNewAgents, resolveAgentCatalog, resolveTypeInCatalog } from "./agent-types.js";
+import { executionKind } from "./execution-display.js";
 import { getSessionUsageSnapshot } from "./usage.js";
 import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-validator.js";
 
@@ -97,11 +98,9 @@ function finalAgentRenderMetadata(
     // preflight values, which are still sufficient to render the row.
   }
   return {
-    role: metadata.role,
+    ...metadata,
     ...(modelKey !== undefined ? { model: modelKey } : {}),
     ...(thinking !== undefined ? { thinking } : {}),
-    prompt: metadata.prompt,
-    ...(metadata.agentId !== undefined ? { agentId: metadata.agentId } : {}),
   };
 }
 
@@ -135,12 +134,14 @@ export function agentControlRenderMetadata(
   record: AgentRecord | undefined,
   requestedId: string,
   prompt = "",
+  execution?: { mode: "foreground" | "background"; kind: "continued" },
 ): AgentCallRenderMetadata {
   if (!record) {
     return {
       agentId: requestedId || "—",
       role: "—",
       prompt,
+      ...execution,
     };
   }
 
@@ -180,6 +181,7 @@ export function agentControlRenderMetadata(
     ...(model !== undefined ? { model } : {}),
     ...(thinking !== undefined ? { thinking } : {}),
     prompt,
+    ...execution,
   };
 }
 
@@ -224,7 +226,7 @@ function resolveControlRecord(
 /**
  * Build a details Record from an AgentRecord, controlled by options.
  *
- * Always includes `type` and `description`. Optional groups:
+ * Always includes canonical `agentId`, `type`, and `description`. Optional groups:
  * - `includeStatus`: adds `status`, `outputFile`
  * - `includeStats`: adds turn/token/cost/context/compaction/model fields
  *
@@ -233,9 +235,10 @@ function resolveControlRecord(
  */
 export function buildAgentDetails(
   record: AgentRecord,
-  opts?: { includeStats?: boolean; includeStatus?: boolean },
+  opts?: { includeStats?: boolean; includeStatus?: boolean; execution?: NonNullable<AgentRecord["stats"]["executions"]>[number] },
 ): Record<string, unknown> {
   const details: Record<string, unknown> = {
+    agentId: record.id,
     type: record.display.type,
     description: record.display.description,
   };
@@ -245,7 +248,7 @@ export function buildAgentDetails(
   }
 
   if (opts?.includeStatus) {
-    details.status = record.lifecycle.status;
+    details.status = opts.execution?.status ?? record.lifecycle.status;
     details.outputFile = record.display.outputFile;
   }
 
@@ -255,8 +258,11 @@ export function buildAgentDetails(
     // initial spawn's summary stays lifetime-cumulative; every continuation
     // reports the exact per-execution usage/compaction deltas instead of
     // cumulative record totals.
-    const current = record.stats.executions?.at(-1);
-    const continuation = current && (record.stats.executions?.length ?? 0) > 1 ? current : undefined;
+    const executions = record.stats.executions;
+    const current = opts.execution ?? executions?.at(-1);
+    const currentIndex = current ? (executions?.indexOf(current) ?? 0) : 0;
+    const currentKind = executionKind(current, currentIndex);
+    const continuation = current && currentKind === "continued" ? current : undefined;
     const usage = continuation?.usage;
     const elapsedMs = continuation
       ? (continuation.completedAt !== undefined ? continuation.completedAt - continuation.startedAt : 0)
@@ -321,6 +327,7 @@ export function buildAgentDetails(
     if (current) {
       details.currentExecution = {
         mode: current.mode,
+        kind: currentKind,
         status: current.status,
         ...(current.responseText !== undefined ? { responseText: current.responseText } : {}),
         ...(current.usage !== undefined ? { usage: current.usage } : {}),
@@ -342,6 +349,11 @@ export function buildAgentDetails(
  */
 export function formatResultContent(record: AgentRecord): string {
   return (record.result ?? "") + getStatusNote(record.lifecycle);
+}
+
+/** Format the shared canonical-ID/response envelope for successful foreground results. */
+export function formatForegroundAgentResultContent(record: AgentRecord): string {
+  return `Agent ID: ${record.id}\n\nResponse:\n${formatResultContent(record)}`;
 }
 
 // ============================================================================
@@ -459,6 +471,8 @@ export async function executeAgentTool(
     ...(modelKey !== undefined ? { model: modelKey } : {}),
     ...(thinkingLevel !== undefined ? { thinking: thinkingLevel } : {}),
     prompt,
+    mode: shouldRunInBackground ? "background" : "foreground",
+    kind: "new",
   };
   emitAgentRenderUpdate(toolCallId, onUpdate, renderMetadata, renderBridge);
 
@@ -553,7 +567,7 @@ export async function executeAgentTool(
     return errorResult(`Agent failed: ${record.error || "unknown error"}`, details);
   }
 
-  return successResult(formatResultContent(record), details);
+  return successResult(formatForegroundAgentResultContent(record), details);
 }
 
 // ============================================================================
@@ -702,7 +716,11 @@ export async function executeContinueAgentTool(
   // the continuation. This hydrates the row even for terminal/queued/error
   // paths and ensures a short prefix is never passed to the mutating call.
   const resolution = resolveControlRecord(manager, agentId);
-  const initialMetadata = agentControlRenderMetadata(resolution.record, agentId, prompt);
+  const executionDisplay = {
+    mode: runInBackground ? "background" as const : "foreground" as const,
+    kind: "continued" as const,
+  };
+  const initialMetadata = agentControlRenderMetadata(resolution.record, agentId, prompt, executionDisplay);
   emitAgentRenderUpdate(toolCallId, onUpdate, initialMetadata, renderBridge);
   if (!resolution.record) {
     return errorResult(resolution.error, agentRenderDetails(undefined, initialMetadata));
@@ -716,7 +734,7 @@ export async function executeContinueAgentTool(
       runInBackground,
       signal,
     });
-    const renderMetadata = agentControlRenderMetadata(record, resolvedAgentId, prompt);
+    const renderMetadata = agentControlRenderMetadata(record, resolvedAgentId, prompt, executionDisplay);
     // Keep throwing/error paths repairable even if Pi drops the final details
     // after the session has normalized a value differently.
     renderBridge?.update(toolCallId, renderMetadata);
@@ -743,7 +761,7 @@ export async function executeContinueAgentTool(
     if (record.lifecycle.status === "error") {
       return errorResult(`Agent failed: ${record.error || "unknown error"}`, details);
     }
-    return successResult(formatResultContent(record), details);
+    return successResult(formatForegroundAgentResultContent(record), details);
   } catch (error) {
     // A queued foreground continuation is rejected when StopAgent removes it
     // from the global queue. Preserve that error contract, but include the
@@ -757,7 +775,7 @@ export async function executeContinueAgentTool(
       stoppedRecord = resolution.record;
     }
     const currentRecord = stoppedRecord ?? resolution.record;
-    const renderMetadata = agentControlRenderMetadata(currentRecord, resolvedAgentId, prompt);
+    const renderMetadata = agentControlRenderMetadata(currentRecord, resolvedAgentId, prompt, executionDisplay);
     renderBridge?.update(toolCallId, renderMetadata);
     const details = agentRenderDetails(
       currentRecord ? buildAgentDetails(currentRecord, { includeStats: true }) : undefined,

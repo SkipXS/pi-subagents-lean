@@ -76,27 +76,32 @@ describe("buildAgentDetails", () => {
     };
 
     expect(buildAgentDetails(record, { includeStatus: true })).toMatchObject({
+      agentId: "legacy-id",
       type: "builder",
       description: "Legacy record",
     });
   });
 
-  it("returns only type and description when no options given", () => {
+  it("always includes the canonical agent ID", () => {
+    const record = makeRecord();
+
+    expect(buildAgentDetails(record).agentId).toBe("test-id-123");
+    expect(buildAgentDetails(record, { includeStatus: true }).agentId).toBe("test-id-123");
+    expect(buildAgentDetails(record, { includeStats: true }).agentId).toBe("test-id-123");
+  });
+
+  it("returns only identity, type, and description when no options given", () => {
     const record = makeRecord();
     const details = buildAgentDetails(record);
 
+    expect(details.agentId).toBe("test-id-123");
     expect(details.type).toBe("builder");
     expect(details.description).toBe("Build something");
     // Should NOT include stats or status fields
     expect(details.status).toBeUndefined();
     expect(details.input).toBeUndefined();
     expect(details.output).toBeUndefined();
-  });
-
-  it("returns only two keys when no options given", () => {
-    const record = makeRecord();
-    const details = buildAgentDetails(record);
-    expect(Object.keys(details)).toEqual(["type", "description"]);
+    expect(Object.keys(details)).toEqual(["agentId", "type", "description"]);
   });
 
   // --- includeStats ---
