@@ -265,6 +265,35 @@ describe("headless extension session lifecycle", () => {
     await listeners.get("session_shutdown")!({}, retry);
   });
 
+  it("does not clean a newer runtime when an older startup scan fails late", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    let rejectScan!: (error: unknown) => void;
+    state.scanAndMerge.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectScan = reject; }));
+    const first = createContext();
+
+    const startup = listeners.get("session_start")!({}, first);
+    await vi.waitFor(() => expect(state.scanAndMerge).toHaveBeenCalledOnce());
+    await listeners.get("session_shutdown")!({}, first);
+
+    const retry = createContext();
+    await listeners.get("session_start")!({}, retry);
+    const retryManager = state.manager;
+    const retryCoordinator = state.coordinator;
+
+    rejectScan(new Error("stale scan failed"));
+    await expect(startup).resolves.toBeUndefined();
+
+    expect(state.manager).toBe(retryManager);
+    expect(state.coordinator).toBe(retryCoordinator);
+    expect(state.sessionCtx).toBe(retry);
+    expect(retryManager.dispose).not.toHaveBeenCalled();
+    expect(retryCoordinator.dispose).not.toHaveBeenCalled();
+    expect(state.store.dispose).toHaveBeenCalledOnce();
+
+    await listeners.get("session_shutdown")!({}, retry);
+  });
+
   it("cleans partially initialized services when catalog loading fails", async () => {
     const listeners = new Map<string, (...args: any[]) => any>();
     setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);

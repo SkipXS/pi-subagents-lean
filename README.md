@@ -103,9 +103,10 @@ cumulative across executions.
 
 ### `StopAgent`
 
-`StopAgent({ agent_id })` stops one running or queued agent. A background
-`Agent` acknowledgement supplies its full ID; foreground `Agent` results do not
-necessarily supply one. Use `AgentStatus` to identify other agents; it
+`StopAgent({ agent_id })` stops one running or queued agent. A successful
+foreground `Agent` or `AgentContinue` result includes its canonical full agent
+ID. Background `Agent` and `AgentContinue` acknowledgements also supply the
+full ID. Use `AgentStatus` to identify other agents; it
 displays IDs as `short_id (type)`. The interactive `StopAgent` row resolves a
 full ID from a unique prefix when the retained record is available.
 

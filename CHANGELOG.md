@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Flat root-agent execution.** `Agent`, `AgentContinue`, `StopAgent`, and `AgentStatus` now operate only on root records. Subagent sessions remain ALS-isolated but receive no `Agent` custom proxy or root control tool.
 
 ### Changed
+- **Internal decoupling and stabilization.** Agent detail formatting is separated from tool execution, with matching composition-root documentation and focused configuration/lifecycle race coverage.
 - **Unified selection-minus-exclusion semantics.** `exclude_tools` and `exclude_extensions` are now applied after their corresponding `tools`/`extensions` base selection, including explicit lists and `true`; excluded extensions are not bound. `exclude_skills` removes names from the selected skill metadata, including skills discovered by extensions.
 - **Finished-agent records now remain available for the entire parent session.** The time-based expiry setting and manager cleanup timer were removed; `session_shutdown` disposes all records, sessions, queue entries, and resources.
 - **Confirmed agent simplification.** Roles use only canonical `name`/filename resolution; missing skills/extensions resolve to `false`; prompts always replace; model and thinking come only from Agent Markdown or the parent session. Global, persistent, session, and automatic model/thinking injection plumbing is removed, and config persists only the current runtime settings plus concurrency.

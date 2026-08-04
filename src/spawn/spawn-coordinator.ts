@@ -9,7 +9,7 @@ import type { AgentExecutionSummary, AgentRecord, AgentStatus, SpawnConfig } fro
 import type { AgentManager, SpawnOptions } from "../agents/agent-manager.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import { getAgentConfig, resolveType, snapshotAgentConfig } from "../agents/agent-types.js";
-import { buildAgentDetails } from "../agents/tool-execution.js";
+import { buildAgentDetails } from "../agents/agent-details.js";
 import { executionKind, formatExecutionLabels } from "../agents/execution-display.js";
 
 /**

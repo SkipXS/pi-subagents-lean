@@ -9,20 +9,25 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AgentRecord } from "../../src/types.js";
 
-// buildAgentDetails is a pure function. tool-execution.ts's runtime import
-// chain (types, agent-types, usage, worktree-validator, utils, shell ->
-// config-store) never reaches npm packages at runtime — no mocks needed.
+// buildAgentDetails is a pure function. agent-details.ts's runtime import
+// chain (types, execution-display, usage) never reaches npm packages at
+// runtime — no mocks needed.
 
 /* ------------------------------------------------------------------ */
 /*  Tests                                                             */
 /* ------------------------------------------------------------------ */
 
 describe("buildAgentDetails", () => {
-  let buildAgentDetails: typeof import("../../src/agents/tool-execution.js").buildAgentDetails;
+  let buildAgentDetails: typeof import("../../src/agents/agent-details.js").buildAgentDetails;
 
   beforeEach(async () => {
-    const mod = await import("../../src/agents/tool-execution.js");
+    const mod = await import("../../src/agents/agent-details.js");
     buildAgentDetails = mod.buildAgentDetails;
+  });
+
+  it("remains available from the legacy tool-execution import path", async () => {
+    const legacyModule = await import("../../src/agents/tool-execution.js");
+    expect(legacyModule.buildAgentDetails).toBe(buildAgentDetails);
   });
 
   /** Helper to build a minimal AgentRecord for testing. */
