@@ -31,8 +31,8 @@ import {
 } from "./agent-types.js";
 import { extractText } from "../prompt/context.js";
 import type { AgentUsage } from "./usage.js";
-import { GIT_EXEC_TIMEOUT_MS, findModelInRegistry } from "../utils.js";
-import { normalizeThinkingLevel } from "../models/thinking.js";
+import { GIT_EXEC_TIMEOUT_MS } from "../utils.js";
+import { resolveAgentTunables } from "../models/agent-resolution.js";
 import { buildAgentPrompt, type PromptExtras } from "../prompt/prompts.js";
 import { loadSkillMeta } from "../prompt/skill-loader.js";
 import { type CompactionInfo, type EnvInfo, type RunCallbacks, type RunTunables, SHORT_ID_LENGTH } from "../types.js";
@@ -684,14 +684,23 @@ async function runAgentImpl(
   if (!agentConfig) throw new Error(`Unknown agent type: ${type}`);
 
   // Direct runner callers may omit the already-resolved tunables. Resolve the
-  // Markdown values here as the same defensive fallback used by the spawn
-  // coordinator; accepted internal values still win and are carried intact.
-  const resolvedModel = options.model ?? findModelInRegistry(agentConfig.model, ctx.modelRegistry, ctx.model);
-  const resolvedThinking = options.thinkingLevel ?? normalizeThinkingLevel(
-    resolvedModel,
-    agentConfig.thinkingLevel ?? ctx.thinkingLevel,
-  );
-  options = { ...options, model: resolvedModel, thinkingLevel: resolvedThinking };
+  // same settings > Markdown > parent chain defensively; accepted internal
+  // values remain the lower-precedence base when supplied by the coordinator.
+  const resolvedTunables = resolveAgentTunables({
+    agentName: type,
+    agentConfig,
+    overrides: settings.agents,
+    modelRegistry: ctx.modelRegistry,
+    parentModel: ctx.model,
+    parentThinking: ctx.thinkingLevel,
+    baseModel: options.model,
+    baseThinking: options.thinkingLevel,
+  });
+  options = {
+    ...options,
+    model: resolvedTunables.model,
+    thinkingLevel: resolvedTunables.thinkingLevel,
+  };
 
   const config = options.agentConfig
     ? resolveAgentConfig(options.agentConfig)

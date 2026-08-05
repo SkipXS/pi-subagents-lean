@@ -9,13 +9,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../../src/types.js";
 import { AgentManager } from "../../src/agents/agent-manager.js";
+import { ConfigStore } from "../../src/config/config-store.js";
+import type { SubagentsConfig } from "../../src/config/types.js";
 
 // --- Mock modules ---
 
-const { mockAgentConfig, mockRunAgent, mockExecuteAgentTurn } = vi.hoisted(() => ({
+const { mockAgentConfig, mockRunAgent, mockExecuteAgentTurn, mockFindModelInRegistry } = vi.hoisted(() => ({
   mockAgentConfig: vi.fn(() => undefined),
   mockRunAgent: vi.fn(),
   mockExecuteAgentTurn: vi.fn(),
+  mockFindModelInRegistry: vi.fn((_key: unknown, _registry: unknown, fallback: unknown) => fallback),
 }));
 
 vi.mock("../../src/agents/agent-types.js", () => ({
@@ -42,7 +45,10 @@ vi.mock("../../src/agents/agent-runner.js", () => ({
 }));
 
 vi.mock("../../src/utils.js", () => ({
-  findModelInRegistry: vi.fn((_key: unknown, _registry: unknown, fallback: unknown) => fallback),
+  findModelInRegistry: mockFindModelInRegistry,
+  parseThinkingLevel: (value: unknown) => ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value as string)
+    ? value
+    : undefined,
   errorMessage: (error: unknown) => error instanceof Error ? error.message : String(error),
 }));
 
@@ -142,6 +148,7 @@ describe("SpawnCoordinator", () => {
     mockPi.sendMessage.mockClear();
     mockRunAgent.mockReset();
     mockExecuteAgentTurn.mockReset();
+    mockFindModelInRegistry.mockReset().mockImplementation((_key: unknown, _registry: unknown, fallback: unknown) => fallback);
     mockAgentConfig.mockReset().mockReturnValue(undefined);
     mockGetPiInstance.mockReturnValue(mockPi);
     mockIsIdle.mockReturnValue(true);
@@ -290,6 +297,85 @@ describe("SpawnCoordinator", () => {
     expect(options.modelKey).toBe("deepseek/deepseek-reasoner");
     expect(options.thinkingLevel).toBe("high");
     expect(options.invocation.thinkingLevel).toBe("high");
+  });
+
+  it("applies a captured ConfigStore agent override above custom Agent Markdown", async () => {
+    const markdownModel = {
+      provider: "markdown",
+      id: "custom-model",
+      reasoning: true,
+      thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", max: "max" },
+    } as any;
+    const settingsModel = {
+      provider: "settings",
+      id: "no-reasoning",
+      reasoning: false,
+    } as any;
+    const parentModel = { provider: "parent", id: "parent-model", reasoning: true } as any;
+    const models = new Map([
+      ["markdown/custom-model", markdownModel],
+      ["settings/no-reasoning", settingsModel],
+    ]);
+    mockFindModelInRegistry.mockImplementation((key: unknown, _registry: unknown, fallback: unknown) =>
+      (typeof key === "string" ? models.get(key) : undefined) ?? fallback);
+
+    let durable: SubagentsConfig = {
+      agent: {},
+      agents: { "Custom-Reviewer": { model: "settings/no-reasoning" } },
+      concurrency: { default: 4 },
+    };
+    const store = new ConfigStore({
+      load: () => structuredClone(durable),
+      save: (config) => { durable = structuredClone(config); },
+    });
+    const acceptedSnapshot = store.createSubagentRuntimeSettings();
+
+    // Simulate a later reload before the accepted request reaches the coordinator.
+    durable = {
+      ...durable,
+      agents: { "custom-reviewer": { model: "later/model", thinking: "max" } },
+    };
+    store.reload();
+    expect(store.createSubagentRuntimeSettings().agents).toEqual({
+      "custom-reviewer": { model: "later/model", thinking: "max" },
+    });
+    expect(acceptedSnapshot.agents).toEqual({ "custom-reviewer": { model: "settings/no-reasoning" } });
+
+    ctx = {
+      ...ctx,
+      model: parentModel,
+      modelRegistry: { find: vi.fn() },
+    } as unknown as ExtensionContext;
+    const coordinator = new SpawnCoordinator(manager as any);
+    await coordinator.spawn(mockPi, ctx, {
+      type: "custom-reviewer",
+      prompt: "review the custom role",
+      description: "Custom role",
+      agentConfig: {
+        name: "Custom-Reviewer",
+        description: "Custom reviewer from Agent Markdown",
+        model: "markdown/custom-model",
+        thinkingLevel: "high",
+        systemPrompt: "Review carefully.",
+      },
+      runtimeSettingsSnapshot: acceptedSnapshot,
+      runInBackground: false,
+    });
+
+    const options = manager.spawn.mock.calls[0][4];
+    expect(options.agentConfig).toEqual(expect.objectContaining({
+      model: "markdown/custom-model",
+      thinkingLevel: "high",
+    }));
+    expect(options.runtimeSettings.agents).toEqual({
+      "custom-reviewer": { model: "settings/no-reasoning" },
+    });
+    expect(options.model).toBe(settingsModel);
+    expect(options.modelKey).toBe("settings/no-reasoning");
+    // Thinking comes independently from Agent Markdown, then clamps for the
+    // settings-selected model which does not support reasoning.
+    expect(options.thinkingLevel).toBe("off");
+    expect(options.invocation.thinkingLevel).toBe("off");
   });
 
   it("tracks a background execution in its delivery entries", async () => {

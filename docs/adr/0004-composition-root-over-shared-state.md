@@ -3,8 +3,9 @@
 Shared runtime state is held by the process-local module singleton `shell` in
 `src/shell.ts`. PI's fixed-signature callbacks read that shell through getters,
 rather than keeping separate mutable `let`/`Map` bindings in each handler.
-Model and thinking are not shell or ConfigStore overrides: they come from Agent
-Markdown or the parent session.
+Model and thinking are resolved from the persistent per-agent settings and
+Agent Markdown, with the parent session as fallback; the ConfigStore owns the
+loaded snapshot but exposes no session or global model override.
 
 The shell's `ConfigStore` is constructed when the module is loaded and lives for
 the extension lifetime. `session_start` reloads its config and creates the

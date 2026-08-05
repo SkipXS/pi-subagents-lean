@@ -45,6 +45,22 @@ function managerStub(): { manager: any; concurrencies: unknown[] } {
 }
 
 describe("ConfigStore runtime settings", () => {
+  it("captures normalized per-agent overrides in the accepted-spawn snapshot", () => {
+    const { io } = memIO({
+      agents: {
+        Scout: { model: "provider/model", thinking: "high" },
+        scout: { thinking: "medium" },
+      },
+    });
+    const store = new ConfigStore(io);
+    const snapshot = store.createSubagentRuntimeSettings();
+
+    expect(store.agents).toEqual({ scout: { thinking: "medium" } });
+    expect(snapshot.agents).toEqual({ scout: { thinking: "medium" } });
+    expect(Object.isFrozen(snapshot.agents)).toBe(true);
+    expect(Object.isFrozen(snapshot.agents?.scout)).toBe(true);
+  });
+
   it("captures a frozen stable snapshot of current settings", () => {
     const { io } = memIO({ agent: { includeContextFiles: false } });
     const store = new ConfigStore(io);

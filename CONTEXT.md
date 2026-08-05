@@ -36,16 +36,20 @@ runtime-generated enum. `Agent`, `AgentContinue`, `StopAgent`, and
 
 ### Configuration
 
-The JSON configuration accepts only `includeContextFiles`,
-`disableDefaultAgents`, `orchestrationPrompt`, and `concurrency.default`.
-Unknown agent keys are ignored and never interpreted as model settings.
+The JSON configuration accepts `includeContextFiles`,
+`disableDefaultAgents`, `orchestrationPrompt`, `concurrency.default`, and the
+optional top-level `agents` map. Unknown or invalid fields are discarded at the
+persistence boundary.
 
 **Agent model and thinking**
 
-The selected Agent Markdown definition supplies `model` and `thinking`. Missing
-fields use the parent session. Model registry validation and provider-specific
-thinking normalization remain active; queue/rendering may carry resolved values
-internally.
+The effective merged Agent Markdown definition supplies `model` and `thinking`,
+while `agents.<name>` settings override either field independently. Names are
+case-insensitive and cover bundled, discovered, and trusted worktree agents;
+case variants in one JSON object are normalized to lowercase and the last entry
+wins. Missing fields use the parent session. Model registry validation and
+provider-specific thinking normalization remain active; queue/rendering may
+carry resolved values internally.
 
 ### Working trees
 
@@ -105,8 +109,8 @@ append-only output log are the diagnostic surfaces.
 
 ## Relationships
 
-- The **parent** starts independent root **subagents** from named **agent types** using the Agent Markdown model and thinking settings, or its own values when those fields are absent.
-- **Agent Markdown** supplies custom or overriding agent-type configuration.
+- The **parent** starts independent root **subagents** from named **agent types** using persistent per-agent settings above the effective Agent Markdown model and thinking values, or its own values when those fields are absent.
+- **Agent Markdown** supplies custom or overriding agent-type configuration; the persistent `agents.<name>` map supplies optional model/thinking overrides.
 - The **orchestration prompt** advertises visible agent types only to the parent.
 - A subagent may run at a validated **working tree path** and use its trusted **working tree overlay**.
 - Foreground results return inline; each background execution receives its own **nudge**.

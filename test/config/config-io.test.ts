@@ -75,6 +75,31 @@ describe("config I/O paths", () => {
     });
   });
 
+  it("loads normalized per-agent model/thinking overrides", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      agents: {
+        Scout: { model: "provider/first", thinking: "high", ignored: true },
+        scout: { thinking: "low" },
+        reviewer: { model: "provider/reviewer", thinking: "invalid" },
+        invalid: { model: 42, thinking: "ultra" },
+      },
+      agent: {},
+      concurrency: { default: 4 },
+    }));
+    vi.resetModules();
+
+    const { loadConfig } = await import("../../src/config/config-io.ts");
+    expect(loadConfig().config).toEqual({
+      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+      agents: {
+        scout: { thinking: "low" },
+        reviewer: { model: "provider/reviewer" },
+      },
+      concurrency: { default: 4 },
+    });
+  });
+
   it("rejects repair when neither a primary nor backup config exists", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     vi.resetModules();
