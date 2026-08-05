@@ -1,6 +1,6 @@
 import type { AgentManager } from "../agents/agent-manager.js";
-import type { SubagentsConfig } from "./types.js";
-import { normalizeAgentEntries } from "./types.js";
+import type { AgentSettingsOverride, AgentSettingsOverrides, SubagentsConfig } from "./types.js";
+import { normalizeAgentEntries, normalizeAgentSettingsOverrides } from "./types.js";
 import {
   DEFAULT_CONCURRENCY,
   loadConfig,
@@ -42,6 +42,8 @@ export interface ResolvedAgentSettings {
 /** Detached settings captured for one accepted root execution. */
 export interface SubagentRuntimeSettings {
   readonly agent: Readonly<ResolvedAgentSettings>;
+  /** Normalized per-agent model/thinking overrides, when any are configured. */
+  readonly agents?: Readonly<Record<string, Readonly<AgentSettingsOverride>>>;
 }
 
 export interface ConfigStoreDeps {
@@ -97,9 +99,22 @@ export class ConfigStore {
     return { default: this.config.concurrency.default };
   }
 
+  /** Persisted per-agent overrides, normalized and detached from the config object. */
+  get agents(): Readonly<AgentSettingsOverrides> {
+    return this.config.agents ? structuredClone(this.config.agents) : {};
+  }
+
   /** Capture immutable settings at the accepted root spawn boundary. */
   createSubagentRuntimeSettings(): SubagentRuntimeSettings {
-    return Object.freeze({ agent: Object.freeze({ ...this.agent }) });
+    const agents = this.config.agents
+      ? Object.fromEntries(
+        Object.entries(this.config.agents).map(([name, override]) => [name, Object.freeze({ ...override })]),
+      )
+      : undefined;
+    return Object.freeze({
+      agent: Object.freeze({ ...this.agent }),
+      ...(agents ? { agents: Object.freeze(agents) } : {}),
+    });
   }
 
   // ── Mutations ──────────────────────────────────────────────────
@@ -224,8 +239,10 @@ export class ConfigStore {
 
 function normalizeStoreConfig(raw: SubagentsConfig): SubagentsConfig {
   const agent = normalizeAgentEntries((raw.agent ?? {}) as Record<string, unknown>);
+  const agents = normalizeAgentSettingsOverrides(raw.agents);
   return {
     agent: { ...DEFAULT_AGENT_SETTINGS, ...agent },
+    ...(Object.keys(agents).length > 0 ? { agents } : {}),
     concurrency: { default: raw.concurrency?.default ?? DEFAULT_CONCURRENCY.default },
   };
 }
@@ -235,6 +252,13 @@ function applyConfigDelta(latest: SubagentsConfig, before: SubagentsConfig, desi
   latest.agent = normalizeAgentEntries(latest.agent as Record<string, unknown>) as SubagentsConfig["agent"];
   applyObjectDelta(latest.agent as Record<string, unknown>, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
   applyObjectDelta(latest.concurrency as Record<string, unknown>, before.concurrency as Record<string, unknown>, desired.concurrency as Record<string, unknown>);
+
+  // Per-agent overrides are host-edited configuration, not a ConfigStore
+  // mutation. Keep the latest locked snapshot intact so an unrelated scalar
+  // setting change cannot overwrite a concurrent agents-map edit.
+  const normalizedAgents = normalizeAgentSettingsOverrides(latest.agents);
+  if (Object.keys(normalizedAgents).length > 0) latest.agents = normalizedAgents;
+  else delete latest.agents;
 }
 
 function applyObjectDelta(latest: Record<string, unknown>, before: Record<string, unknown>, desired: Record<string, unknown>): void {

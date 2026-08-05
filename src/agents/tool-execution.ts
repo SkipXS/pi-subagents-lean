@@ -22,8 +22,7 @@ import { buildAgentDetails } from "./agent-details.js";
 export { buildAgentDetails } from "./agent-details.js";
 import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-validator.js";
 
-import { findModelInRegistry } from "../utils.js";
-import { normalizeThinkingLevel } from "../models/thinking.js";
+import { resolveAgentTunables } from "../models/agent-resolution.js";
 import { getSubagentRuntimeContext } from "../shell.js";
 import type { AgentManager } from "./agent-manager.js";
 import type { SpawnCoordinator } from "../spawn/spawn-coordinator.js";
@@ -330,20 +329,26 @@ export async function executeAgentTool(
   const description = (params.description as string | undefined) || prompt.split("\n")[0].slice(0, 80) || prompt.slice(0, 80);
   const runInBackground = params.run_in_background as boolean | undefined;
 
-  // Model and thinking come only from the resolved Agent Markdown definition;
-  // missing or unavailable values fall back to the calling parent session.
+  // Persisted per-agent settings are applied above the effective merged
+  // Markdown definition. The runtime snapshot keeps the accepted spawn stable
+  // if config is reloaded while it waits for a concurrency slot.
   const store = getStore();
   const runtimeSettingsSnapshot = typeof store.createSubagentRuntimeSettings === "function"
     ? store.createSubagentRuntimeSettings()
     : undefined;
   const shouldRunInBackground = runInBackground === true;
-  const model = findModelInRegistry(agentConfig.model, ctx.modelRegistry, ctx.model);
-  const modelKey = model ? `${model.provider}/${model.id}` : undefined;
+  const resolvedTunables = resolveAgentTunables({
+    agentName: resolvedType,
+    agentConfig,
+    overrides: runtimeSettingsSnapshot?.agents,
+    modelRegistry: ctx.modelRegistry,
+    parentModel: ctx.model,
+    parentThinking: ctx.thinkingLevel,
+  });
+  const model = resolvedTunables.model;
+  const modelKey = resolvedTunables.modelKey;
   const modelName = model?.id;
-  const thinkingLevel = normalizeThinkingLevel(
-    model,
-    agentConfig.thinkingLevel ?? ctx.thinkingLevel,
-  );
+  const thinkingLevel = resolvedTunables.thinkingLevel;
 
   // renderCall runs before this asynchronous resolution. Publish the resolved
   // values as a row-local partial update immediately, including the abort and

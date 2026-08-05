@@ -9,7 +9,7 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SubagentsConfig } from "./types.js";
-import { normalizeAgentEntries } from "./types.js";
+import { normalizeAgentEntries, normalizeAgentSettingsOverrides } from "./types.js";
 
 const CONFIG_DIR = getAgentDir();
 const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lean.json");
@@ -253,8 +253,10 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
     ...DEFAULT_AGENT,
     ...normalizeAgentEntries(rawAgent),
   } as SubagentsConfig["agent"];
+  const agents = normalizeAgentSettingsOverrides(raw.agents);
   return {
     agent,
+    ...(Object.keys(agents).length > 0 ? { agents } : {}),
     concurrency,
   };
 }
@@ -262,6 +264,7 @@ function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
 function replaceConfig(target: SubagentsConfig, source: SubagentsConfig): void {
   const normalized = normalizeConfig(source);
   target.agent = structuredClone(normalized.agent);
+  target.agents = normalized.agents ? structuredClone(normalized.agents) : undefined;
   target.concurrency = structuredClone(normalized.concurrency);
 }
 
@@ -344,6 +347,7 @@ function blockingSleep(milliseconds: number): void {
 function isConfigShape(value: unknown): value is SubagentsConfig {
   if (!isRecord(value)) return false;
   return (value.agent === undefined || isRecord(value.agent))
+    && (value.agents === undefined || isRecord(value.agents))
     && (value.concurrency === undefined || isRecord(value.concurrency));
 }
 

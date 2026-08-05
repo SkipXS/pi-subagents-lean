@@ -138,7 +138,7 @@ Subagent-Sessions dürfen die Extension weiterhin isoliert laden, aber sie erhal
 - Foreground- und Background-Ausführung;
 - globale Root-Concurrency und Queue;
 - atomare Annahme eines Root-Auftrags;
-- Agent-Markdown-basierte Modell- und Thinking-Auflösung mit Registry-Fallback und Provider-Normalisierung;
+- per-Agent-Modell-/Thinking-Auflösung aus persistenter Einstellung oder Agent Markdown mit Registry-Fallback und Provider-Normalisierung;
 - Tool-, Skill- und Extension-Auflösung;
 - Worktree-Validierung;
 - Usage-Erfassung;
@@ -162,16 +162,19 @@ System-Prompts verwenden ausschließlich Replace-Verhalten. Der Markdown-Body,
 die Parent-Umgebung, optionale `AGENTS.md`-Kontexte und Skills bleiben wirksam;
 Parent-Prompt-Vererbung, Custom-Prompt-Dateien und ihr Scaffolding entfallen.
 
-Modelle und Thinking kommen ausschließlich aus Agent Markdown, sonst aus der
-Parent-Session. Globale, persistente und Session-Overrides, `agent`-Modellkeys,
-Thinking-Maps, Resolver und automatische Vorab-Injektion entfallen. Bereits aufgelöste
-Werte dürfen für Queue und Rendering weitergetragen werden; `AgentContinue`
-nutzt die ursprüngliche Session.
+Modelle und Thinking kommen pro Agent aus den persistenten
+`agents.<name>`-Einstellungen, danach aus der effektiven Agent-Markdown-Definition
+und sonst aus der Parent-Session. Globale Modell-Fallbacks sowie Session-Overrides,
+`agent`-Modellkeys und automatische Vorab-Injektion bleiben entfernt; die
+bestehende gemeinsame Registry-/Capability-Normalisierung wird wiederverwendet.
+Bereits aufgelöste Werte dürfen für Queue und Rendering
+weitergetragen werden; `AgentContinue` nutzt die ursprüngliche Session.
 
-Die Konfiguration akzeptiert und persistiert nur `includeContextFiles`,
-`disableDefaultAgents`, `orchestrationPrompt` und `concurrency.default`.
-Unbekannte `agent`-Schlüssel werden nicht als Modelle interpretiert. Es gibt
-keine benannte Legacy-Migration oder Bereinigung.
+Die Konfiguration akzeptiert und persistiert `includeContextFiles`,
+`disableDefaultAgents`, `orchestrationPrompt`, `concurrency.default` und die
+per-Agent-Map `agents.<name>`. Unbekannte oder ungültige Felder werden an der
+Persistenzgrenze verworfen und nicht als Modelle interpretiert. Es gibt keine
+benannte Legacy-Migration oder Bereinigung.
 
 README, `CONTEXT.md`, Agent-Beispiele, ADR und Konfigurationsreferenz beschreiben
 diesen flachen Ausführungsbaum.
@@ -234,10 +237,11 @@ Diese Phase ist eine interne Vereinfachung und keine Entfernung des Features.
 - README, `CONTEXT.md`, ADR 0001 und dieser Plan beschreiben die statischen
   Tool-Beschreibungen und das flache Root-Modell.
 - Öffentliche Tool-Schemas enthalten keine Model-/Thinking-Spawn-Overrides;
-  diese Werte werden intern aus Agent Markdown oder der Parent-Session aufgelöst.
+  diese Werte werden intern aus persistenten `agents.<name>`-Einstellungen,
+  Agent Markdown oder der Parent-Session aufgelöst.
 - Die bestätigte Vereinfachung von Identität, Skills/Extensions, Replace-Prompts
-  und Agent-Markdown-Modell/Thinking ist in den relevanten Verträgen und Tests
-  abgebildet.
+  und der per-Agent-Modell-/Thinking-Auflösung ist in den relevanten Verträgen
+  und Tests abgebildet.
 - Hintergrundzustellung ist pro Ausführung claim-basiert: jede Background- oder
   `AgentContinue`-Ausführung erhält nach kurzer Verzögerung ihre eigene Message
   und genau einen automatischen `sendMessage`-Versuch. Ein `sendMessage`-Fehler

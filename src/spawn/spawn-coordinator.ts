@@ -1,7 +1,6 @@
 import { getPiInstance, getSessionCtx, getStore, getSubagentRuntimeContext } from "../shell.js";
 import { SHORT_ID_LENGTH } from "../types.js";
-import { normalizeThinkingLevel } from "../models/thinking.js";
-import { findModelInRegistry } from "../utils.js";
+import { resolveAgentTunables } from "../models/agent-resolution.js";
 import { getStatusNote } from "../status-note.js";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -135,12 +134,19 @@ export class SpawnCoordinator {
     const canonicalType = resolveType(intent.type) ?? intent.type;
     const selectedConfig = intent.agentConfig ?? getAgentConfig(canonicalType);
     const agentConfig = selectedConfig ? snapshotAgentConfig(selectedConfig) : undefined;
-    const model = intent.model ?? findModelInRegistry(agentConfig?.model, ctx.modelRegistry, ctx.model);
-    const thinkingLevel = normalizeThinkingLevel(
-      model,
-      intent.thinkingLevel ?? agentConfig?.thinkingLevel ?? ctx.thinkingLevel,
-    );
-    const modelKey = intent.modelKey ?? (model ? `${model.provider}/${model.id}` : undefined);
+    const resolvedTunables = resolveAgentTunables({
+      agentName: canonicalType,
+      agentConfig,
+      overrides: runtimeSettings.agents,
+      modelRegistry: ctx.modelRegistry,
+      parentModel: ctx.model,
+      parentThinking: ctx.thinkingLevel,
+      baseModel: intent.model,
+      requestedThinking: intent.thinkingLevel,
+    });
+    const model = resolvedTunables.model;
+    const thinkingLevel = resolvedTunables.thinkingLevel;
+    const modelKey = resolvedTunables.modelKey ?? intent.modelKey;
     const { type, prompt, runInBackground, invocation, signal, runtimeSettingsSnapshot: _runtimeSettingsSnapshot, ...config } = intent;
     const spawnOptions: SpawnOptions = {
       ...config,

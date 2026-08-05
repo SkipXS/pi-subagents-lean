@@ -73,9 +73,10 @@ catalog and operating advice.
 | `worktree_path` | no | Root-only absolute path or parent-CWD-relative path inside a worktree of the parent repository. It is validated with Git. A trusted selected worktree may add a spawn-local `.pi/agents/` overlay. |
 
 The public tool deliberately has no model or thinking parameters. Configure
-model and thinking only in the selected Agent Markdown definition; when a field
-is absent, the parent session's value is used. Every `Agent` call is a root
-launch owned by the parent session.
+these values in the selected Agent Markdown definition or with the persistent
+`agents.<name>` settings below; settings win independently per field, and an
+absent field falls back to the Markdown definition and then the parent session.
+Every `Agent` call is a root launch owned by the parent session.
 
 In Pi's interactive tool rows, `Agent` displays the canonical role, resolved
 `provider/model-id`, normalized thinking level, and the complete prompt. The
@@ -263,8 +264,8 @@ exclude_tools: [bash]
 
 | Field | Accepted value | Default | Behavior |
 |---|---|---|---|
-| `model` | `provider/model-id` | parent session | Role-level model. Invalid or unavailable registry entries fall back to the parent model. |
-| `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | parent session | Role-level reasoning level; invalid values are ignored. Provider capability normalization may adjust the selected level. |
+| `model` | `provider/model-id` | parent session | Markdown role-level model. A persistent `agents.<name>.model` value takes precedence; invalid or unavailable registry entries fall through. |
+| `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` | parent session | Markdown role-level reasoning level. A persistent `agents.<name>.thinking` value takes precedence; invalid values are ignored and provider capability normalization may adjust the selected level. |
 
 ### Parent orchestration guidance
 
@@ -318,13 +319,17 @@ never registered in a subagent session.
 
 ### Model and thinking resolution
 
-The selected Agent Markdown definition is the only subagent-specific source for
-`model` and `thinking`. If either field is absent, the calling parent session's
-value is used. A model key is validated against Pi's model registry; malformed or
-unavailable entries fall back to the parent model. Thinking levels are normalized
-to the selected provider's supported levels. Queueing and rendering may carry
-the already-resolved values internally, while `AgentContinue` reuses the
-original session rather than resolving a new model or thinking level.
+The effective merged Agent Markdown definition supplies `model` and `thinking`,
+with optional persistent `agents.<name>` values taking precedence independently
+per field. If a field is absent in both places, the calling parent session's
+value is used. Agent names are matched case-insensitively, including bundled,
+user, shared, project, and worktree-discovered definitions. Model keys use Pi's
+existing registry lookup and fallback chain; malformed or unavailable settings
+fall through to the effective Markdown model and then the parent model.
+Thinking values use the existing provider-capability normalization. Queueing and
+rendering may carry the already-resolved values internally, while
+`AgentContinue` reuses the original session rather than resolving a new model or
+thinking level.
 
 ### System prompt and context
 
@@ -357,8 +362,9 @@ log at turn end. These diagnostics do not require a custom UI.
 ## Configuration reference
 
 `~/.pi/agent/subagents-lean.json` is edited directly or by another host-side
-configuration writer. Only current runtime settings are accepted and persisted;
-unknown `agent` keys are ignored and never treated as model selections.
+configuration writer. Only current runtime settings and the top-level `agents`
+map are accepted and persisted. Unknown or invalid fields in `agent` and in an
+agent override are discarded; they are never treated as model selections.
 
 ### Execution, catalog, and prompt settings
 
@@ -368,8 +374,17 @@ unknown `agent` keys are ignored and never treated as model selections.
 | `agent.disableDefaultAgents` | `false` | Exclude bundled roles from the next parent refresh and on-demand discovery. |
 | `agent.orchestrationPrompt` | `true` | Add the generated parent-only routing guidance and visible catalog, or remove the extension's existing block when false. |
 | `agent.includeContextFiles` | `true` | Include applicable project and user `AGENTS.md` context. |
+| `agents.<name>.model` | absent | Persistent `provider/model-id` override. Registry-invalid or unavailable values fall through to the effective Markdown model and then the parent. |
+| `agents.<name>.thinking` | absent | Persistent `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` override. Provider capability normalization may adjust it. |
 
-Model and thinking are configured in Agent Markdown, not in this JSON file.
+`agents.<name>` matches the effective agent name case-insensitively and applies
+to bundled and discovered agents, including trusted worktree overlays. The
+precedence for each field is `agents.<name>` > effective Agent Markdown
+(including discovery merge) > parent session; model and thinking therefore fall
+back independently. Names are normalized to lowercase at load time. If a JSON
+object contains case variants such as `Scout` and `scout`, the last entry in
+property/input order wins as a complete override object.
+
 Missing `skills` and `extensions` frontmatter fields resolve to `false` after
 catalog merging.
 
@@ -381,6 +396,12 @@ Example configuration:
     "orchestrationPrompt": true,
     "includeContextFiles": true,
     "disableDefaultAgents": false
+  },
+  "agents": {
+    "implementer": {
+      "model": "anthropic/claude-sonnet-4-6",
+      "thinking": "high"
+    }
   },
   "concurrency": {
     "default": 4
