@@ -261,6 +261,78 @@ body
 /* ------------------------------------------------------------------ */
 
 describe("scanAgentFilesInDir", () => {
+  it("reuses unchanged files and notices create, change, delete, and rename", async () => {
+    const { dir, cleanup } = tempDirWithFiles([], "agent-discovery-cache");
+    const readFile = vi.spyOn(fs.promises, "readFile");
+    const firstPath = join(dir, "first.md");
+    const renamedPath = join(dir, "renamed.md");
+
+    try {
+      // A cached negative directory result must not hide a later creation.
+      expect(await scanAgentFilesInDir(dir)).toEqual([]);
+      expect(readFile).not.toHaveBeenCalled();
+
+      fs.writeFileSync(firstPath, makeAgentMd({ name: "first", description: "Initial" }));
+      expect((await scanAgentFilesInDir(dir)).map(({ description }) => description)).toEqual(["Initial"]);
+      expect(readFile).toHaveBeenCalledTimes(1);
+
+      // An unchanged fingerprint reuses the parsed definition.
+      await scanAgentFilesInDir(dir);
+      expect(readFile).toHaveBeenCalledTimes(1);
+
+      fs.writeFileSync(firstPath, makeAgentMd({ name: "first", description: "Changed" }));
+      expect((await scanAgentFilesInDir(dir))[0]?.description).toBe("Changed");
+      expect(readFile).toHaveBeenCalledTimes(2);
+
+      fs.unlinkSync(firstPath);
+      expect(await scanAgentFilesInDir(dir)).toEqual([]);
+
+      fs.writeFileSync(renamedPath, makeAgentMd({ description: "Renamed", _skip: ["name"] }));
+      expect((await scanAgentFilesInDir(dir))[0]).toMatchObject({
+        name: "renamed",
+        description: "Renamed",
+      });
+      expect(readFile).toHaveBeenCalledTimes(3);
+      await scanAgentFilesInDir(dir);
+      expect(readFile).toHaveBeenCalledTimes(3);
+    } finally {
+      readFile.mockRestore();
+      cleanup();
+    }
+  });
+
+  it("bounds path caches while retaining recent entries", async () => {
+    const { dir, cleanup } = tempDirWithFiles([], "agent-discovery-lru");
+    const readFile = vi.spyOn(fs.promises, "readFile");
+    const directories = Array.from({ length: 256 }, (_, index) => join(dir, `agent-${index}`));
+
+    try {
+      for (const [index, child] of directories.entries()) {
+        fs.mkdirSync(child);
+        fs.writeFileSync(join(child, "agent.md"), makeAgentMd({ name: `agent-${index}` }));
+        await scanAgentFilesInDir(child);
+      }
+
+      // A hit refreshes recency, so adding one more path evicts agent-1 rather
+      // than the recently used agent-0 entry.
+      const readsBeforeHit = readFile.mock.calls.length;
+      await scanAgentFilesInDir(directories[0]!);
+      expect(readFile).toHaveBeenCalledTimes(readsBeforeHit);
+      const readsBeforeEviction = readFile.mock.calls.length;
+      const extra = join(dir, "agent-extra");
+      fs.mkdirSync(extra);
+      fs.writeFileSync(join(extra, "agent.md"), makeAgentMd({ name: "agent-extra" }));
+      await scanAgentFilesInDir(extra);
+      await scanAgentFilesInDir(directories[0]!);
+      expect(readFile).toHaveBeenCalledTimes(readsBeforeEviction + 1);
+      await scanAgentFilesInDir(directories[1]!);
+      expect(readFile).toHaveBeenCalledTimes(readsBeforeEviction + 2);
+    } finally {
+      readFile.mockRestore();
+      cleanup();
+    }
+  });
+
   it("returns empty array for non-existent directory", async () => {
     const result = await scanAgentFilesInDir("/tmp/nonexistent-sdf9asdf", "user");
     expect(result).toEqual([]);
@@ -292,6 +364,28 @@ describe("scanAgentFilesInDir", () => {
       expect(agents.find((a) => a.name === "beta")?.model).toBe("model/b");
       expect(agents.find((a) => a.name === "gamma")?.model).toBeUndefined();
     } finally {
+      cleanup();
+    }
+  });
+
+  it("processes Markdown files in deterministic filename order", async () => {
+    const firstContent = makeAgentMd({ name: "same", description: "First" });
+    const lastContent = makeAgentMd({ name: "same", description: "Last" });
+    const { dir, cleanup } = tempDirWithFiles([
+      { name: "a-first.md", content: firstContent },
+      { name: "z-last.md", content: lastContent },
+    ]);
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    const readdir = vi.spyOn(fs.promises, "readdir").mockResolvedValue([...entries].reverse() as never);
+
+    try {
+      const agents = await scanAgentFilesInDir(dir, "user");
+      // Later filenames win same-layer merges, regardless of filesystem order.
+      expect(agents.map((agent) => agent.description)).toEqual(["First", "Last"]);
+      const merged = mergeAgents(new Map(), agents, [], []);
+      expect(merged.get("same")?.description).toBe("Last");
+    } finally {
+      readdir.mockRestore();
       cleanup();
     }
   });

@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fakeCtx, fakePi as makeFakePi } from "../fixtures.ts";
 import type { AgentConfig } from "../../src/agents/types.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { acceptResolvedSpawn, snapshotResolvedSpawn } from "../../src/spawn/spawn-contract.js";
 
 const fakePi = makeFakePi();
 
@@ -1758,6 +1759,58 @@ describe("runAgent — agent config snapshot", () => {
       model,
       thinkingLevel: "minimal",
     });
+  });
+
+  it("uses the accepted contract without registry or tunable re-resolution", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    const config: AgentConfig = {
+      name: "accepted",
+      description: "Accepted",
+      systemPrompt: "Accepted prompt.",
+      registeredTools: ["read"],
+      tools: ["read"],
+      extensions: false,
+      skills: false,
+    };
+    const model = { provider: "accepted", id: "model" };
+    const runtimeSettings = {
+      agent: { includeContextFiles: false, disableDefaultAgents: false, orchestrationPrompt: true },
+      agents: { accepted: { model: "settings/model" } },
+    } as any;
+    const acceptedSpawn = acceptResolvedSpawn(snapshotResolvedSpawn({
+      type: "accepted",
+      prompt: "accepted prompt",
+      description: "Accepted",
+      runInBackground: false,
+      agentConfig: config,
+      runtimeSettings,
+      model: model as any,
+      modelKey: "accepted/model",
+      thinkingLevel: "high",
+    }));
+    mockModules.mockGetConfig.mockImplementation(() => { throw new Error("config registry must not be read"); });
+    mockModules.mockGetAgentConfig.mockImplementation(() => { throw new Error("agent registry must not be read"); });
+
+    await runAgent(fakeCtx(), "stale", "stale prompt", {
+      pi: fakePi,
+      acceptedSpawn,
+    });
+
+    expect(mockModules.mockGetConfig).not.toHaveBeenCalled();
+    expect(mockModules.mockGetAgentConfig).not.toHaveBeenCalled();
+    expect(mockModules.mockCreateAgentSession.mock.calls[0][0]).toMatchObject({
+      model,
+      thinkingLevel: "high",
+    });
+    expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
+      config,
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(session.prompt).toHaveBeenCalledWith("accepted prompt");
   });
 
   it("rejects an unknown type instead of applying a fallback definition", async () => {

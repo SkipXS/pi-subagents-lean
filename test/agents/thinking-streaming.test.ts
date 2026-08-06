@@ -12,13 +12,22 @@ import {
   createOutputFilePath,
   writeInitialEntry,
   streamToOutputFile,
+  whenOutputLogsIdle,
 } from "../../src/agents/output-file.js";
 
 const testAgentId = "test-thinking-streaming";
 const fixture = tempDirFixture();
 
+async function readLog(path: string): Promise<string> {
+  await whenOutputLogsIdle();
+  return readFileSync(path, "utf-8");
+}
+
 beforeEach(() => fixture.setup());
-afterEach(() => fixture.teardown());
+afterEach(async () => {
+  await whenOutputLogsIdle();
+  fixture.teardown();
+});
 
 function setupSession(messages: any[]) {
   const session = createMockSession() as any;
@@ -27,7 +36,7 @@ function setupSession(messages: any[]) {
 }
 
 describe("turn-end thinking output", () => {
-  it("does not write thinking deltas before turn_end", () => {
+  it("does not write thinking deltas before turn_end", async () => {
     const dir = fixture.getDir();
     const path = createOutputFilePath(testAgentId, dir);
     writeInitialEntry(path, "test");
@@ -42,17 +51,17 @@ describe("turn-end thinking output", () => {
     session._fireThinkingDelta("Let me think...");
     session._fireThinkingEnd("Let me think...");
 
-    expect(readFileSync(path, "utf-8")).not.toContain("Let me think...");
+    expect(await readLog(path)).not.toContain("Let me think...");
 
     session._fireTurnEnd();
 
-    const content = readFileSync(path, "utf-8");
+    const content = await readLog(path);
     expect(content).toContain("[THINKING]");
     expect(content).toContain("Let me think...");
     cleanup();
   });
 
-  it("writes every thinking block once at turn_end", () => {
+  it("writes every thinking block once at turn_end", async () => {
     const dir = fixture.getDir();
     const path = createOutputFilePath(testAgentId, dir);
     writeInitialEntry(path, "test");
@@ -74,7 +83,7 @@ describe("turn-end thinking output", () => {
     session._fireThinkingEnd("First block");
     session._fireTurnEnd();
 
-    const content = readFileSync(path, "utf-8");
+    const content = await readLog(path);
     expect(content).toContain("[THINKING] First block");
     expect(content).toContain("[THINKING] Second block");
     expect(content).toContain("[ASSISTANT] Response");

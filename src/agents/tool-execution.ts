@@ -21,6 +21,7 @@ import { resolveType, getAgentConfig, discoverNewAgents, resolveAgentCatalog, re
 import { buildAgentDetails } from "./agent-details.js";
 export { buildAgentDetails } from "./agent-details.js";
 import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-validator.js";
+import { snapshotResolvedSpawn, snapshotRuntimeSettings } from "../spawn/spawn-contract.js";
 
 import { resolveAgentTunables } from "../models/agent-resolution.js";
 import { getSubagentRuntimeContext } from "../shell.js";
@@ -260,6 +261,7 @@ export async function executeAgentTool(
   if (!coordinator || !getManager()) {
     return errorResult("Agent execution is unavailable until the root session is ready");
   }
+  const store = getStore();
 
   // Validate worktree_path early — needed for on-demand agent discovery
   const rawWorktreePath = params.worktree_path as string | undefined;
@@ -309,7 +311,7 @@ export async function executeAgentTool(
     validatedWorktreePath = validation.resolvedPath;
     worktreeLabel = validation.label;
     const catalog = await resolveAgentCatalog(`${validatedWorktreePath}/.pi/agents`, {
-      disableDefaultAgents: getStore().agent.disableDefaultAgents,
+      disableDefaultAgents: store.agent.disableDefaultAgents,
     });
     if (signal?.aborted) return cancelledResult();
     resolvedType = resolveTypeInCatalog(catalog, type);
@@ -317,7 +319,7 @@ export async function executeAgentTool(
   } else {
     resolvedType = resolveType(type);
     if (!resolvedType) {
-      await discoverNewAgents({ disableDefaultAgents: getStore().agent.disableDefaultAgents });
+      await discoverNewAgents({ disableDefaultAgents: store.agent.disableDefaultAgents });
       if (signal?.aborted) return cancelledResult();
       resolvedType = resolveType(type);
     }
@@ -332,15 +334,15 @@ export async function executeAgentTool(
   // Persisted per-agent settings are applied above the effective merged
   // Markdown definition. The runtime snapshot keeps the accepted spawn stable
   // if config is reloaded while it waits for a concurrency slot.
-  const store = getStore();
   const runtimeSettingsSnapshot = typeof store.createSubagentRuntimeSettings === "function"
     ? store.createSubagentRuntimeSettings()
     : undefined;
+  const runtimeSettings = snapshotRuntimeSettings(runtimeSettingsSnapshot);
   const shouldRunInBackground = runInBackground === true;
   const resolvedTunables = resolveAgentTunables({
     agentName: resolvedType,
     agentConfig,
-    overrides: runtimeSettingsSnapshot?.agents,
+    overrides: runtimeSettings.agents,
     modelRegistry: ctx.modelRegistry,
     parentModel: ctx.model,
     parentThinking: ctx.thinkingLevel,
@@ -349,6 +351,27 @@ export async function executeAgentTool(
   const modelKey = resolvedTunables.modelKey;
   const modelName = model?.id;
   const thinkingLevel = resolvedTunables.thinkingLevel;
+  const resolvedSpawn = snapshotResolvedSpawn({
+    type: resolvedType,
+    prompt,
+    description,
+    runInBackground: shouldRunInBackground,
+    agentConfig,
+    runtimeSettings,
+    model,
+    modelKey,
+    thinkingLevel,
+    worktreePath: validatedWorktreePath,
+    worktreeLabel,
+    worktreeParentCwd: validatedWorktreePath ? parentCwd : undefined,
+    worktreeSelectionPath: validatedWorktreePath ? rawWorktreePath : undefined,
+    invocation: {
+      modelName,
+      ...(modelKey !== undefined ? { modelKey } : {}),
+      thinkingLevel,
+    },
+    signal,
+  });
 
   // renderCall runs before this asynchronous resolution. Publish the resolved
   // values as a row-local partial update immediately, including the abort and
@@ -401,6 +424,7 @@ export async function executeAgentTool(
         thinkingLevel,
       },
       runtimeSettingsSnapshot,
+      resolvedSpawn,
       runInBackground: shouldRunInBackground,
       signal,
     });

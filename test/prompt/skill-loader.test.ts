@@ -11,14 +11,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadSkillMeta, loadAllSkills } from "../../src/prompt/skill-loader.ts";
 import { buildAgentPrompt } from "../../src/prompt/prompts.ts";
 import type { AgentConfig, EnvInfo } from "../../src/types.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
-import { createSkillDir, createFlatSkill } from "../fixtures.ts";
+import { canCreateDirectoryLinks, canCreateSymlinks, createDirectoryLink, createSkillDir, createFlatSkill } from "../fixtures.ts";
 
 const { mockLoadSkills, mockLoadSkillsFromDir, mockFormatSkillsForPrompt, mockGetAgentDir } = vi.hoisted(() => ({
   mockLoadSkills: vi.fn(),
@@ -154,6 +154,100 @@ describe("loadAllSkills", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].description).toBe("First");
+  });
+
+  it("keeps symlinked file metadata in the source fingerprint", () => {
+    if (!canCreateSymlinks()) return;
+    const skillsRoot = join(tmpDir, ".pi", "skills");
+    const target = join(tmpDir, "target.md");
+    const link = join(skillsRoot, "linked.md");
+    mkdirSync(skillsRoot, { recursive: true });
+    writeFileSync(target, "target");
+    symlinkSync(target, link, "file");
+    mockLoadSkills.mockReturnValue({ skills: [], diagnostics: [] });
+
+    expect(loadAllSkills(tmpDir)).toEqual([]);
+    expect(loadAllSkills(tmpDir)).toEqual([]);
+    expect(mockLoadSkills).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries an unstable source instead of caching a broken symlink", () => {
+    if (!canCreateDirectoryLinks()) return;
+    const skillsRoot = join(tmpDir, ".pi", "skills");
+    const target = join(tmpDir, "missing-target");
+    const brokenLink = join(skillsRoot, "broken");
+    mkdirSync(skillsRoot, { recursive: true });
+    mkdirSync(target);
+    createDirectoryLink(target, brokenLink);
+    rmSync(target, { recursive: true, force: true });
+    mockLoadSkills.mockReturnValue({ skills: [], diagnostics: [] });
+
+    // A broken link makes the metadata snapshot unstable. Pi is still called
+    // on every lookup rather than retaining an uncertain negative result.
+    expect(loadAllSkills(tmpDir)).toEqual([]);
+    expect(loadAllSkills(tmpDir)).toEqual([]);
+    expect(mockLoadSkills).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds default-source cache paths while retaining recent hits", () => {
+    const cwdPaths = Array.from({ length: 128 }, (_, index) => join(tmpDir, `cwd-${index}`));
+    for (const cwd of cwdPaths) loadAllSkills(cwd);
+
+    const callsBeforeHit = mockLoadSkills.mock.calls.length;
+    loadAllSkills(cwdPaths[0]!);
+    expect(mockLoadSkills).toHaveBeenCalledTimes(callsBeforeHit);
+
+    const extraCwd = join(tmpDir, "cwd-extra");
+    loadAllSkills(extraCwd);
+    loadAllSkills(cwdPaths[0]!);
+    expect(mockLoadSkills).toHaveBeenCalledTimes(callsBeforeHit + 1);
+
+    // cwd-1 was the least-recently-used entry after the cwd-0 hit.
+    loadAllSkills(cwdPaths[1]!);
+    expect(mockLoadSkills).toHaveBeenCalledTimes(callsBeforeHit + 2);
+  });
+
+  it("reuses unchanged Pi sources and invalidates negative, changed, deleted, and renamed skills", () => {
+    const skillDir = join(tmpDir, ".pi", "skills", "cached");
+    const skillPath = join(skillDir, "SKILL.md");
+    const renamedDir = join(tmpDir, ".pi", "skills", "renamed");
+    const renamedPath = join(renamedDir, "SKILL.md");
+    let loadedSkills: Skill[] = [];
+    mockLoadSkills.mockImplementation(() => ({ skills: loadedSkills, diagnostics: [] }));
+
+    // The initial negative result is cached, but not permanently.
+    expect(loadAllSkills(tmpDir)).toEqual([]);
+    expect(mockLoadSkills).toHaveBeenCalledTimes(1);
+    loadAllSkills(tmpDir);
+    expect(mockLoadSkills).toHaveBeenCalledTimes(1);
+
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillPath, "initial");
+    loadedSkills = [makeSkill("cached", "Initial", skillPath)];
+    expect(loadAllSkills(tmpDir).map(({ description }) => description)).toEqual(["Initial"]);
+    expect(mockLoadSkills).toHaveBeenCalledTimes(2);
+
+    // The returned cache is detached from a caller mutation.
+    const cachedResult = loadAllSkills(tmpDir);
+    cachedResult[0].description = "caller mutation";
+    expect(loadAllSkills(tmpDir)[0]?.description).toBe("Initial");
+    expect(mockLoadSkills).toHaveBeenCalledTimes(2);
+
+    writeFileSync(skillPath, "changed");
+    loadedSkills = [makeSkill("cached", "Changed", skillPath)];
+    expect(loadAllSkills(tmpDir)[0]?.description).toBe("Changed");
+    expect(mockLoadSkills).toHaveBeenCalledTimes(3);
+
+    rmSync(skillDir, { recursive: true, force: true });
+    loadedSkills = [];
+    expect(loadAllSkills(tmpDir)).toEqual([]);
+    expect(mockLoadSkills).toHaveBeenCalledTimes(4);
+
+    mkdirSync(renamedDir, { recursive: true });
+    writeFileSync(renamedPath, "renamed");
+    loadedSkills = [makeSkill("renamed", "Renamed", renamedPath)];
+    expect(loadAllSkills(tmpDir)[0]?.name).toBe("renamed");
+    expect(mockLoadSkills).toHaveBeenCalledTimes(5);
   });
 });
 
