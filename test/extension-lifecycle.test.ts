@@ -71,7 +71,11 @@ vi.mock("../src/shell.js", () => ({
 
 import { setupEventListeners } from "../src/events.js";
 import { AgentRenderMetadataBridge } from "../src/agents/agent-render-bridge.js";
-import { AGENT_RENDER_DETAILS_KEY } from "../src/agents/agent-renderer.js";
+import {
+  AGENT_RENDER_DETAILS_KEY,
+  renderAgentCall,
+  stopAgentRendererTimers,
+} from "../src/agents/agent-renderer.js";
 
 function createContext(): ExtensionContext {
   return {
@@ -141,6 +145,57 @@ describe("headless extension session lifecycle", () => {
     })).toBeUndefined();
     expect(bridge.pendingCount()).toBe(0);
     bridge.clear();
+  });
+
+  it("ends row timers on reload and session shutdown", async () => {
+    vi.useFakeTimers();
+    try {
+      const listeners = new Map<string, (...args: any[]) => any>();
+      setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+      const ctx = createContext();
+      await listeners.get("session_start")!({}, ctx);
+
+      const firstRow: any = {
+        args: { agent: "scout", prompt: "inspect" },
+        state: {},
+        lastComponent: undefined,
+        executionStarted: false,
+        isPartial: true,
+        invalidate: undefined,
+      };
+      firstRow.invalidate = vi.fn(() => renderAgentCall(firstRow.args, {}, firstRow));
+      const unopenedFirstRow = renderAgentCall(firstRow.args, {}, firstRow);
+      firstRow.lastComponent = unopenedFirstRow;
+      firstRow.executionStarted = true;
+      renderAgentCall(firstRow.args, {}, firstRow);
+      expect(vi.getTimerCount()).toBe(1);
+
+      // Pi emits session_start for reload after the old runtime has begun its
+      // replacement. The renderer lifecycle is stopped synchronously rather
+      // than waiting for manager disposal.
+      await listeners.get("session_start")!({}, ctx);
+      expect(vi.getTimerCount()).toBe(0);
+
+      const secondRow: any = {
+        args: { agent: "scout", prompt: "inspect again" },
+        state: {},
+        lastComponent: undefined,
+        executionStarted: false,
+        isPartial: true,
+        invalidate: undefined,
+      };
+      secondRow.invalidate = vi.fn(() => renderAgentCall(secondRow.args, {}, secondRow));
+      const unopenedSecondRow = renderAgentCall(secondRow.args, {}, secondRow);
+      secondRow.lastComponent = unopenedSecondRow;
+      secondRow.executionStarted = true;
+      renderAgentCall(secondRow.args, {}, secondRow);
+      expect(vi.getTimerCount()).toBe(1);
+      await listeners.get("session_shutdown")!({}, ctx);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      stopAgentRendererTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("creates and disposes root services on session start/shutdown", async () => {

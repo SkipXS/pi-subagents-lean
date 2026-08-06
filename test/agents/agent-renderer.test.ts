@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_RENDER_DETAILS_KEY,
   AgentCallDetailsComponent,
@@ -8,21 +8,37 @@ import {
   formatStopAgentCallText,
   renderAgentCall,
   renderAgentContinueCall,
+  AGENT_WORKING_SPINNER_FRAMES,
+  AGENT_WORKING_SPINNER_INTERVAL_MS,
   renderAgentResult,
   renderStopAgentCall,
   renderSubagentResult,
+  stopAgentRendererTimers,
   visibleWidth,
 } from "../../src/agents/agent-renderer.js";
 
 const theme = { fg: (_name: string, text: string) => text };
 
-function context(args: unknown = {}): any {
+function context(
+  args: unknown = {},
+  lifecycle: { executionStarted?: boolean; isPartial?: boolean; isError?: boolean } = {},
+): any {
   return {
     args,
     state: {},
     lastComponent: undefined,
     invalidate: vi.fn(),
+    ...lifecycle,
   };
+}
+
+function interactiveContext(
+  args: unknown,
+  render: (args: unknown, theme: unknown, context: any) => unknown = renderAgentCall,
+): any {
+  const ctx = context(args, { executionStarted: false, isPartial: true });
+  ctx.invalidate = vi.fn(() => render(ctx.args, theme, ctx));
+  return ctx;
 }
 
 function visibleLines(component: { render(width: number): string[] }, width = 200): string[] {
@@ -41,6 +57,11 @@ const completeUsageDetails = {
   autoCompactionEnabled: true,
   usingSubscription: true,
 };
+
+afterEach(() => {
+  stopAgentRendererTimers();
+  vi.useRealTimers();
+});
 
 describe("Agent call renderer", () => {
   it("formats AgentContinue with the requested ID before hydration", () => {
@@ -392,6 +413,113 @@ describe("Agent call renderer", () => {
     expect(ctx.invalidate).toHaveBeenCalledTimes(1);
   });
 
+  it("uses Pi's exact working spinner frames and interval only for open foreground executions", () => {
+    vi.useFakeTimers();
+    expect(AGENT_WORKING_SPINNER_FRAMES).toEqual(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
+    expect(AGENT_WORKING_SPINNER_INTERVAL_MS).toBe(80);
+
+    const ctx = interactiveContext({ agent: "scout", prompt: "inspect" });
+    const unopened = renderAgentCall(ctx.args, theme, ctx);
+    ctx.lastComponent = unopened;
+    ctx.executionStarted = true;
+    const call = renderAgentCall(ctx.args, theme, ctx);
+    ctx.invalidate.mockClear();
+    expect(visibleLines(call)[0]).toBe("⠋ Role: scout | Model: — | Thinking: — | Mode: Foreground | Run: New");
+    expect(vi.getTimerCount()).toBe(1);
+
+    vi.advanceTimersByTime(AGENT_WORKING_SPINNER_INTERVAL_MS);
+    expect(ctx.invalidate).toHaveBeenCalledOnce();
+    const secondFrame = renderAgentCall(ctx.args, theme, { ...ctx, lastComponent: call });
+    expect(visibleLines(secondFrame)[0]).toBe("⠙ Role: scout | Model: — | Thinking: — | Mode: Foreground | Run: New");
+
+    renderAgentResult(
+      { content: [{ type: "text", text: "done" }] },
+      { isPartial: false },
+      theme,
+      { ...ctx, lastComponent: undefined, isPartial: false },
+      "Agent",
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    expect(visibleLines(call)[0]).toBe("✓ Role: scout | Model: — | Thinking: — | Mode: Foreground | Run: New");
+  });
+
+  it("does not animate background acknowledgements or pre-execution rows", () => {
+    vi.useFakeTimers();
+    const background = context(
+      { agent: "scout", prompt: "inspect", run_in_background: true },
+      { executionStarted: true, isPartial: true },
+    );
+    const backgroundCall = renderAgentCall(background.args, theme, background);
+    expect(visibleLines(backgroundCall)[0]).toBe("Role: scout | Model: — | Thinking: — | Mode: Background | Run: New");
+    expect(vi.getTimerCount()).toBe(0);
+
+    renderAgentResult(
+      { content: [{ type: "text", text: "ack" }] },
+      { isPartial: false },
+      theme,
+      { ...background, lastComponent: undefined, isPartial: false },
+      "Agent",
+    );
+    expect(visibleLines(backgroundCall)[0]).toBe("● Role: scout | Model: — | Thinking: — | Mode: Background | Run: New");
+    expect(visibleLines(backgroundCall)[0]).not.toContain("◷");
+
+    renderAgentResult(
+      { content: [{ type: "text", text: "queued" }], details: { status: "queued" } },
+      { isPartial: false },
+      theme,
+      { ...background, lastComponent: undefined, isPartial: false },
+      "Agent",
+    );
+    expect(visibleLines(backgroundCall)[0]).toBe("◷ Role: scout | Model: — | Thinking: — | Mode: Background | Run: New");
+    expect(vi.getTimerCount()).toBe(0);
+
+    const beforeStart = context(
+      { agent: "scout", prompt: "inspect" },
+      { executionStarted: false, isPartial: true },
+    );
+    const beforeStartCall = renderAgentCall(beforeStart.args, theme, beforeStart);
+    expect(visibleLines(beforeStartCall)[0]).toBe("Role: scout | Model: — | Thinking: — | Mode: Foreground | Run: New");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("uses a static error marker and stops on abort, including component replacement", () => {
+    vi.useFakeTimers();
+    const ctx = interactiveContext(
+      { agent_id: "agent", prompt: "continue", run_in_background: false },
+      renderAgentContinueCall,
+    );
+    const unopened = renderAgentContinueCall(ctx.args, theme, ctx);
+    ctx.lastComponent = unopened;
+    ctx.executionStarted = true;
+    const call = renderAgentContinueCall(ctx.args, theme, ctx);
+    expect(vi.getTimerCount()).toBe(1);
+
+    const replacement = renderAgentContinueCall(ctx.args, theme, {
+      ...ctx,
+      lastComponent: new AgentCallDetailsComponent(),
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(visibleLines(replacement)[0]).toBe("Role: — | Agent ID: agent | Model: — | Thinking: — | Mode: Foreground | Run: Continued");
+
+    // A fresh row proves the terminal error path independently of the
+    // component-replacement cleanup above.
+    const aborted = interactiveContext({ agent: "scout", prompt: "abort me" });
+    const unopenedAborted = renderAgentCall(aborted.args, theme, aborted);
+    aborted.lastComponent = unopenedAborted;
+    aborted.executionStarted = true;
+    const abortedCall = renderAgentCall(aborted.args, theme, aborted);
+    renderAgentResult(
+      { content: [{ type: "text", text: "cancelled" }], details: { status: "aborted" } },
+      { isPartial: false },
+      theme,
+      { ...aborted, lastComponent: undefined, isPartial: false, isError: false },
+      "Agent",
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    expect(visibleLines(abortedCall)[0]).toBe("✗ Role: scout | Model: — | Thinking: — | Mode: Foreground | Run: New");
+    expect(call).toBeInstanceOf(AgentCallDetailsComponent);
+  });
+
   it("keeps contexts row-local and remains defensive for early/error results", () => {
     const first = context({ agent: "first", prompt: "one" });
     const second = context({ agent: "second", prompt: "two" });
@@ -400,7 +528,7 @@ describe("Agent call renderer", () => {
 
     renderAgentResult({ content: [], details: undefined }, { isPartial: false }, theme, first);
 
-    expect(visibleLines(firstCall)[0]).toBe("Role: first | Model: — | Thinking: — | Mode: Foreground | Run: New");
+    expect(visibleLines(firstCall)[0]).toBe("✓ Role: first | Model: — | Thinking: — | Mode: Foreground | Run: New");
     expect(visibleLines(secondCall)[0]).toBe("Role: second | Model: — | Thinking: — | Mode: Foreground | Run: New");
     expect(first.state[AGENT_RENDER_DETAILS_KEY]).toBeUndefined();
     expect(second.state[AGENT_RENDER_DETAILS_KEY]).toBeUndefined();

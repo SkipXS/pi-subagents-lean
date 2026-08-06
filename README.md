@@ -85,6 +85,14 @@ hydrated with the canonical full ID after spawn acceptance; control rows use
 the resolved full ID when available. `Agent` and `AgentContinue` then show the
 complete prompt.
 
+While an interactive foreground `Agent` or `AgentContinue` tool call is open,
+its row starts Pi's default working spinner (`⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`) at
+80 ms per frame. Completed rows use `✓` on success and `✗` on error or abort;
+a background acknowledgement may use a static `●` and never keeps an animation
+running. No queue glyph is shown unless an authoritative queue state is
+available. These markers are renderer-only and do not change tool results,
+RPC/JSON, or print output.
+
 ### `AgentContinue`
 
 `AgentContinue({ agent_id, prompt, run_in_background })` continues a
