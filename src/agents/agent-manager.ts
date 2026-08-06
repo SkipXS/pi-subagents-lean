@@ -11,6 +11,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { executeAgentTurn, runAgent } from "./agent-runner.js";
 import { AgentOutputLog } from "./output-file.js";
 import {
+  type AgentExecutionMode,
   type AgentExecutionSummary,
   type AgentRecord,
   type AgentStatus,
@@ -38,6 +39,19 @@ export interface ConcurrencyConfig {
 
 export type OnAgentComplete = (record: AgentRecord, execution: AgentExecutionSummary) => void;
 type OnAgentStart = (record: AgentRecord) => void;
+
+/** Read-only projection of one currently running or queued root execution. */
+export interface AgentActivityProjection {
+  readonly agentId: string;
+  readonly type: string;
+  readonly mode: AgentExecutionMode;
+  readonly status: "queued" | "running";
+  readonly executionId: string;
+}
+
+/** Stable, detached activity snapshot exposed to presentation observers. */
+export type AgentActivitySnapshot = readonly AgentActivityProjection[];
+export type AgentActivityObserver = (snapshot: AgentActivitySnapshot) => void;
 
 interface SpawnArgs {
   pi: ExtensionAPI;
@@ -110,6 +124,7 @@ export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
+  private activityObservers = new Set<AgentActivityObserver>();
 
   /** Session-level cumulative agent cost. */
   private totalAgentCost = 0;
@@ -128,6 +143,60 @@ export class AgentManager {
     this.onStart = onStart;
     this.scheduler = new FifoConcurrencyScheduler(concurrency?.default ?? 4);
     this.telemetry = new ExecutionTelemetry((record) => this.agents.get(record.id) === record);
+  }
+
+  /**
+   * Subscribe to detached active-execution projections.
+   *
+   * The observer is additive to the lifecycle callbacks above. A faulty
+   * observer is isolated from manager lifecycle work, and the initial
+   * snapshot is delivered synchronously so a newly mounted session view does
+   * not need to inspect mutable records.
+   */
+  subscribeActivity(observer: AgentActivityObserver): () => void {
+    this.activityObservers.add(observer);
+    this.notifyActivityObserver(observer);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      this.activityObservers.delete(observer);
+    };
+  }
+
+  /** Return a frozen projection containing only the current active execution per record. */
+  getActivitySnapshot(): AgentActivitySnapshot {
+    const projections: AgentActivityProjection[] = [];
+    for (const record of this.agents.values()) {
+      const status = record.lifecycle.status;
+      if (status !== "running" && status !== "queued") continue;
+      const executions = record.stats.executions ?? [];
+      const execution = [...executions].reverse().find((candidate) =>
+        candidate.status === status && (candidate.status === "running" || candidate.status === "queued"),
+      );
+      if (!execution) continue;
+      projections.push(Object.freeze({
+        agentId: record.id,
+        type: record.display.type,
+        mode: execution.mode,
+        status,
+        executionId: execution.id,
+      }));
+    }
+    projections.sort((left, right) => left.agentId < right.agentId ? -1 : left.agentId > right.agentId ? 1 : 0);
+    return Object.freeze(projections);
+  }
+
+  private notifyActivityObserver(observer: AgentActivityObserver): void {
+    try {
+      observer(this.getActivitySnapshot());
+    } catch {
+      // Presentation observers must never affect execution lifecycle.
+    }
+  }
+
+  private notifyActivityObservers(): void {
+    for (const observer of [...this.activityObservers]) this.notifyActivityObserver(observer);
   }
 
   setConcurrency(config: ConcurrencyConfig): void {
@@ -318,6 +387,7 @@ export class AgentManager {
     if (queued) {
       this.scheduler.enqueue(queueEntry!);
       this.bindParentAbortSignal(id, frozenOptions.signal);
+      this.notifyActivityObservers();
       this.totalAgentCount++;
       return id;
     }
@@ -332,6 +402,7 @@ export class AgentManager {
     this.scheduler.acquire();
     try {
       this.startAgent(id, record, args);
+      this.notifyActivityObservers();
     } catch (err) {
       // A synchronous runner/setup failure bypasses the normal completion
       // promise. Close any already-created output execution without waiting for
@@ -340,6 +411,7 @@ export class AgentManager {
       this.scheduler.releaseSlot();
       this.clearParentAbortSignal(id);
       this.agents.delete(id);
+      this.notifyActivityObservers();
       this.startQueuedEntries(this.scheduler.takeNext(
         (entry) => this.canStartQueuedEntry(entry),
       ));
@@ -494,6 +566,7 @@ export class AgentManager {
     if (queued) {
       this.scheduler.enqueue({ kind: "continue", id: resolved.id, request });
       this.bindParentAbortSignal(resolved.id, options.signal);
+      this.notifyActivityObservers();
       return { executionId, record, promise };
     }
 
@@ -509,6 +582,7 @@ export class AgentManager {
     this.scheduler.acquire();
     try {
       this.startContinueExecution(record, request);
+      this.notifyActivityObservers();
     } catch (err) {
       this.scheduler.releaseSlot();
       const failure = errorMessage(err);
@@ -628,6 +702,7 @@ export class AgentManager {
     record.lifecycle.completedAt ??= completedAt;
 
     this.finalizeAgentCompletion(record);
+    this.notifyActivityObservers();
     this.safeNotifyComplete(record, execution);
   }
 
@@ -669,6 +744,7 @@ export class AgentManager {
     this.finalizeOutputLog(record);
     this.setSettled(record);
     this.clearParentAbortSignal(record.id);
+    this.notifyActivityObservers();
     this.safeNotifyComplete(record, execution);
     return true;
   }
@@ -728,6 +804,7 @@ export class AgentManager {
         } else {
           this.startContinueExecution(record, entry.request);
         }
+        this.notifyActivityObservers();
         pending.push(...this.scheduler.takeNext((candidate) => this.canStartQueuedEntry(candidate)));
       } catch (err) {
         this.scheduler.releaseSlot();
@@ -802,6 +879,7 @@ export class AgentManager {
     this.setStatus(record, "stopped");
     record.lifecycle.stoppedBy = stoppedBy;
     record.lifecycle.completedAt = Date.now();
+    this.notifyActivityObservers();
     record.result = undefined;
     const activeExecution = record.stats.executions?.find((execution) => execution.status === "running");
     if (activeExecution) {
@@ -839,5 +917,7 @@ export class AgentManager {
     for (const record of this.agents.values()) record.execution.abortController?.abort();
     for (const [id, record] of this.agents) this.removeRecord(id, record);
     this.agents.clear();
+    this.notifyActivityObservers();
+    this.activityObservers.clear();
   }
 }

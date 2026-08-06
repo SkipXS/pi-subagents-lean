@@ -1244,6 +1244,59 @@ describe("AgentManager steering and shutdown", () => {
     await activePromise;
   });
 
+  it("publishes detached active projections across scheduler transitions and isolates observers", async () => {
+    const first = makeResolvablePromise();
+    const second = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    manager = new AgentManager(undefined, { default: 1 });
+    const snapshots: Array<readonly any[]> = [];
+    manager.subscribeActivity(() => { throw new Error("observer failure"); });
+    const unsubscribe = manager.subscribeActivity((snapshot) => snapshots.push(snapshot));
+
+    const runningId = manager.spawn(fakePi(), fakeCtx(), "scout", "running", {
+      description: "running", isBackground: true,
+    });
+    const queuedId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "queued", {
+      description: "queued", isBackground: false,
+    });
+    const active = snapshots.at(-1)!;
+    expect(active).toHaveLength(2);
+    expect(active).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentId: queuedId, status: "queued", mode: "foreground" }),
+      expect.objectContaining({ agentId: runningId, status: "running", mode: "background" }),
+    ]));
+    expect(Object.isFrozen(active)).toBe(true);
+    expect(Object.isFrozen(active[0])).toBe(true);
+
+    // A lifecycle/execution mismatch is ignored rather than exposing an old
+    // terminal execution as current activity.
+    const runningExecution = manager.getRecord(runningId)!.stats.executions![0]!;
+    runningExecution.status = "completed";
+    expect(manager.getActivitySnapshot()).toHaveLength(1);
+    runningExecution.status = "running";
+
+    // A later record mutation cannot alter the already published projection.
+    manager.getRecord(runningId)!.lifecycle.status = "completed";
+    expect(active.find((entry) => entry.agentId === runningId)?.status).toBe("running");
+    manager.getRecord(runningId)!.lifecycle.status = "running";
+
+    expect(manager.abort(runningId, "user")).toBe(true);
+    expect(manager.getRecord(runningId)?.lifecycle.status).toBe("stopped");
+    first.resolve(mockRunResult({ aborted: true }));
+    await manager.getRecord(runningId)!.execution.promise;
+    await vi.waitFor(() => expect(manager.getRecord(queuedId)?.lifecycle.status).toBe("running"));
+    expect(snapshots.at(-1)).toEqual([
+      expect.objectContaining({ agentId: queuedId, status: "running", mode: "foreground" }),
+    ]);
+
+    unsubscribe();
+    unsubscribe();
+    const countAfterUnsubscribe = snapshots.length;
+    second.resolve(mockRunResult());
+    await manager.getRecord(queuedId)!.execution.promise;
+    expect(snapshots).toHaveLength(countAfterUnsubscribe);
+  });
+
   it("forwards record callbacks and aborts an active controller on dispose", async () => {
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);

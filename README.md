@@ -126,6 +126,16 @@ Lists retained agents as `[short_id] (type) status`, with an optional
 remains visible until the parent session shuts down, with no retry promise. Use the tool for
 discovery, not for waiting; background completion is delivered automatically.
 
+### Static activity footer
+In TUI and RPC sessions the footer shows only active subagents, without a timer
+or spinner. One active agent is rendered as
+`Agent: scout [a1b2c3d4] · Foreground · Running`; multiple agents use
+`Agents: N active · FG X running · BG Y running · Z queued` and append
+` · D delivering` only when a completed background delivery is still pending.
+Queued/running executions take precedence over an older delivery for the same
+agent ID. Terminal or already accepted/failed/abandoned delivery state is not
+shown. JSON, print, and headless runs are unchanged.
+
 ## Agent definitions
 
 An agent definition is a Markdown file: flat frontmatter configures a role and
