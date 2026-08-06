@@ -1188,9 +1188,11 @@ describe("SpawnCoordinator", () => {
         vi.advanceTimersByTime(200);
 
         expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-        const content = mockPi.sendMessage.mock.calls[0][0].content;
+        const message = mockPi.sendMessage.mock.calls[0][0];
+        const content = message.content;
         const shortId = result.agentId.slice(0, 8);
-        expect(content).toContain(`[Subagent "builder" ${shortId} ${expected} | Mode: Background | Run: New]`);
+        expect(content).toContain(`[${shortId}] (builder) ${expected} | Mode: Background | Run: New`);
+        expect(message.details.agentId).toBe(result.agentId);
       }
     });
   });

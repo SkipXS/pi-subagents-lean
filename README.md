@@ -78,12 +78,12 @@ these values in the selected Agent Markdown definition or with the persistent
 absent field falls back to the Markdown definition and then the parent session.
 Every `Agent` call is a root launch owned by the parent session.
 
-In Pi's interactive tool rows, `Agent` displays the canonical role, resolved
-`provider/model-id`, normalized thinking level, and the complete prompt. The
-row is hydrated after asynchronous resolution. `AgentContinue` and `StopAgent`
-use the same details renderer: their first line shows the canonical full agent
-ID, role, resolved model, and normalized thinking; `AgentContinue` then shows
-its complete prompt.
+In Pi's interactive tool rows, `Agent`, `AgentContinue`, and `StopAgent` use
+one header order: role, agent ID, resolved `provider/model-id`, normalized
+thinking, mode, and run. A new `Agent` row initially omits its ID and is
+hydrated with the canonical full ID after spawn acceptance; control rows use
+the resolved full ID when available. `Agent` and `AgentContinue` then show the
+complete prompt.
 
 ### `AgentContinue`
 
@@ -107,13 +107,13 @@ cumulative across executions.
 `StopAgent({ agent_id })` stops one running or queued agent. A successful
 foreground `Agent` or `AgentContinue` result includes its canonical full agent
 ID. Background `Agent` and `AgentContinue` acknowledgements also supply the
-full ID. Use `AgentStatus` to identify other agents; it
-displays IDs as `short_id (type)`. The interactive `StopAgent` row resolves a
-full ID from a unique prefix when the retained record is available.
+full ID. Use `AgentStatus` to identify other agents; it displays entries as
+`[short_id] (type) status`. The interactive `StopAgent` row resolves a full ID
+from a unique prefix when the retained record is available.
 
 ### `AgentStatus`
 
-Lists retained agents as `short_id (type) status`, with an optional
+Lists retained agents as `[short_id] (type) status`, with an optional
 `delivery:<state>` field. Delivery state is diagnostic: a `sendMessage` error
 remains visible until the parent session shuts down, with no retry promise. Use the tool for
 discovery, not for waiting; background completion is delivered automatically.

@@ -50,7 +50,7 @@ describe("Agent call renderer", () => {
     const component = renderAgentContinueCall(ctx.args, theme, ctx);
 
     expect(visibleLines(component)).toEqual([
-      "Agent ID: abc12345 | Role: — | Model: — | Thinking: — | Mode: Foreground | Run: Continued",
+      "Role: — | Agent ID: abc12345 | Model: — | Thinking: — | Mode: Foreground | Run: Continued",
       "",
       "Prompt:",
       "First line",
@@ -58,7 +58,7 @@ describe("Agent call renderer", () => {
       "Final line",
     ]);
     expect(formatAgentContinueCallText(undefined, ctx.args)).toBe(
-      `Agent ID: abc12345 | Role: — | Model: — | Thinking: — | Mode: Foreground | Run: Continued\n\nPrompt:\n${prompt}`,
+      `Role: — | Agent ID: abc12345 | Model: — | Thinking: — | Mode: Foreground | Run: Continued\n\nPrompt:\n${prompt}`,
     );
   });
 
@@ -75,7 +75,7 @@ describe("Agent call renderer", () => {
       prompt: "continue",
       run_in_background: true,
     })).toBe(
-      "Agent ID: abc12345 | Role: — | Model: — | Thinking: — | Mode: Background | Run: Continued\n\nPrompt:\ncontinue",
+      "Role: — | Agent ID: abc12345 | Model: — | Thinking: — | Mode: Background | Run: Continued\n\nPrompt:\ncontinue",
     );
   });
 
@@ -84,10 +84,10 @@ describe("Agent call renderer", () => {
     const component = renderStopAgentCall(ctx.args, theme, ctx);
 
     expect(visibleLines(component)).toEqual([
-      "Agent ID: prefix | Role: — | Model: — | Thinking: —",
+      "Role: — | Agent ID: prefix | Model: — | Thinking: — | Mode: — | Run: —",
     ]);
     expect(formatStopAgentCallText(undefined, ctx.args)).toBe(
-      "Agent ID: prefix | Role: — | Model: — | Thinking: —",
+      "Role: — | Agent ID: prefix | Model: — | Thinking: — | Mode: — | Run: —",
     );
   });
 
@@ -117,11 +117,48 @@ describe("Agent call renderer", () => {
 
     const hydrated = renderAgentContinueCall(ctx.args, theme, { ...ctx, lastComponent: initial });
     expect(visibleLines(hydrated)).toEqual([
-      "Agent ID: abc1234567890full | Role: reviewer | Model: anthropic/claude-sonnet-4 | Thinking: high | Mode: Foreground | Run: Continued",
+      "Role: reviewer | Agent ID: abc1234567890full | Model: anthropic/claude-sonnet-4 | Thinking: high | Mode: Foreground | Run: Continued",
       "",
       "Prompt:",
       prompt,
     ]);
+  });
+
+  it("omits a new Agent ID initially and hydrates its canonical ID after acceptance", () => {
+    const prompt = "start the task";
+    const ctx = context({ agent: "scout", prompt });
+    const initial = renderAgentCall(ctx.args, theme, ctx);
+
+    expect(visibleLines(initial)[0]).toBe(
+      "Role: scout | Model: — | Thinking: — | Mode: Foreground | Run: New",
+    );
+    expect(visibleLines(initial)[0]).not.toContain("Agent ID:");
+    expect(visibleLines(initial)[0]).not.toContain("pending");
+
+    renderAgentResult(
+      {
+        content: [{ type: "text", text: "accepted" }],
+        details: {
+          [AGENT_RENDER_DETAILS_KEY]: {
+            role: "scout",
+            agentId: "1234567890abcdef",
+            model: "openai/gpt-4o",
+            thinking: "high",
+            prompt,
+            mode: "foreground",
+            kind: "new",
+          },
+        },
+      },
+      { isPartial: true, expanded: false },
+      theme,
+      { ...ctx, lastComponent: undefined },
+    );
+
+    const hydrated = renderAgentCall(ctx.args, theme, { ...ctx, lastComponent: initial });
+    expect(visibleLines(hydrated)[0]).toBe(
+      "Role: scout | Agent ID: 1234567890abcdef | Model: openai/gpt-4o | Thinking: high | Mode: Foreground | Run: New",
+    );
   });
 
   it("uses the metadata/prompt format and preserves the full multiline prompt", () => {

@@ -24,6 +24,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 }));
 
 import extension from "../src/index.js";
+import { AGENT_RENDER_DETAILS_KEY } from "../src/agents/agent-renderer.js";
 import { runAgent } from "../src/agents/agent-runner.js";
 import {
   createSubagentRuntimeContext,
@@ -185,15 +186,22 @@ describe("offline extension headless lifecycle", () => {
     setManager(manager);
 
     expect(agentTool).toBeDefined();
+    const backgroundOnUpdate = vi.fn();
 
     const firstSpawn = await agentTool.execute("call-1", {
       agent: "Scout",
       prompt: "Find the relevant files",
       run_in_background: true,
-    }, undefined, undefined, ctx);
+    }, undefined, backgroundOnUpdate, ctx);
     expect(firstSpawn.isError).toBeUndefined();
-    expect(firstSpawn.content[0].text).toMatch(/^\[Agent running\]/);
+    expect(firstSpawn.content[0].text).toBe(
+      `Agent ID: ${firstSpawn.details.agentId}\n\n[Agent running] A notification will arrive when done - User asks you not to poll, check status or duplicate the delegated work.`,
+    );
     expect(firstSpawn.content[0].text).not.toContain("Response:");
+    expect(backgroundOnUpdate).toHaveBeenCalled();
+    expect(backgroundOnUpdate.mock.calls.every(([update]) =>
+      update?.details?.[AGENT_RENDER_DETAILS_KEY]?.agentId === undefined,
+    )).toBe(true);
     expect(api.api.sendMessage).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(sessions).toHaveLength(1));
     await vi.waitFor(() => expect(sessions[0].prompt).toHaveBeenCalledWith("Find the relevant files"));
@@ -212,6 +220,14 @@ describe("offline extension headless lifecycle", () => {
       }),
       { deliverAs: "followUp", triggerTurn: true },
     );
+    const firstNotification = api.api.sendMessage.mock.calls.at(-1)![0];
+    expect(firstNotification.content).toMatch(
+      new RegExp(`^\\[${firstNotification.details.agentId.slice(0, 8)}\\]`),
+    );
+    const firstNotificationRecord = getManager()!.listAgents().find(
+      (record) => (record.execution.session as unknown) === sessions[0],
+    )!;
+    expect(firstNotification.details.agentId).toBe(firstNotificationRecord.id);
     const completedStatus = await agentStatusTool.execute("status-completed", {}, undefined, undefined, ctx);
     expect(completedStatus.content[0].text).toContain(" completed");
 
@@ -246,7 +262,9 @@ describe("offline extension headless lifecycle", () => {
       run_in_background: true,
     }, undefined, undefined, ctx);
     expect(continueAck.isError).toBeUndefined();
-    expect(continueAck.content[0].text).toContain("[AgentContinue]");
+    expect(continueAck.content[0].text).toBe(
+      `Agent ID: ${firstRecord.id}\n\n[AgentContinue] A notification will arrive when done - User asks you not to poll, check status or duplicate the delegated work.`,
+    );
     // Immediate acknowledgement: no new session or completion message is created.
     expect(sessions).toHaveLength(2);
     expect(api.api.sendMessage).toHaveBeenCalledTimes(2);
@@ -327,12 +345,29 @@ describe("offline extension headless lifecycle", () => {
       await listener(api, "session_start")({}, ctx);
       started = true;
 
+      const foregroundOnUpdate = vi.fn();
       const foreground = agentTool.execute("foreground", {
         agent: "Scout",
         prompt: "Return the foreground result",
-      }, undefined, undefined, ctx);
+      }, undefined, foregroundOnUpdate, ctx);
       await vi.waitFor(() => expect(sessions).toHaveLength(1));
       await sessions[0].promptStarted;
+      const acceptedRecord = getManager()!.listAgents().find(
+        (record) => (record.execution.session as unknown) === sessions[0],
+      )!;
+
+      // The foreground execution is still blocked in its delayed prompt. The
+      // accepted record ID must already have reached the row renderer.
+      expect(foregroundOnUpdate).toHaveBeenCalledWith({
+        content: [],
+        details: {
+          [AGENT_RENDER_DETAILS_KEY]: expect.objectContaining({
+            agentId: acceptedRecord.id,
+            mode: "foreground",
+            kind: "new",
+          }),
+        },
+      });
 
       let settled = false;
       foreground.then(() => { settled = true; });

@@ -128,8 +128,9 @@ describe("AgentContinue and StopAgent control rendering", () => {
       ctx(),
     );
 
-    expect(result.content[0].text).toContain("[AgentContinue]");
-    expect(result.content[0].text).toContain(`Agent ID: ${fullId}`);
+    expect(result.content[0].text).toBe(
+      `Agent ID: ${fullId}\n\n[AgentContinue] A notification will arrive when done - User asks you not to poll, check status or duplicate the delegated work.`,
+    );
     expect(result.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({
       agentId: fullId,
       model: "queued/provider-model",

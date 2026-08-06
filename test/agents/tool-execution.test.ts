@@ -267,6 +267,7 @@ describe("executeAgentTool — explicit agent type", () => {
     expect(result.details.agentId).toBe("agent-render-details");
     expect(result.details[AGENT_RENDER_DETAILS_KEY]).toEqual({
       role: "general-purpose",
+      agentId: "agent-render-details",
       model: "openai/gpt-4o",
       thinking: "low",
       prompt,
@@ -332,6 +333,7 @@ describe("executeAgentTool — explicit agent type", () => {
       expect.anything(),
       ctx,
       expect.objectContaining({ model, thinkingLevel: "high" }),
+      expect.any(Function),
     );
   });
 
@@ -414,6 +416,7 @@ describe("executeAgentTool — worktree_path validation", () => {
       expect.anything(),
       ctx,
       expect.objectContaining({ signal }),
+      expect.any(Function),
     );
     expect(mockSpawn.mock.calls[0][4].signal).toBe(signal);
   });
@@ -445,6 +448,7 @@ describe("executeAgentTool — worktree_path validation", () => {
       expect.anything(),
       ctx,
       expect.objectContaining({ projectTrusted: true }),
+      expect.any(Function),
     );
     const spawnArgument = mockCoordinatorSpawn.mock.calls[0]?.[2] as Record<string, unknown>;
     expect(Object.isFrozen(spawnArgument)).toBe(true);

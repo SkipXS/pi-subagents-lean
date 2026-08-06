@@ -36,7 +36,7 @@ export interface AgentCallRenderMetadata {
   thinking?: string;
   /** The complete prompt passed to the agent, when the tool has one. */
   prompt: string;
-  /** Canonical full root-agent id for AgentContinue/StopAgent rows. */
+  /** Canonical full root-agent id; absent on a new Agent row before acceptance. */
   agentId?: string;
   /** Execution display fields; omitted for StopAgent because stopping is not an execution. */
   mode?: AgentExecutionMode;
@@ -364,22 +364,49 @@ export function withAgentCallRenderMetadata(
   };
 }
 
-/** Build the exact unstyled call text requested by the Agent row display. */
+/** Format the common Agent-family header in its stable field order. */
+function formatAgentHeader(
+  metadata: Partial<AgentCallRenderMetadata> | undefined,
+  rawArgs: Record<string, unknown> | undefined,
+  options: {
+    includeRawAgentId: boolean;
+    defaultMode?: AgentExecutionMode;
+    defaultKind?: AgentExecutionKind;
+  },
+): string {
+  const role = escapeTerminalText(metadata?.role || (nonEmptyString(rawArgs?.agent) ?? "—"));
+  const requestedId = options.includeRawAgentId ? nonEmptyString(rawArgs?.agent_id) : undefined;
+  const agentId = nonEmptyString(metadata?.agentId) ?? requestedId;
+  const model = escapeTerminalText(metadata?.model || "—");
+  const thinking = escapeTerminalText(metadata?.thinking || "—");
+  const mode = metadata?.mode ?? (rawArgs?.run_in_background === true ? "background" : options.defaultMode);
+  const kind = metadata?.kind ?? options.defaultKind;
+  const fields = [
+    `Role: ${role}`,
+    ...(agentId !== undefined ? [`Agent ID: ${escapeTerminalText(agentId)}`] : []),
+    `Model: ${model}`,
+    `Thinking: ${thinking}`,
+    formatExecutionLabels(mode, kind),
+  ];
+  return fields.join(" | ");
+}
+
+/** Build the Agent call header and complete prompt. */
 export function formatAgentCallText(
   metadata: Partial<AgentCallRenderMetadata> | undefined,
   rawArgs?: unknown,
 ): string {
   const args = isRecord(rawArgs) ? rawArgs : undefined;
-  const role = escapeTerminalText(metadata?.role || (nonEmptyString(args?.agent) ?? "—"));
-  const model = escapeTerminalText(metadata?.model || "—");
-  const thinking = escapeTerminalText(metadata?.thinking || "—");
+  const header = formatAgentHeader(metadata, args, {
+    includeRawAgentId: false,
+    defaultMode: "foreground",
+    defaultKind: "new",
+  });
   const prompt = escapeTerminalText(
     metadata?.prompt ?? (typeof args?.prompt === "string" ? args.prompt : ""),
     true,
   );
-  const mode = metadata?.mode ?? (args?.run_in_background === true ? "background" : "foreground");
-  const labels = formatExecutionLabels(mode, metadata?.kind ?? "new");
-  return `Role: ${role} | Model: ${model} | Thinking: ${thinking} | ${labels}\n\nPrompt:\n${prompt}`;
+  return `${header}\n\nPrompt:\n${prompt}`;
 }
 
 /**
@@ -392,24 +419,20 @@ export function formatAgentControlCallText(
   rawArgs?: unknown,
 ): string {
   const args = isRecord(rawArgs) ? rawArgs : undefined;
-  const agentId = escapeTerminalText(metadata?.agentId || (nonEmptyString(args?.agent_id) ?? "—"));
-  const role = escapeTerminalText(metadata?.role || "—");
-  const model = escapeTerminalText(metadata?.model || "—");
-  const thinking = escapeTerminalText(metadata?.thinking || "—");
+  const header = formatAgentHeader(metadata, args, {
+    includeRawAgentId: true,
+    ...(toolName === "AgentContinue"
+      ? { defaultMode: args?.run_in_background === true ? "background" : "foreground", defaultKind: "continued" }
+      : {}),
+  });
   const prompt = toolName === "AgentContinue"
     ? escapeTerminalText(
       metadata?.prompt ?? (typeof args?.prompt === "string" ? args.prompt : ""),
       true,
     )
     : "";
-  const executionLabels = toolName === "AgentContinue"
-    ? ` | ${formatExecutionLabels(
-      metadata?.mode ?? (args?.run_in_background === true ? "background" : "foreground"),
-      metadata?.kind ?? "continued",
-    )}`
-    : "";
   const promptSection = toolName === "AgentContinue" ? `\n\nPrompt:\n${prompt}` : "";
-  return `Agent ID: ${agentId} | Role: ${role} | Model: ${model} | Thinking: ${thinking}${executionLabels}${promptSection}`;
+  return `${header}${promptSection}`;
 }
 
 /** Convenience formatter for the AgentContinue row. */
