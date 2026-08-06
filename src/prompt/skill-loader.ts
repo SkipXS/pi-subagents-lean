@@ -208,7 +208,7 @@ function loadPiDefaultSkillsCached(cwd: string, agentDir: string): Skill[] {
   const resolvedCwd = resolve(cwd);
   const resolvedAgentDir = resolve(agentDir);
   const sourceRoots = [
-    join(resolvedAgentDir, "skills"),
+    join(agentDir, "skills"),
     join(resolvedCwd, ".pi", "skills"),
   ];
   const rootFingerprints = sourceRoots.map(fingerprintResourceTree);
@@ -225,7 +225,9 @@ function loadPiDefaultSkillsCached(cwd: string, agentDir: string): Skill[] {
 
   const result = loadSkills({
     cwd: resolvedCwd,
-    agentDir: resolvedAgentDir,
+    // Preserve Pi's path verbatim. Resolving a Windows-style mocked/configured
+    // path on POSIX would incorrectly prefix the current working directory.
+    agentDir,
     skillPaths: [],
     includeDefaults: true,
   });
