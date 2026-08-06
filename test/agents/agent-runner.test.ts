@@ -7,6 +7,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fakeCtx, fakePi as makeFakePi } from "../fixtures.ts";
 import type { AgentConfig } from "../../src/agents/types.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -41,6 +44,7 @@ const mockModules = vi.hoisted(() => ({
   mockCreateAgentSession: vi.fn(),
   mockDefaultResourceLoader: MockDefaultResourceLoader,
   mockGetAgentDir: vi.fn(() => "/home/test/.pi/agent"),
+  mockSettingsManager: { id: "shared-settings-manager" },
   mockLoadProjectContextFiles: vi.fn().mockReturnValue([]),
   mockIncludeContextFiles: true as boolean,
   loaderReloadFailure: undefined as Error | undefined,
@@ -104,7 +108,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession: mockModules.mockCreateAgentSession,
   DefaultResourceLoader: mockModules.mockDefaultResourceLoader,
   SessionManager: { inMemory: vi.fn() },
-  SettingsManager: { create: vi.fn() },
+  SettingsManager: { create: vi.fn(() => mockModules.mockSettingsManager) },
   getAgentDir: mockModules.mockGetAgentDir,
   loadProjectContextFiles: mockModules.mockLoadProjectContextFiles,
 }));
@@ -723,7 +727,7 @@ describe("runAgent — skill selection and exclusion", () => {
       excludeSkills,
     });
 
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, projectTrusted: true });
 
     expect(mockModules.mockLoadSkillMeta).toHaveBeenCalledWith(
       ["visible", "blocked"], expect.any(String), excludeSkills,
@@ -1512,7 +1516,7 @@ describe("runAgent — context file gating", () => {
       { path: "AGENTS.md", content: "project instructions" },
     ]);
 
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, projectTrusted: true });
 
     expect(mockModules.mockLoadProjectContextFiles).toHaveBeenCalled();
     expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
@@ -1531,7 +1535,7 @@ describe("runAgent — context file gating", () => {
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
     mockModules.mockIncludeContextFiles = false;
 
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, projectTrusted: true });
 
     expect(mockModules.mockLoadProjectContextFiles).not.toHaveBeenCalled();
     expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
@@ -1552,11 +1556,95 @@ describe("runAgent — context file gating", () => {
     });
 
     // Should not throw
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, projectTrusted: true });
 
     expect(mockModules.mockLoadProjectContextFiles).toHaveBeenCalled();
     // buildAgentPrompt still called (without contextFiles)
     expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalled();
+  });
+
+  it("does not load project context for a legacy run without trust", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    mockModules.mockIncludeContextFiles = true;
+    mockModules.mockLoadProjectContextFiles.mockReturnValue([
+      { path: "AGENTS.md", content: "must stay out" },
+    ]);
+
+    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+
+    expect(mockModules.mockLoadProjectContextFiles).not.toHaveBeenCalled();
+    expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.not.objectContaining({ contextFiles: expect.anything() }),
+    );
+  });
+
+  it("keeps the user-global context file available without project trust", async () => {
+    const root = mkdtempSync(join(tmpdir(), "subagents-user-context-"));
+    try {
+      mkdirSync(root, { recursive: true });
+      writeFileSync(join(root, "AGENTS.md"), "global user instructions", "utf8");
+      const session = createMockSession();
+      session.getActiveToolNames.mockReturnValue(["read"]);
+      mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+      mockModules.mockGetAgentDir.mockReturnValue(root);
+
+      await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
+
+      expect(mockModules.mockLoadProjectContextFiles).not.toHaveBeenCalled();
+      expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          contextFiles: [{ path: join(root, "AGENTS.md"), content: "global user instructions" }],
+        }),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes one trusted Pi SettingsManager to the loader and session", async () => {
+    const session = createMockSession();
+    session.getActiveToolNames.mockReturnValue(["read"]);
+    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
+    const config: AgentConfig = {
+      name: "trusted",
+      description: "Trusted",
+      systemPrompt: "Trusted prompt",
+      extensions: false,
+      skills: false,
+    };
+    const acceptedSpawn = acceptResolvedSpawn(snapshotResolvedSpawn({
+      type: "trusted",
+      prompt: "trusted prompt",
+      description: "Trusted",
+      runInBackground: false,
+      agentConfig: config,
+      runtimeSettings: {
+        agent: { includeContextFiles: false, disableDefaultAgents: false, orchestrationPrompt: true },
+      },
+      projectTrusted: true,
+    }));
+
+    await runAgent(fakeCtx(), "stale", "stale", { pi: fakePi, acceptedSpawn });
+
+    expect(mockModules.mockSettingsManager).toBeDefined();
+    expect(mockModules.mockCreateAgentSession).toHaveBeenCalledOnce();
+    expect((await import("@earendil-works/pi-coding-agent")).SettingsManager.create).toHaveBeenCalledWith(
+      "/home/test/project",
+      "/home/test/.pi/agent",
+      { projectTrusted: true },
+    );
+    const sessionOptions = mockModules.mockCreateAgentSession.mock.calls[0][0];
+    expect(mockModules.getLoaderOpts().settingsManager).toBe(sessionOptions.settingsManager);
+    expect(sessionOptions.settingsManager).toBe(mockModules.mockSettingsManager);
+    expect(sessionOptions.settingsManager).toBeDefined();
   });
 });
 

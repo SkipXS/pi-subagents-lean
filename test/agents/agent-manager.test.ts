@@ -75,7 +75,7 @@ import {
   setSessionCtx,
 } from "../../src/shell.js";
 import { registerAgents } from "../../src/agents/agent-types.js";
-import { acceptResolvedSpawn, snapshotResolvedSpawn } from "../../src/spawn/spawn-contract.js";
+import { snapshotResolvedSpawn } from "../../src/spawn/spawn-contract.js";
 
 describe("AgentManager", () => {
   let manager: AgentManager;
@@ -505,7 +505,7 @@ describe("AgentManager", () => {
         agents: { accepted: { model: "settings/model" } },
       } as any;
       const model = { provider: "accepted", id: "model" } as any;
-      const acceptedSpawn = acceptResolvedSpawn(snapshotResolvedSpawn({
+      const resolvedSpawn = snapshotResolvedSpawn({
         type: "accepted",
         prompt: "accepted prompt",
         description: "accepted description",
@@ -515,18 +515,23 @@ describe("AgentManager", () => {
         model,
         modelKey: "accepted/model",
         thinkingLevel: "high",
-      }));
+      });
 
       manager.spawn(fakePi(), fakeCtx(), "blocker", "blocker", {
         description: "blocker",
         isBackground: true,
       });
-      const acceptedId = manager.spawn(fakePi(), fakeCtx(), "stale", "stale", {
-        description: "caller description",
-        isBackground: false,
-        acceptedSpawn,
+      const acceptedId = manager.spawn(fakePi(), fakeCtx(), resolvedSpawn);
+      const acceptedRecord = manager.getRecord(acceptedId)!;
+      expect(acceptedRecord.lifecycle.status).toBe("queued");
+      expect(acceptedRecord.display).toMatchObject({
+        type: "accepted",
+        description: "accepted description",
       });
-      expect(manager.getRecord(acceptedId)?.lifecycle.status).toBe("queued");
+      expect(acceptedRecord.stats.executions?.[0]).toMatchObject({
+        prompt: "accepted prompt",
+        mode: "background",
+      });
 
       config.tools.push("bash");
       runtimeSettings.agents.accepted.model = "later/model";

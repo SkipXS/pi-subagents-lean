@@ -2,6 +2,35 @@ import { describe, expect, it } from "vitest";
 import { acceptResolvedSpawn, snapshotResolvedSpawn } from "../../src/spawn/spawn-contract.js";
 
 describe("AcceptedSpawn immutability", () => {
+  it("materializes an immutable trust snapshot and defaults legacy absence to false", () => {
+    const trusted = snapshotResolvedSpawn({
+      type: "trusted",
+      prompt: "task",
+      description: "Trusted",
+      runInBackground: false,
+      agentConfig: { name: "trusted", description: "Trusted", systemPrompt: "" },
+      runtimeSettings: {
+        agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+      },
+      projectTrusted: true,
+    });
+    const legacy = snapshotResolvedSpawn({
+      type: "legacy",
+      prompt: "task",
+      description: "Legacy",
+      runInBackground: false,
+      agentConfig: { name: "legacy", description: "Legacy", systemPrompt: "" },
+      runtimeSettings: {
+        agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+      },
+    });
+
+    expect(trusted.projectTrusted).toBe(true);
+    expect(legacy.projectTrusted).toBe(false);
+    expect(Object.isFrozen(trusted)).toBe(true);
+    expect(Object.isFrozen(acceptResolvedSpawn(trusted))).toBe(true);
+  });
+
   it("detaches and recursively freezes nested contract data", () => {
     const agentConfig = {
       name: "nested",

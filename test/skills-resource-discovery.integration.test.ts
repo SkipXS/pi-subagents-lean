@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   createAgentSession,
@@ -18,6 +18,7 @@ type SkillPolicy = {
 const skillNames = ["discovered-allowed", "discovered-blocked"] as const;
 
 function writeSkill(path: string, name: string) {
+  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, [
     "---",
     `name: ${name}`,
@@ -113,6 +114,49 @@ describe("Pi resources_discover skill policy", () => {
     const root = mkdtempSync(join(tmpdir(), "subagents-skill-discovery-"));
     try {
       await expect(loadDiscoveredSkillNames(root, policy)).resolves.toEqual(expected);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("uses the same Pi trust boundary for real user and project skill discovery", async () => {
+    const root = mkdtempSync(join(tmpdir(), "subagents-project-trust-skills-"));
+    try {
+      const projectDir = join(root, "project");
+      const agentDir = join(root, "agent");
+      mkdirSync(projectDir, { recursive: true });
+      writeSkill(join(projectDir, ".pi", "skills", "project-only", "SKILL.md"), "project-only");
+      writeSkill(join(agentDir, "skills", "user-only", "SKILL.md"), "user-only");
+
+      const untrustedSettings = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+      const untrustedLoader = new DefaultResourceLoader({
+        cwd: projectDir,
+        agentDir,
+        noExtensions: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        settingsManager: untrustedSettings,
+      });
+      await untrustedLoader.reload();
+      const untrustedNames = untrustedLoader.getSkills().skills.map((skill) => skill.name);
+      expect(untrustedNames).toContain("user-only");
+      expect(untrustedNames).not.toContain("project-only");
+
+      const trustedSettings = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
+      const trustedLoader = new DefaultResourceLoader({
+        cwd: projectDir,
+        agentDir,
+        noExtensions: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        settingsManager: trustedSettings,
+      });
+      await trustedLoader.reload();
+      expect(trustedLoader.getSkills().skills.map((skill) => skill.name)).toEqual(
+        expect.arrayContaining(["user-only", "project-only"]),
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

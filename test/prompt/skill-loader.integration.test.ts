@@ -63,6 +63,33 @@ describe("skill discovery through Pi's real loaders", () => {
     expect(byName.has("user-default")).toBe(true);
   });
 
+  it("keeps global user skills while excluding project roots for an untrusted snapshot", async () => {
+    const root = tempRoot();
+    const isolatedHome = join(root, "os-home");
+    const agentDir = join(root, "agent-home");
+    const repo = join(root, "repo");
+    const cwd = join(repo, "packages", "app");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(cwd, { recursive: true });
+
+    skill(join(cwd, ".agents", "skills"), "project-agents", "project shared");
+    skill(join(cwd, ".pi", "skills"), "project-pi", "project default");
+    skill(join(isolatedHome, ".agents", "skills"), "home-user", "global agents");
+    skill(join(agentDir, "skills"), "pi-user", "global pi");
+
+    vi.stubEnv("HOME", isolatedHome);
+    vi.stubEnv("USERPROFILE", isolatedHome);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.resetModules();
+    const { loadAllSkills } = await import("../../src/prompt/skill-loader.ts");
+
+    const untrusted = new Set(loadAllSkills(cwd, false).map(({ name }) => name));
+    expect(untrusted).toEqual(new Set(["home-user", "pi-user"]));
+
+    const trusted = new Set(loadAllSkills(cwd, true).map(({ name }) => name));
+    expect(trusted).toEqual(new Set(["project-agents", "project-pi", "home-user", "pi-user"]));
+  });
+
   it("refreshes a real cached negative source after creation and mutation", async () => {
     const root = tempRoot();
     const cwd = join(root, "repo");

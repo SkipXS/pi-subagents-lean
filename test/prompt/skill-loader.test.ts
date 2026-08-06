@@ -88,6 +88,21 @@ describe("loadAllSkills", () => {
     }));
   });
 
+  it("keeps global Pi skills but never calls the combined loader for an untrusted cwd", () => {
+    const userSkill = makeSkill("user-only", "Global user skill", "C:\\Users\\Pi User\\.pi\\agent\\skills\\user-only\\SKILL.md");
+    const projectSkill = makeSkill("project-only", "Project skill", join(tmpDir, ".pi", "skills", "project-only", "SKILL.md"));
+    mockLoadSkillsFromDir.mockImplementation(({ dir }: { dir: string }) =>
+      dir.includes("agent") && !dir.includes(".agents")
+        ? { skills: [userSkill], diagnostics: [] }
+        : { skills: [], diagnostics: [] });
+    mockLoadSkills.mockReturnValue({ skills: [projectSkill], diagnostics: [] });
+
+    const result = loadAllSkills(tmpDir, false);
+
+    expect(result.map(({ name }) => name)).toEqual(["user-only"]);
+    expect(mockLoadSkills).not.toHaveBeenCalled();
+  });
+
   it("uses Pi's agent directory for default skills when HOME is unset", () => {
     vi.stubEnv("HOME", "");
     const agentDir = "C:\\Users\\Pi User\\.pi\\agent";

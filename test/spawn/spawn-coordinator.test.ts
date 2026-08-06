@@ -83,7 +83,18 @@ vi.mock("../../src/shell.js", () => ({
 function makeMockManager() {
   const records = new Map<string, any>();
   return {
-    spawn: vi.fn((pi: any, ctx: any, type: string, prompt: string, options: any) => {
+    spawn: vi.fn((pi: any, ctx: any, typeOrResolved: any, promptOrOptions: any, legacyOptions?: any) => {
+      const resolved = typeof typeOrResolved === "object" ? typeOrResolved : undefined;
+      const type = resolved?.type ?? typeOrResolved;
+      const prompt = resolved?.prompt ?? promptOrOptions;
+      const options = resolved
+        ? {
+          description: resolved.description,
+          isBackground: resolved.runInBackground,
+          signal: resolved.signal,
+          projectTrusted: resolved.projectTrusted,
+        }
+        : legacyOptions ?? promptOrOptions;
       const id = `agent-${records.size}`;
       const record: any = {
         id,
@@ -261,7 +272,7 @@ describe("SpawnCoordinator", () => {
     expect(snapshot).not.toBe(config);
   });
 
-  it("carries an accepted snapshot without resolving registry, store, or tunables again", async () => {
+  it("passes the authoritative resolved snapshot without resolving again", async () => {
     const coordinator = new SpawnCoordinator(manager as any);
     const config = {
       name: "accepted",
@@ -287,13 +298,7 @@ describe("SpawnCoordinator", () => {
       invocation: { modelName: "model", modelKey: "accepted/model", thinkingLevel: "high" },
     });
 
-    await coordinator.spawn(mockPi, ctx, {
-      type: "stale-type",
-      prompt: "stale prompt",
-      description: "stale description",
-      runInBackground: false,
-      resolvedSpawn: resolved,
-    });
+    await coordinator.spawn(mockPi, ctx, resolved);
 
     config.tools.push("bash");
     runtimeSettings.agents.accepted.model = "later/model";
@@ -302,15 +307,9 @@ describe("SpawnCoordinator", () => {
     expect(mockCreateRuntimeSettings).not.toHaveBeenCalled();
     expect(mockFindModelInRegistry).not.toHaveBeenCalled();
 
-    const options = manager.spawn.mock.calls[0][4];
-    expect(options.acceptedSpawn.accepted).toBe(true);
-    expect(options.acceptedSpawn.type).toBe("accepted");
-    expect(options.acceptedSpawn.prompt).toBe("accepted prompt");
-    expect(options.agentConfig.tools).toEqual(["read"]);
-    expect(options.runtimeSettings.agents).toEqual({ accepted: { model: "settings/model" } });
-    expect(options.model).toBe(model);
-    expect(options.thinkingLevel).toBe("high");
-    expect(Object.isFrozen(options.acceptedSpawn)).toBe(true);
+    expect(manager.spawn).toHaveBeenCalledWith(mockPi, ctx, resolved);
+    expect(manager.spawn.mock.calls[0]).toHaveLength(3);
+    expect(manager.spawn.mock.calls[0][2]).toBe(resolved);
   });
 
   it("spawns a foreground agent and awaits its promise", async () => {

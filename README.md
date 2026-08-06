@@ -172,6 +172,14 @@ trust is required before either project directory is read. An untrusted project
 uses only user definitions and enabled bundled defaults. Other worktrees are
 never crawled automatically.
 
+For each `Agent` call, project trust is snapshotted during synchronous tool
+preflight before worktree validation or catalog discovery can await. That
+immutable snapshot governs the child session even if the parent trust state
+changes while the call is queued. An untrusted child cannot load project/CWD
+`AGENTS.md` context or project skills; global user resources remain available.
+An explicitly selected worktree inherits the parent snapshot and is never
+trusted independently.
+
 **Live catalog versus accepted snapshot.** At session start and before every
 parent turn, the extension rescans the user and trusted current-project
 locations. Added, changed, hidden, and removed roles therefore affect the next
@@ -337,14 +345,18 @@ Every subagent uses replacement mode: a minimal generic header, environment
 information, the role's Markdown body in `<agent_instructions>`, and optional
 skills/context sections. No parent system prompt is read.
 
-When `includeContextFiles` is `true` (default), applicable project-root and
-user `AGENTS.md` files are included as `<project_context>` before the role
-instructions. Set it to `false` to reduce static prompt context.
+When `includeContextFiles` is `true` (default), a trusted child includes
+applicable project-root and user `AGENTS.md` files as `<project_context>` before
+the role instructions. An untrusted child includes only the user-global
+context file and never reads project/CWD context files. Set it to `false` to
+reduce static prompt context.
 
 For narrow agents, select only the needed skill metadata, restrict tools when
-appropriate, and disable unneeded extensions. The model can use `read` to load a
-selected `SKILL.md` only when its description matches the task; ordinary skill
-metadata is comparatively small.
+appropriate, and disable unneeded extensions. Project skills are available only
+when the parent project is trusted; global user skills remain available in an
+untrusted child. The model can use `read` to load a selected `SKILL.md` only
+when its description matches the task; ordinary skill metadata is comparatively
+small.
 
 ## Headless operation and logs
 
@@ -373,7 +385,7 @@ agent override are discarded; they are never treated as model selections.
 | `concurrency.default` | `4` | Global simultaneous-root-agent limit; excess root spawns queue. |
 | `agent.disableDefaultAgents` | `false` | Exclude bundled roles from the next parent refresh and on-demand discovery. |
 | `agent.orchestrationPrompt` | `true` | Add the generated parent-only routing guidance and visible catalog, or remove the extension's existing block when false. |
-| `agent.includeContextFiles` | `true` | Include applicable project and user `AGENTS.md` context. |
+| `agent.includeContextFiles` | `true` | Include applicable trusted-project and user-global `AGENTS.md` context. |
 | `agents.<name>.model` | absent | Persistent `provider/model-id` override. Registry-invalid or unavailable values fall through to the effective Markdown model and then the parent. |
 | `agents.<name>.thinking` | absent | Persistent `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` override. Provider capability normalization may adjust it. |
 
