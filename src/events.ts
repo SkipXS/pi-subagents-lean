@@ -7,6 +7,11 @@ import {
   createAgentRenderMetadataBridge,
   type AgentRenderMetadataBridge,
 } from "./agents/agent-render-bridge.js";
+import { stopAgentRendererTimers } from "./agents/agent-renderer.js";
+import {
+  AgentFooterStatusController,
+  supportsAgentFooterStatus,
+} from "./agents/agent-footer-status.js";
 import { getOrchestrationPromptUpdate } from "./prompt/orchestration.js";
 import {
   getCoordinator,
@@ -119,6 +124,40 @@ export function setupEventListeners(
   let sessionEpoch = 0;
   let cleanupPromise: Promise<void> | undefined;
   let globalCleanupPromise: Promise<void> | undefined;
+  let footerStatusController: AgentFooterStatusController | undefined;
+  let footerStatusOwner = 0;
+
+  /** Dispose the old footer observer before reload/shutdown can await anything. */
+  const disposeFooterStatus = (): void => {
+    const controller = footerStatusController;
+    if (controller) {
+      // Keep the old owner valid for this synchronous clear. A later stale
+      // disposal observes the incremented owner and cannot clear a new row.
+      controller.dispose();
+      footerStatusController = undefined;
+    }
+    footerStatusOwner++;
+  };
+
+  const installFooterStatus = (ctx: ExtensionContext): void => {
+    if (!supportsAgentFooterStatus(ctx)) return;
+    const manager = getManager();
+    const coordinator = getCoordinator();
+    // Keep minimal/headless test doubles and partially initialized sessions
+    // inert without weakening the real manager/coordinator contract.
+    if (!manager || !coordinator
+      || typeof (manager as unknown as { subscribeActivity?: unknown }).subscribeActivity !== "function"
+      || typeof (coordinator as unknown as { subscribeDeliveryActivity?: unknown }).subscribeDeliveryActivity !== "function"
+      || !ctx.ui || typeof ctx.ui.setStatus !== "function") return;
+
+    const owner = ++footerStatusOwner;
+    footerStatusController = new AgentFooterStatusController(
+      ctx.ui,
+      manager,
+      coordinator,
+      () => footerStatusOwner === owner,
+    );
+  };
 
   /**
    * Tear down every per-session collaborator, including partially initialized
@@ -126,6 +165,7 @@ export function setupEventListeners(
    * inherits stale manager, coordinator, or store references.
    */
   const cleanupSessionRuntime = async (cleanupEpoch: number): Promise<void> => {
+    stopAgentRendererTimers();
     renderBridge.clear();
     let cleanupError: unknown;
     const attempt = async (work: () => void | Promise<void>) => {
@@ -180,7 +220,13 @@ export function setupEventListeners(
   };
 
   pi.on("session_start", async (_event: unknown, ctx: ExtensionContext) => {
+    // session_start also covers Pi reload/session replacement. Unsubscribe and
+    // clear the old footer synchronously before waiting for stale cleanup.
+    disposeFooterStatus();
     if (cleanupPromise) await cleanupPromise;
+    // Stop any row timer left by a prior renderer generation before accepting
+    // new rows.
+    stopAgentRendererTimers();
     renderBridge.startSession();
     const startupEpoch = ++sessionEpoch;
     setSessionCtx(ctx);
@@ -190,6 +236,7 @@ export function setupEventListeners(
       // cleanup owns the runtime, so this stale startup must not publish state
       // after the next session has started.
       if (sessionEpoch !== startupEpoch) return;
+      installFooterStatus(ctx);
     } catch (err) {
       // Preserve the startup error even if disposal itself encounters a fault.
       if (sessionEpoch !== startupEpoch) return;
@@ -205,6 +252,10 @@ export function setupEventListeners(
 
   // session_shutdown — abort all root executions and dispose the manager.
   pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
+    // Stop observers and clear synchronously before manager/coordinator
+    // disposal can await. A stale controller cannot clear a newer owner.
+    disposeFooterStatus();
+    stopAgentRendererTimers();
     ++sessionEpoch;
     // Invalidate pending parent scans before asynchronous cleanup. Worktree
     // catalogs are invocation-local and do not need to be cleared here.

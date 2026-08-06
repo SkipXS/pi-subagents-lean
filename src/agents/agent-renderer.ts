@@ -43,6 +43,14 @@ export interface AgentCallRenderMetadata {
   kind?: AgentExecutionKind;
 }
 
+/** Pis installed default working-loader animation, kept in lockstep with Pi/TUI. */
+export const AGENT_WORKING_SPINNER_FRAMES = [
+  "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+] as const;
+
+/** Pis installed default working-loader interval. */
+export const AGENT_WORKING_SPINNER_INTERVAL_MS = 80;
+
 /** Pi's structural component contract, kept local to avoid a TUI import. */
 export interface PlaintextComponent {
   render(width: number): string[];
@@ -55,11 +63,18 @@ export interface AgentRendererContext {
   state: Record<string, unknown>;
   lastComponent: PlaintextComponent | undefined;
   invalidate: () => void;
+  /** True only after Pi has actually started this tool execution. */
+  executionStarted?: boolean;
+  /** Whether Pi is still showing a partial/open result. */
+  isPartial?: boolean;
+  /** Pi's terminal error flag for the current result. */
+  isError?: boolean;
 }
 
 interface AgentResultLike {
   content?: unknown;
   details?: unknown;
+  isError?: unknown;
 }
 
 interface AgentMessageLike {
@@ -71,6 +86,7 @@ interface AgentRendererState {
   metadata?: AgentCallRenderMetadata;
   version: number;
   callVersion: number;
+  indicator: AgentCallIndicator;
 }
 
 const graphemeSegmenter = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
@@ -154,6 +170,7 @@ export function escapeTerminalText(value: string, preserveNewlines = false): str
 /** A small stateful plaintext component with conservative Unicode wrapping. */
 export class AgentCallDetailsComponent implements PlaintextComponent {
   private value = "";
+  private indicator = "";
   private cachedWidth: number | undefined;
   private cachedValue: string | undefined;
   private cachedLines: string[] | undefined;
@@ -167,13 +184,25 @@ export class AgentCallDetailsComponent implements PlaintextComponent {
     return true;
   }
 
+  /** Set the row-local status marker without mixing it into tool text. */
+  setIndicator(indicator: string): boolean {
+    const safeIndicator = escapeTerminalText(indicator);
+    if (this.indicator === safeIndicator) return false;
+    this.indicator = safeIndicator;
+    this.invalidate();
+    return true;
+  }
+
   render(width: number): string[] {
     const safeWidth = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
-    if (this.cachedLines && this.cachedValue === this.value && this.cachedWidth === safeWidth) {
+    const displayValue = this.indicator.length > 0
+      ? `${this.indicator} ${this.value}`
+      : this.value;
+    if (this.cachedLines && this.cachedValue === displayValue && this.cachedWidth === safeWidth) {
       return this.cachedLines;
     }
-    const lines = wrapPlaintext(this.value, safeWidth);
-    this.cachedValue = this.value;
+    const lines = wrapPlaintext(displayValue, safeWidth);
+    this.cachedValue = displayValue;
     this.cachedWidth = safeWidth;
     this.cachedLines = lines;
     return lines;
@@ -184,6 +213,162 @@ export class AgentCallDetailsComponent implements PlaintextComponent {
     this.cachedValue = undefined;
     this.cachedLines = undefined;
   }
+}
+
+type AgentCallIndicator = "" | "working" | "success" | "error" | "background" | "queued";
+
+const AGENT_RENDER_INDICATOR_KEY = `${AGENT_RENDER_DETAILS_KEY}:indicator`;
+
+type AgentRendererCapability = "unknown" | "interactive" | "noninteractive";
+
+interface AgentRendererRuntime {
+  callComponent?: AgentCallDetailsComponent;
+  spinner?: AgentSpinnerController;
+  animationDisabled: boolean;
+  frameIndex: number;
+  capability: AgentRendererCapability;
+  probing: boolean;
+}
+
+const rendererRuntimes = new WeakMap<object, AgentRendererRuntime>();
+const activeSpinnerControllers = new Set<AgentSpinnerController>();
+
+function runtimeFor(context: AgentRendererContext): AgentRendererRuntime {
+  const existing = rendererRuntimes.get(context.state);
+  if (existing) return existing;
+  const runtime: AgentRendererRuntime = {
+    animationDisabled: false,
+    frameIndex: 0,
+    capability: "unknown",
+    probing: false,
+  };
+  rendererRuntimes.set(context.state, runtime);
+  return runtime;
+}
+
+/** Stop one row's timer and remove it from the active lifecycle set. */
+function stopSpinner(context: AgentRendererContext, clearIndicator: boolean): void {
+  const runtime = runtimeFor(context);
+  runtime.spinner?.stop();
+  runtime.spinner = undefined;
+  if (!clearIndicator) return;
+
+  const state = stateFor(context);
+  if (state.indicator === "working") {
+    state.indicator = "";
+    writeState(context, state);
+    runtime.callComponent?.setIndicator("");
+  }
+}
+
+/**
+ * A row-local interval is deliberately used instead of tool updates. Pi's
+ * renderer owns the row invalidation path, so frame changes never reach the
+ * tool result, RPC stream, JSON, or print output.
+ */
+class AgentSpinnerController {
+  private timer: ReturnType<typeof setInterval> | undefined;
+  context: AgentRendererContext;
+
+  constructor(context: AgentRendererContext) {
+    this.context = context;
+  }
+
+  updateContext(context: AgentRendererContext): void {
+    this.context = context;
+  }
+
+  start(): void {
+    if (this.timer !== undefined) return;
+    activeSpinnerControllers.add(this);
+    this.timer = setInterval(() => {
+      const runtime = runtimeFor(this.context);
+      if (runtime.spinner !== this) {
+        this.stop();
+        return;
+      }
+      runtime.frameIndex = (runtime.frameIndex + 1) % AGENT_WORKING_SPINNER_FRAMES.length;
+      try {
+        this.context.invalidate();
+      } catch {
+        // A detached/invalid row must not leave a process-live interval behind.
+        const runtime = runtimeFor(this.context);
+        runtime.animationDisabled = true;
+        stopSpinner(this.context, true);
+      }
+    }, AGENT_WORKING_SPINNER_INTERVAL_MS);
+  }
+
+  stop(): void {
+    if (this.timer !== undefined) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+    activeSpinnerControllers.delete(this);
+  }
+}
+
+/** End every row-local animation during reload/shutdown. */
+export function stopAgentRendererTimers(): void {
+  for (const controller of [...activeSpinnerControllers]) {
+    const context = controller.context;
+    controller.stop();
+    const runtime = runtimeFor(context);
+    runtime.animationDisabled = true;
+    if (runtime.spinner === controller) runtime.spinner = undefined;
+    const state = stateFor(context);
+    if (state.indicator === "working") {
+      state.indicator = "";
+      writeState(context, state);
+      runtime.callComponent?.setIndicator("");
+    }
+  }
+}
+
+/**
+ * Confirm that this is an interactive row before allowing a timer to start.
+ * Pi's HTML renderer copies executionStarted/isPartial but its invalidate is a
+ * no-op. A temporary call-version mismatch makes that difference observable:
+ * only ToolExecutionComponent's synchronous invalidate reaches renderCall and
+ * restores the marker before this call returns.
+ */
+function establishRendererCapability(
+  context: AgentRendererContext,
+  state: AgentRendererState,
+  runtime: AgentRendererRuntime,
+): boolean {
+  if (runtime.capability === "interactive") return true;
+  if (runtime.capability === "noninteractive" || runtime.probing) return false;
+  // Headless/direct callers do not expose Pi's lifecycle capability. They may
+  // still render safely, but must not create a process-live animation.
+  if (typeof context.executionStarted !== "boolean") return false;
+
+  runtime.probing = true;
+  const previousCallComponent = runtime.callComponent;
+  const previousCallVersion = state.callVersion;
+  const probeCallVersion = state.version === Number.MIN_SAFE_INTEGER
+    ? Number.MAX_SAFE_INTEGER
+    : state.version - 1;
+  let synchronous = false;
+
+  try {
+    state.callVersion = probeCallVersion;
+    writeState(context, state);
+    context.invalidate();
+    synchronous = stateFor(context).callVersion === state.version;
+  } catch {
+    // A no-op, detached, or headless invalidator is not an animation host.
+  } finally {
+    state.callVersion = previousCallVersion;
+    writeState(context, state);
+    // The probe can re-enter renderCall before the outer call has installed its
+    // component. Restore the owner so that is not mistaken for replacement.
+    runtime.callComponent = previousCallComponent;
+    runtime.probing = false;
+  }
+
+  runtime.capability = synchronous ? "interactive" : "noninteractive";
+  return synchronous;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -309,12 +494,21 @@ function stateFor(context: AgentRendererContext): AgentRendererState {
   const stored = metadataFromUnknown(state[AGENT_RENDER_DETAILS_KEY]);
   const versionValue = state[`${AGENT_RENDER_DETAILS_KEY}:version`];
   const callVersionValue = state[`${AGENT_RENDER_DETAILS_KEY}:call-version`];
+  const indicatorValue = state[AGENT_RENDER_INDICATOR_KEY];
+  const indicator: AgentCallIndicator = indicatorValue === "working"
+    || indicatorValue === "success"
+    || indicatorValue === "error"
+    || indicatorValue === "background"
+    || indicatorValue === "queued"
+    ? indicatorValue
+    : "";
   return {
     metadata: stored,
     version: typeof versionValue === "number" && Number.isSafeInteger(versionValue) ? versionValue : 0,
     callVersion: typeof callVersionValue === "number" && Number.isSafeInteger(callVersionValue)
       ? callVersionValue
       : -1,
+    indicator,
   };
 }
 
@@ -325,6 +519,7 @@ function writeState(context: AgentRendererContext, state: AgentRendererState): v
     if (state.metadata) context.state[AGENT_RENDER_DETAILS_KEY] = state.metadata;
     context.state[`${AGENT_RENDER_DETAILS_KEY}:version`] = state.version;
     context.state[`${AGENT_RENDER_DETAILS_KEY}:call-version`] = state.callVersion;
+    context.state[AGENT_RENDER_INDICATOR_KEY] = state.indicator;
   } catch {
     // Rendering must never make an otherwise valid Agent result fail.
   }
@@ -455,15 +650,151 @@ function rendererState(context: AgentRendererContext): AgentRendererState {
   return stateFor(context);
 }
 
+function executionMode(
+  metadata: AgentCallRenderMetadata | undefined,
+  rawArgs: unknown,
+  defaultMode: AgentExecutionMode | undefined = "foreground",
+): AgentExecutionMode | undefined {
+  if (metadata?.mode !== undefined) return metadata.mode;
+  if (isRecord(rawArgs) && rawArgs.run_in_background === true) return "background";
+  return defaultMode;
+}
+
+function isExecutionTool(
+  toolName: AgentRenderToolName | undefined,
+  metadata: AgentCallRenderMetadata | undefined,
+  rawArgs: unknown,
+): boolean {
+  if (toolName !== undefined) return toolName !== "StopAgent";
+  if (metadata?.kind === "new" || metadata?.kind === "continued") return true;
+  if (!isRecord(rawArgs) || typeof rawArgs.prompt !== "string") return false;
+  return typeof rawArgs.agent === "string" || typeof rawArgs.agent_id === "string";
+}
+
+function indicatorText(indicator: AgentCallIndicator, runtime: AgentRendererRuntime): string {
+  switch (indicator) {
+    case "working":
+      return runtime.spinner
+        ? (AGENT_WORKING_SPINNER_FRAMES[runtime.frameIndex] ?? AGENT_WORKING_SPINNER_FRAMES[0])
+        : "";
+    case "success":
+      return "✓";
+    case "error":
+      return "✗";
+    case "background":
+      return "●";
+    case "queued":
+      return "◷";
+    default:
+      return "";
+  }
+}
+
+function canAnimateForeground(
+  toolName: AgentRenderToolName,
+  metadata: AgentCallRenderMetadata | undefined,
+  rawArgs: unknown,
+  context: AgentRendererContext,
+  runtime: AgentRendererRuntime,
+): boolean {
+  return toolName !== "StopAgent"
+    && executionMode(metadata, rawArgs) === "foreground"
+    && context.executionStarted === true
+    // An explicitly false value means the row is already terminal. Headless
+    // callers may omit this Pi-only field, so undefined remains compatible.
+    && context.isPartial !== false
+    && runtime.capability === "interactive"
+    && !runtime.animationDisabled;
+}
+
+function setRowIndicator(
+  context: AgentRendererContext,
+  state: AgentRendererState,
+  indicator: AgentCallIndicator,
+): void {
+  const runtime = runtimeFor(context);
+  if (indicator === "working") {
+    if (runtime.animationDisabled) return;
+    const current = runtime.spinner;
+    if (current) {
+      current.updateContext(context);
+    } else {
+      runtime.frameIndex = 0;
+      const spinner = new AgentSpinnerController(context);
+      runtime.spinner = spinner;
+      spinner.start();
+    }
+    if (state.indicator !== "working") {
+      state.indicator = "working";
+      state.version++;
+      writeState(context, state);
+    }
+    runtime.callComponent?.setIndicator(indicatorText("working", runtime));
+    return;
+  }
+
+  stopSpinner(context, false);
+  if (state.indicator !== indicator) {
+    state.indicator = indicator;
+    state.version++;
+    writeState(context, state);
+  }
+  runtime.callComponent?.setIndicator(indicatorText(indicator, runtime));
+}
+
+function callIndicator(
+  toolName: AgentRenderToolName,
+  args: unknown,
+  context: AgentRendererContext,
+  state: AgentRendererState,
+  runtime: AgentRendererRuntime,
+): string {
+  const metadata = state.metadata;
+  const mode = executionMode(metadata, args, toolName === "StopAgent" ? undefined : "foreground");
+
+  if (state.indicator === "working" && mode === "background") {
+    setRowIndicator(context, state, "background");
+  } else if (
+    state.indicator !== "success"
+    && state.indicator !== "error"
+    && state.indicator !== "background"
+    && state.indicator !== "queued"
+    && canAnimateForeground(toolName, metadata, args, context, runtime)
+  ) {
+    setRowIndicator(context, state, "working");
+  } else if (state.indicator === "working" && !runtime.spinner) {
+    // A lifecycle teardown or a failed invalidate can stop the interval while
+    // this row is still referenced. Do not render a stale animated marker.
+    state.indicator = "";
+    writeState(context, state);
+  }
+
+  return indicatorText(state.indicator, runtime);
+}
+
 function renderCallWithFormatter(
+  toolName: AgentRenderToolName,
   args: unknown,
   context: AgentRendererContext,
   format: (metadata: Partial<AgentCallRenderMetadata> | undefined, args: unknown) => string,
 ): PlaintextComponent {
   const state = rendererState(context);
+  const runtime = runtimeFor(context);
+  establishRendererCapability(context, state, runtime);
   const component = context.lastComponent instanceof AgentCallDetailsComponent
     ? context.lastComponent
     : new AgentCallDetailsComponent();
+
+  // A renderer component replacement is a lifecycle boundary for the old
+  // animation. Never let the old row keep an interval after that switch.
+  if (runtime.callComponent && runtime.callComponent !== component) {
+    stopSpinner(context, true);
+    runtime.animationDisabled = true;
+  }
+  runtime.callComponent = component;
+
+  const marker = callIndicator(toolName, args, context, state, runtime);
+  component.setIndicator(marker);
   component.setText(format(state.metadata, args));
 
   // Remember which metadata generation was rendered by the call slot. This is
@@ -479,7 +810,7 @@ export function renderAgentCall(
   _theme: unknown,
   context: AgentRendererContext,
 ): PlaintextComponent {
-  return renderCallWithFormatter(args, context, formatAgentCallText);
+  return renderCallWithFormatter("Agent", args, context, formatAgentCallText);
 }
 
 /** Render either root control tool with the shared ID/role/model header. */
@@ -490,6 +821,7 @@ export function renderAgentControlCall(
   context: AgentRendererContext,
 ): PlaintextComponent {
   return renderCallWithFormatter(
+    toolName,
     args,
     context,
     (metadata, rawArgs) => formatAgentControlCallText(toolName, metadata, rawArgs),
@@ -556,45 +888,114 @@ export function renderSubagentResult(
   return component;
 }
 
+function failureStatus(value: unknown): boolean {
+  return value === "error" || value === "aborted" || value === "stopped" || value === "cancelled";
+}
+
+function resultIsFailure(result: AgentResultLike, context: AgentRendererContext, executionTool: boolean): boolean {
+  if (context.isError === true || result.isError === true) return true;
+  if (!executionTool || !isRecord(result.details)) return false;
+
+  if (failureStatus(result.details.status)) return true;
+  const currentExecution = isRecord(result.details.currentExecution)
+    ? result.details.currentExecution
+    : undefined;
+  return failureStatus(currentExecution?.status);
+}
+
+/** Only an explicit lifecycle status qualifies as an authoritative queue marker. */
+function resultIsQueued(result: AgentResultLike, executionTool: boolean): boolean {
+  if (!executionTool || !isRecord(result.details)) return false;
+  if (result.details.status === "queued") return true;
+  const currentExecution = isRecord(result.details.currentExecution)
+    ? result.details.currentExecution
+    : undefined;
+  return currentExecution?.status === "queued";
+}
+
 /**
  * Hydrate row-local state from partial/final details and keep Pi's text result
  * rendering intact. The invalidate request is guarded by value equality, so a
  * repeated partial update or final hydration cannot trigger a loop.
+ *
+ * `toolName` is optional for source-compatible direct callers; registered tools
+ * pass it explicitly so StopAgent can never start an execution spinner.
  */
 export function renderAgentResult(
   result: AgentResultLike,
   options: { expanded?: boolean; isPartial?: boolean },
   _theme: unknown,
   context: AgentRendererContext,
+  toolName?: AgentRenderToolName,
 ): PlaintextComponent {
   const safeResult = isRecord(result) ? result as AgentResultLike : {};
   const state = rendererState(context);
   const incoming = getAgentCallRenderMetadata(safeResult.details);
+  const inferredExecutionTool = isExecutionTool(toolName, state.metadata, context.args);
+  const resolvedToolName: AgentRenderToolName = toolName
+    ?? (inferredExecutionTool ? "Agent" : "StopAgent");
   let synchronouslyRedrawn = false;
+  let metadataChanged = false;
 
+  // Merge first so the resolved mode is authoritative before deciding whether
+  // this open row is foreground or background.
   if (incoming) {
     const merged = mergeMetadata(state.metadata, incoming);
     if (!metadataEqual(state.metadata, merged)) {
       state.metadata = merged;
       state.version++;
-      writeState(context, state);
+      metadataChanged = true;
+    }
+  }
 
-      // Pi 0.82.1 calls renderCall before renderResult. Ask for one more row
-      // render after metadata arrives so the header immediately switches from
-      // raw/dashes to the resolved invocation. The equality guard above makes
-      // this idempotent for repeated partial/final results.
-      try {
-        context.invalidate();
-        // ToolExecutionComponent.invalidate() redraws synchronously in Pi
-        // 0.82.1. If that happened, the nested render already installed the
-        // actual result component; returning an empty component avoids adding
-        // the same result a second time in the outer redraw. Async/headless
-        // invalidate implementations do not advance this marker and retain
-        // the normal text result below.
-        synchronouslyRedrawn = context.state[`${AGENT_RENDER_DETAILS_KEY}:call-version`] === state.version;
-      } catch {
-        // A renderer must remain safe when used by a minimal/headless caller.
-      }
+  const executionTool = isExecutionTool(resolvedToolName, state.metadata, context.args);
+  const partial = options.isPartial === true;
+  const failed = resultIsFailure(safeResult, context, executionTool);
+  const queued = resultIsQueued(safeResult, executionTool);
+  const background = executionTool && executionMode(state.metadata, context.args) === "background";
+  const runtime = runtimeFor(context);
+
+  if (failed) {
+    setRowIndicator(context, state, "error");
+  } else if (queued) {
+    setRowIndicator(context, state, "queued");
+  } else if (partial) {
+    if (background && state.indicator === "working") {
+      // Resolved renderer metadata can correct the raw call's provisional
+      // mode. End a provisional foreground timer immediately.
+      setRowIndicator(context, state, "background");
+    } else if (
+      (state.indicator === "" || state.indicator === "working")
+      && canAnimateForeground(resolvedToolName, state.metadata, context.args, context, runtime)
+    ) {
+      setRowIndicator(context, state, "working");
+    }
+  } else {
+    // A background row is an acknowledgement, not a long-lived background
+    // loader. An explicit `status: "queued"` was handled above; otherwise
+    // queue state is never guessed from acknowledgement text or unrelated
+    // details.
+    setRowIndicator(context, state, background ? "background" : "success");
+  }
+
+  if (metadataChanged) {
+    writeState(context, state);
+
+    // Pi 0.82.1 calls renderCall before renderResult. Ask for one more row
+    // render after metadata arrives so the header immediately switches from
+    // raw/dashes to the resolved invocation. The equality guard above makes
+    // this idempotent for repeated partial/final results.
+    try {
+      context.invalidate();
+      // ToolExecutionComponent.invalidate() redraws synchronously in Pi
+      // 0.82.1. If that happened, the nested render already installed the
+      // actual result component; returning an empty component avoids adding
+      // the same result a second time in the outer redraw. Async/headless
+      // invalidate implementations do not advance this marker and retain
+      // the normal text result below.
+      synchronouslyRedrawn = context.state[`${AGENT_RENDER_DETAILS_KEY}:call-version`] === state.version;
+    } catch {
+      // A renderer must remain safe when used by a minimal/headless caller.
     }
   }
 
@@ -606,7 +1007,7 @@ export function renderAgentResult(
   component.setText(resultTextWithUsage(
     textResult(safeResult),
     safeResult.details,
-    options.isPartial !== true,
+    !partial,
   ));
   return component;
 }

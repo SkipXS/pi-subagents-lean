@@ -39,21 +39,39 @@ vi.mock("../src/agents/agent-types.js", () => ({
 vi.mock("../src/agents/agent-manager.js", () => ({
   AgentManager: class {
     records: any[] = [];
+    activityObservers = new Set<(snapshot: readonly any[]) => void>();
     dispose = vi.fn(async () => undefined);
     setOnComplete = vi.fn();
     constructor() { state.managers.push(this); }
     listAgents() { return this.records; }
+    subscribeActivity = vi.fn((observer: (snapshot: readonly any[]) => void) => {
+      this.activityObservers.add(observer);
+      observer([]);
+      return () => this.activityObservers.delete(observer);
+    });
+    emitActivity(snapshot: readonly any[]) {
+      for (const observer of [...this.activityObservers]) observer(snapshot);
+    }
   },
 }));
 
 vi.mock("../src/spawn/spawn-coordinator.js", () => ({
   SpawnCoordinator: class {
+    deliveryObservers = new Set<(snapshot: readonly any[]) => void>();
     dispose = vi.fn(async () => {
       if (state.coordinatorDisposeError) throw state.coordinatorDisposeError;
       await state.coordinatorDisposePending;
     });
     onAgentComplete = vi.fn();
     constructor() { state.coordinators.push(this); }
+    subscribeDeliveryActivity = vi.fn((observer: (snapshot: readonly any[]) => void) => {
+      this.deliveryObservers.add(observer);
+      observer([]);
+      return () => this.deliveryObservers.delete(observer);
+    });
+    emitDeliveryActivity(snapshot: readonly any[]) {
+      for (const observer of [...this.deliveryObservers]) observer(snapshot);
+    }
   },
 }));
 
@@ -71,13 +89,26 @@ vi.mock("../src/shell.js", () => ({
 
 import { setupEventListeners } from "../src/events.js";
 import { AgentRenderMetadataBridge } from "../src/agents/agent-render-bridge.js";
-import { AGENT_RENDER_DETAILS_KEY } from "../src/agents/agent-renderer.js";
+import {
+  AGENT_RENDER_DETAILS_KEY,
+  renderAgentCall,
+  stopAgentRendererTimers,
+} from "../src/agents/agent-renderer.js";
 
 function createContext(): ExtensionContext {
   return {
     cwd: "/tmp/project",
     hasUI: false,
     isProjectTrusted: () => true,
+  } as unknown as ExtensionContext;
+}
+
+function createTuiContext(setStatus = vi.fn()): ExtensionContext {
+  return {
+    ...createContext(),
+    mode: "tui",
+    hasUI: true,
+    ui: { setStatus, notify: vi.fn() },
   } as unknown as ExtensionContext;
 }
 
@@ -143,6 +174,57 @@ describe("headless extension session lifecycle", () => {
     bridge.clear();
   });
 
+  it("ends row timers on reload and session shutdown", async () => {
+    vi.useFakeTimers();
+    try {
+      const listeners = new Map<string, (...args: any[]) => any>();
+      setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+      const ctx = createContext();
+      await listeners.get("session_start")!({}, ctx);
+
+      const firstRow: any = {
+        args: { agent: "scout", prompt: "inspect" },
+        state: {},
+        lastComponent: undefined,
+        executionStarted: false,
+        isPartial: true,
+        invalidate: undefined,
+      };
+      firstRow.invalidate = vi.fn(() => renderAgentCall(firstRow.args, {}, firstRow));
+      const unopenedFirstRow = renderAgentCall(firstRow.args, {}, firstRow);
+      firstRow.lastComponent = unopenedFirstRow;
+      firstRow.executionStarted = true;
+      renderAgentCall(firstRow.args, {}, firstRow);
+      expect(vi.getTimerCount()).toBe(1);
+
+      // Pi emits session_start for reload after the old runtime has begun its
+      // replacement. The renderer lifecycle is stopped synchronously rather
+      // than waiting for manager disposal.
+      await listeners.get("session_start")!({}, ctx);
+      expect(vi.getTimerCount()).toBe(0);
+
+      const secondRow: any = {
+        args: { agent: "scout", prompt: "inspect again" },
+        state: {},
+        lastComponent: undefined,
+        executionStarted: false,
+        isPartial: true,
+        invalidate: undefined,
+      };
+      secondRow.invalidate = vi.fn(() => renderAgentCall(secondRow.args, {}, secondRow));
+      const unopenedSecondRow = renderAgentCall(secondRow.args, {}, secondRow);
+      secondRow.lastComponent = unopenedSecondRow;
+      secondRow.executionStarted = true;
+      renderAgentCall(secondRow.args, {}, secondRow);
+      expect(vi.getTimerCount()).toBe(1);
+      await listeners.get("session_shutdown")!({}, ctx);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      stopAgentRendererTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("creates and disposes root services on session start/shutdown", async () => {
     const listeners = new Map<string, (...args: any[]) => any>();
     setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
@@ -166,6 +248,65 @@ describe("headless extension session lifecycle", () => {
     expect(state.manager).toBeNull();
     expect(state.coordinator).toBeNull();
     expect(state.sessionCtx).toBeNull();
+  });
+
+  it("mounts the static footer only in TUI and unsubscribes before shutdown", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const firstStatus = vi.fn();
+    const first = createTuiContext(firstStatus);
+    await listeners.get("session_start")!({}, first);
+
+    const firstManager = state.manager;
+    const firstCoordinator = state.coordinator;
+    firstManager.emitActivity([{
+      agentId: "a1b2c3d4-agent",
+      type: "scout",
+      mode: "foreground",
+      status: "running",
+      executionId: "execution-1",
+    }]);
+    expect(firstStatus).toHaveBeenLastCalledWith("subagents", "Agent: scout [a1b2c3d4] · Foreground · Running");
+
+    await listeners.get("session_shutdown")!({}, first);
+    expect(firstStatus).toHaveBeenLastCalledWith("subagents", undefined);
+    const callsAfterShutdown = firstStatus.mock.calls.length;
+    firstManager.emitActivity([]);
+    firstCoordinator.emitDeliveryActivity([]);
+    expect(firstStatus).toHaveBeenCalledTimes(callsAfterShutdown);
+
+    const secondStatus = vi.fn();
+    const second = createTuiContext(secondStatus);
+    await listeners.get("session_start")!({}, second);
+    const secondManager = state.manager;
+    secondManager.emitActivity([{
+      agentId: "b2c3d4e5-agent",
+      type: "reviewer",
+      mode: "background",
+      status: "queued",
+      executionId: "execution-2",
+    }]);
+    expect(secondStatus).toHaveBeenLastCalledWith("subagents", "Agent: reviewer [b2c3d4e5] · Background · Queued");
+
+    // The old source is no longer subscribed and cannot clear the new row.
+    firstManager.emitActivity([]);
+    firstCoordinator.emitDeliveryActivity([]);
+    expect(secondStatus).toHaveBeenLastCalledWith("subagents", "Agent: reviewer [b2c3d4e5] · Background · Queued");
+
+    await listeners.get("session_shutdown")!({}, second);
+  });
+
+  it("does not install footer status in JSON/print-style contexts", async () => {
+    const listeners = new Map<string, (...args: any[]) => any>();
+    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
+    const setStatus = vi.fn();
+    const context = { ...createTuiContext(setStatus), mode: "json", hasUI: false } as unknown as ExtensionContext;
+    await listeners.get("session_start")!({}, context);
+    state.manager.emitActivity([{
+      agentId: "a1b2c3d4-agent", type: "scout", mode: "foreground", status: "running", executionId: "execution-1",
+    }]);
+    expect(setStatus).not.toHaveBeenCalled();
+    await listeners.get("session_shutdown")!({}, context);
   });
 
   it("waits for a delayed coordinator dispose before restarting", async () => {

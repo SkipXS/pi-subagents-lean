@@ -55,6 +55,17 @@ export interface SpawnResult {
   record: AgentRecord;
 }
 
+/** Read-only projection of one completed background execution still pending delivery. */
+export interface DeliveryActivityProjection {
+  readonly agentId: string;
+  readonly type: string;
+  readonly executionId: string;
+}
+
+/** Stable, detached delivery snapshot exposed to presentation observers. */
+export type DeliveryActivitySnapshot = readonly DeliveryActivityProjection[];
+export type DeliveryActivityObserver = (snapshot: DeliveryActivitySnapshot) => void;
+
 /** Input for continueAgent(). Built by the AgentContinue tool executor. */
 export interface ContinueIntent {
   agentId: string;
@@ -110,6 +121,8 @@ interface BackgroundDeliveryEntry {
   lastError?: string;
   /** Claims the single automatic delivery attempt. */
   autoNudgeIssued: boolean;
+  /** Captured display type; delivery status must not reread a mutable record. */
+  type: string;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -128,11 +141,58 @@ export class SpawnCoordinator {
 
   /** Latest claimed execution per record, retained after accepted entries are cleared. */
   private latestDeliveryKeys = new Map<string, string>();
+  private deliveryObservers = new Set<DeliveryActivityObserver>();
 
   /** Set during dispose to prevent delivery through a stale Pi instance. */
   private disposed = false;
 
   constructor(private manager: AgentManager) {}
+
+  /**
+   * Subscribe to detached completed-delivery projections.
+   *
+   * Delivery observers are additive and best effort: a presentation failure
+   * cannot change nudge scheduling or handoff state.
+   */
+  subscribeDeliveryActivity(observer: DeliveryActivityObserver): () => void {
+    this.deliveryObservers.add(observer);
+    this.notifyDeliveryObserver(observer);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      this.deliveryObservers.delete(observer);
+    };
+  }
+
+  /** Return only completed, still-pending coordinator deliveries. */
+  getDeliveryActivitySnapshot(): DeliveryActivitySnapshot {
+    const byAgent = new Map<string, DeliveryActivityProjection>();
+    for (const entry of this.backgroundDeliveries.values()) {
+      if (!entry.completed || entry.state !== "pending" || !entry.payload) continue;
+      byAgent.set(entry.agentId, Object.freeze({
+        agentId: entry.agentId,
+        type: entry.type,
+        executionId: entry.executionId,
+      }));
+    }
+    const projections = [...byAgent.values()].sort((left, right) =>
+      left.agentId < right.agentId ? -1 : left.agentId > right.agentId ? 1 : 0,
+    );
+    return Object.freeze(projections);
+  }
+
+  private notifyDeliveryObserver(observer: DeliveryActivityObserver): void {
+    try {
+      observer(this.getDeliveryActivitySnapshot());
+    } catch {
+      // Presentation observers must never affect delivery lifecycle.
+    }
+  }
+
+  private notifyDeliveryObservers(): void {
+    for (const observer of [...this.deliveryObservers]) this.notifyDeliveryObserver(observer);
+  }
 
   /** Spawn + wire tracking + (foreground) await. */
   async spawn(
@@ -336,6 +396,7 @@ export class SpawnCoordinator {
       };
     entry.payload ??= this.capturePayload(record, execution);
     this.scheduleEntry(entry);
+    this.notifyDeliveryObservers();
   }
 
   /** Called by AgentManager's completion callback, once per executed turn. */
@@ -353,6 +414,7 @@ export class SpawnCoordinator {
         return;
       }
       this.scheduleEntry(entry);
+      this.notifyDeliveryObservers();
       return;
     }
   }
@@ -377,6 +439,8 @@ export class SpawnCoordinator {
     }
     this.backgroundDeliveries.clear();
     this.latestDeliveryKeys.clear();
+    this.notifyDeliveryObservers();
+    this.deliveryObservers.clear();
   }
 
   /** Register one background execution's delivery claim at acceptance. */
@@ -384,6 +448,7 @@ export class SpawnCoordinator {
     const entry: BackgroundDeliveryEntry = {
       executionId,
       agentId: record.id,
+      type: record.display.type,
       signal,
       state: "pending",
       completed: false,
@@ -395,6 +460,7 @@ export class SpawnCoordinator {
     this.latestDeliveryKeys.set(record.id, entry.executionId);
     record.delivery ??= { state: "pending", attempts: 0 };
     this.trackBackgroundParentAbort(entry, record);
+    this.notifyDeliveryObservers();
   }
 
   /** Keep each execution's delivery tied to its parent turn until acceptance or session shutdown. */
@@ -429,6 +495,7 @@ export class SpawnCoordinator {
       }
     }
     this.clearEntry(entry, true);
+    this.notifyDeliveryObservers();
   }
 
   /** Clear transient tracking; failed delivery entries remain until session shutdown. */
@@ -504,6 +571,7 @@ export class SpawnCoordinator {
     const record = this.manager.getRecord(entry.agentId);
     if (!record) {
       this.clearEntry(entry, true);
+      this.notifyDeliveryObservers();
       return;
     }
     if (entry.state !== "pending") return;
@@ -548,6 +616,7 @@ export class SpawnCoordinator {
       if (this.isLatestDelivery(record.id, entry)) record.lifecycle.resultConsumed = true;
       this.projectDelivery(record, entry);
       this.clearEntry(entry, true);
+      this.notifyDeliveryObservers();
     } catch (error) {
       // Keep the result and record the sendMessage failure diagnostically until
       // session shutdown; there is no automatic or manual retry path.
@@ -555,6 +624,7 @@ export class SpawnCoordinator {
       entry.lastError = deliveryErrorMessage(error);
       this.projectDelivery(record, entry);
       this.clearEntry(entry, false);
+      this.notifyDeliveryObservers();
     }
   }
 }

@@ -85,6 +85,14 @@ hydrated with the canonical full ID after spawn acceptance; control rows use
 the resolved full ID when available. `Agent` and `AgentContinue` then show the
 complete prompt.
 
+While an interactive foreground `Agent` or `AgentContinue` tool call is open,
+its row starts Pi's default working spinner (`⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`) at
+80 ms per frame. Completed rows use `✓` on success and `✗` on error or abort;
+a background acknowledgement may use a static `●` and never keeps an animation
+running. No queue glyph is shown unless an authoritative queue state is
+available. These markers are renderer-only and do not change tool results,
+RPC/JSON, or print output.
+
 ### `AgentContinue`
 
 `AgentContinue({ agent_id, prompt, run_in_background })` continues a
@@ -117,6 +125,16 @@ Lists retained agents as `[short_id] (type) status`, with an optional
 `delivery:<state>` field. Delivery state is diagnostic: a `sendMessage` error
 remains visible until the parent session shuts down, with no retry promise. Use the tool for
 discovery, not for waiting; background completion is delivered automatically.
+
+### Static activity footer
+In TUI and RPC sessions the footer shows only active subagents, without a timer
+or spinner. One active agent is rendered as
+`Agent: scout [a1b2c3d4] · Foreground · Running`; multiple agents use
+`Agents: N active · FG X running · BG Y running · Z queued` and append
+` · D delivering` only when a completed background delivery is still pending.
+Queued/running executions take precedence over an older delivery for the same
+agent ID. Terminal or already accepted/failed/abandoned delivery state is not
+shown. JSON, print, and headless runs are unchanged.
 
 ## Agent definitions
 

@@ -984,6 +984,41 @@ describe("SpawnCoordinator", () => {
   });
 
   describe("onAgentComplete", () => {
+    it("publishes only completed pending deliveries and isolates observers", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      const snapshots: Array<readonly any[]> = [];
+      coordinator.subscribeDeliveryActivity(() => { throw new Error("observer failure"); });
+      const unsubscribe = coordinator.subscribeDeliveryActivity((snapshot) => snapshots.push(snapshot));
+      const result = await coordinator.spawn(mockPi, ctx, {
+        type: "builder", prompt: "task", description: "Test", runInBackground: true,
+      });
+      const second = await coordinator.spawn(mockPi, ctx, {
+        type: "reviewer", prompt: "second task", description: "Second", runInBackground: true,
+      });
+
+      // A claimed but still running background execution is not Delivering.
+      expect(coordinator.getDeliveryActivitySnapshot()).toEqual([]);
+      result.record.lifecycle.status = "completed";
+      notifyCompletion(coordinator, result.record);
+      second.record.lifecycle.status = "completed";
+      notifyCompletion(coordinator, second.record);
+
+      const pending = coordinator.getDeliveryActivitySnapshot();
+      expect(pending).toEqual(expect.arrayContaining([
+        expect.objectContaining({ agentId: result.agentId, type: "builder" }),
+        expect.objectContaining({ agentId: second.agentId, type: "reviewer" }),
+      ]));
+      expect(pending).toHaveLength(2);
+      expect(Object.isFrozen(pending)).toBe(true);
+      expect(Object.isFrozen(pending[0])).toBe(true);
+      expect(snapshots.at(-1)).toEqual(pending);
+
+      vi.advanceTimersByTime(200);
+      expect(coordinator.getDeliveryActivitySnapshot()).toEqual([]);
+      unsubscribe();
+      unsubscribe();
+    });
+
     it("schedules nudge for background agents", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
