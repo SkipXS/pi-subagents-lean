@@ -6,13 +6,12 @@
  * Lines: [USER], [TOOL], [ASSISTANT], [DONE] with ISO timestamps.
  */
 
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { formatCost, formatTokens } from "./usage.js";
 import { summarizeToolArgs } from "../utils.js";
-
 
 /** Format the [DONE] summary line with final usage stats. */
 function formatDoneLine(stats: { totalTokens: number; cost: number }): string {
@@ -20,6 +19,7 @@ function formatDoneLine(stats: { totalTokens: number; cost: number }): string {
   const costStr = formatCost(stats.cost);
   return `${timestamp()} [DONE] ${tokensStr}, ${costStr}\n`;
 }
+
 /** Max content length for a full tool result log entry — longer results get a summary line. */
 const MAX_TOOL_RESULT_DISPLAY_LENGTH = 500;
 
@@ -29,37 +29,151 @@ function timestamp(): string {
 }
 
 /**
+ * One append/write queue for one physical log path. Every operation catches its
+ * own I/O failure so a broken log cannot poison later operations or the caller
+ * that submitted them.
+ */
+class SerialLogWriter {
+  private tail: Promise<void> = Promise.resolve();
+  private pending = 0;
+
+  constructor(private readonly onIdle: () => void) {}
+
+  enqueue(operation: () => Promise<void>): Promise<void> {
+    this.pending++;
+    const next = this.tail
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await operation();
+        } catch {
+          // Output logs are optional best-effort telemetry.
+        } finally {
+          this.pending--;
+        }
+      });
+    this.tail = next;
+    // Retire only after this operation settles. A write queued before that
+    // point increments pending and therefore keeps this exact writer alive.
+    void next.then(() => this.retireIfIdle());
+    return next;
+  }
+
+  whenIdle(): Promise<void> {
+    return this.tail.catch(() => undefined);
+  }
+
+  isIdle(): boolean {
+    return this.pending === 0;
+  }
+
+  private retireIfIdle(): void {
+    if (this.pending === 0) this.onIdle();
+  }
+}
+
+/** Writers are shared by path so separate execution wrappers cannot race. */
+const writers = new Map<string, SerialLogWriter>();
+let writerGeneration = 0;
+
+function writerFor(path: string): SerialLogWriter {
+  const key = resolve(path);
+  let writer = writers.get(key);
+  if (!writer) {
+    let createdWriter: SerialLogWriter;
+    createdWriter = new SerialLogWriter(() => {
+      // Identity and idle checks prevent an old writer from deleting a newer
+      // writer created for the same path after the old queue drained.
+      if (createdWriter.isIdle() && writers.get(key) === createdWriter) {
+        writers.delete(key);
+      }
+    });
+    writer = createdWriter;
+    writers.set(key, writer);
+    writerGeneration++;
+  }
+  return writer;
+}
+
+/**
+ * Queue one filesystem operation after creating the log directory. The promise
+ * always resolves; callers can await it for deterministic tests without making
+ * runtime logging failures observable to agent execution.
+ */
+function enqueueFileOperation(
+  path: string,
+  operation: () => Promise<void>,
+): Promise<void> {
+  return writerFor(path).enqueue(async () => {
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await operation();
+  });
+}
+
+/**
+ * Wait for all output-log writes submitted so far. This is intentionally not
+ * used by the agent manager's hot lifecycle paths; it exists for tests and
+ * hosts that explicitly want to wait for best-effort telemetry.
+ */
+export async function whenOutputLogsIdle(): Promise<void> {
+  // Capture currently queued writers, then re-check generation and pending
+  // state so retirement/recreation cannot hide a write submitted while waiting.
+  while (true) {
+    const generation = writerGeneration;
+    const snapshot = [...writers.values()];
+    await Promise.all(snapshot.map((writer) => writer.whenIdle()));
+    if (
+      generation === writerGeneration
+      && snapshot.every((writer) => writer.isIdle())
+      && [...writers.values()].every((writer) => writer.isIdle())
+    ) return;
+  }
+}
+
+/** Short alias for explicit test/shutdown flushing. */
+export function whenIdle(): Promise<void> {
+  return whenOutputLogsIdle();
+}
+
+/**
  * Create the output file path for an agent.
  * Default path: <system temp dir>/pi-agent-outputs/<agentId>.log
- * Ensures the parent directory exists with 0o700 permissions.
+ * Parent-directory creation is queued asynchronously and is best effort.
  *
  * @param baseDir - Optional base directory. Provided for testability;
  *                  production callers use the system temporary directory.
  */
 export function createOutputFilePath(agentId: string, baseDir?: string): string {
   const dir = baseDir ?? join(tmpdir(), "pi-agent-outputs");
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return join(dir, `${agentId}.log`);
+  const path = join(dir, `${agentId}.log`);
+  // Keep path creation non-blocking while retaining the old directory-creation
+  // guarantee once the queue is allowed to drain.
+  void enqueueFileOperation(path, async () => undefined);
+  return path;
 }
 
 /**
  * Write the initial user prompt entry to the output file.
  * Format: <ISO timestamp> [USER] <prompt>
+ *
+ * The returned promise is best effort and always resolves. Runtime callers do
+ * not need to await it; tests or an explicit host shutdown flush may do so.
  */
 export function writeInitialEntry(
   path: string,
   prompt: string,
-): void {
+): Promise<void> {
   const line = `${timestamp()} [USER] ${prompt}\n`;
-  writeFileSync(path, line, "utf-8");
+  return enqueueFileOperation(path, () => writeFile(path, line, "utf-8"));
 }
 
 /**
- * Safe append — silently ignores write errors.
- * Used for best-effort output file writes that must never throw.
+ * Safe append — silently ignores write errors. The shared path writer keeps
+ * each complete log entry ordered without blocking the caller.
  */
 function safeAppend(path: string, content: string): void {
-  try { appendFileSync(path, content, "utf-8"); } catch { /* ignore write errors */ }
+  if (!content) return;
+  void enqueueFileOperation(path, () => appendFile(path, content, "utf-8"));
 }
 
 /** Split text into non-empty lines, prefixing each with a timestamp and role tag. */
@@ -144,10 +258,11 @@ function formatMessageLine(
 
   return "";
 }
+
 /**
  * Subscribe to session events and flush new messages to the output file
- * when a session turn completes. Returns a cleanup function that writes the
- * DONE line and unsubscribes.
+ * when a session turn completes. Returns an idempotent cleanup function that
+ * queues the DONE line and unsubscribes.
  *
  * The optional stats parameter provides final usage data for the DONE line.
  * `startIndex` selects the first session message still missing from the file;
@@ -161,28 +276,33 @@ export function streamToOutputFile(
   startIndex: number = 1,
 ): () => void {
   let writtenCount = startIndex; // initial user prompt (or prior executions) already written
+  let cleanedUp = false;
 
   const flush = () => {
-    const messages = session.messages;
-    while (writtenCount < messages.length) {
-      const msg = messages[writtenCount];
-      if (msg.role === "assistant") {
-        const lines = formatMessageLine("ASSISTANT", msg.content as any);
-        if (lines) safeAppend(path, lines);
-      } else if (msg.role === "user") {
-        const text = extractUserText(msg.content as any);
-        if (text.trim()) {
-          safeAppend(path, `${timestamp()} [USER] ${text}\n`);
+    try {
+      const messages = session.messages;
+      let content = "";
+      while (writtenCount < messages.length) {
+        const msg = messages[writtenCount];
+        if (msg.role === "assistant") {
+          content += formatMessageLine("ASSISTANT", msg.content as any);
+        } else if (msg.role === "user") {
+          const text = extractUserText(msg.content as any);
+          if (text.trim()) {
+            content += `${timestamp()} [USER] ${text}\n`;
+          }
+        } else if (msg.role === "toolResult") {
+          const msgAny = msg as unknown as Record<string, unknown>;
+          content += formatToolResult(
+            (msgAny.toolName ?? "unknown") as string,
+            msgAny.content as ReadonlyArray<Record<string, unknown>> | undefined,
+          );
         }
-      } else if (msg.role === "toolResult") {
-        const msgAny = msg as unknown as Record<string, unknown>;
-        const lines = formatToolResult(
-          (msgAny.toolName ?? "unknown") as string,
-          msgAny.content as ReadonlyArray<Record<string, unknown>> | undefined,
-        );
-        if (lines) safeAppend(path, lines);
+        writtenCount++;
       }
-      writtenCount++;
+      safeAppend(path, content);
+    } catch {
+      // A malformed/closed session must not affect the agent lifecycle.
     }
   };
 
@@ -191,15 +311,16 @@ export function streamToOutputFile(
   });
 
   return () => {
-    // Final flush
-    flush();
+    if (cleanedUp) return;
+    cleanedUp = true;
 
-    // Write DONE line
+    try { unsubscribe(); } catch { /* session cleanup is best effort */ }
+
+    // Queue the last message flush before the DONE entry. Both operations use
+    // the path-shared writer, so a slow earlier turn cannot reorder them.
+    flush();
     const doneStats = stats ?? { totalTokens: 0, cost: 0 };
     safeAppend(path, formatDoneLine(doneStats));
-
-    // Unsubscribe from session events
-    unsubscribe();
   };
 }
 
@@ -207,25 +328,22 @@ export function streamToOutputFile(
 //  AgentOutputLog — lifecycle wrapper for per-agent output streaming
 // ---------------------------------------------------------------------------
 
-/** Final usage stats written to the DONE line at agent completion. */
+/** Final usage stats written to the [DONE] line at agent completion. */
 export interface OutputFinalStats {
   totalTokens: number;
   cost: number;
 }
 
 /**
- * Manages a single agent's output log lifecycle: create path → write initial
- * entry → attach session stream → finalize with stats → close.
- *
- * The manager holds one instance per agent. At spawn time the constructor
- * creates the file and writes the [USER] entry. When the session is ready,
- * `attach()` subscribes to streaming events. At completion, `finalize()`
- * flushes remaining messages, writes the [DONE] line, and unsubscribes.
+ * Manages a single agent execution's output log lifecycle: create path → queue
+ * initial entry → attach session stream → finalize with stats. All filesystem
+ * work is asynchronous and best effort; lifecycle methods never wait for it.
  */
 export class AgentOutputLog {
   readonly path: string;
   private cleanup?: () => void;
   private statsRef?: OutputFinalStats;
+  private finalized = false;
 
   constructor(agentId: string, prompt: string, baseDir?: string, append: boolean = false) {
     this.path = createOutputFilePath(agentId, baseDir);
@@ -233,7 +351,7 @@ export class AgentOutputLog {
       // Continuation: reuse the existing file and append the new prompt.
       this.append(prompt);
     } else {
-      writeInitialEntry(this.path, prompt);
+      void writeInitialEntry(this.path, prompt);
     }
   }
 
@@ -242,41 +360,51 @@ export class AgentOutputLog {
    * truncates: the file accumulates one [USER] entry per execution.
    */
   append(prompt: string): void {
+    if (this.finalized) return;
     safeAppend(this.path, `${timestamp()} [USER] ${prompt}\n`);
   }
 
   /**
    * Subscribe to session events so messages stream to the output file.
-   * Internally passes a mutable usage reference that `finalize()` populates
-   * before the DONE line is written.
-   *
    * `startIndex` is the first session message that still needs flushing;
    * continuation attaches pass the current message count so already-written
    * messages from earlier executions are not duplicated.
    */
   attach(session: AgentSession, startIndex: number = 1): void {
+    if (this.finalized || this.cleanup) return;
     this.statsRef = { totalTokens: 0, cost: 0 };
     this.cleanup = streamToOutputFile(session, this.path, this.statsRef, startIndex);
   }
 
   /**
-   * Flush remaining messages, write the [DONE] line with final stats,
-   * and unsubscribe from session events.
-   *
-   * Safe to call without a prior `attach()` — writes the DONE line only.
+   * Flush remaining messages, write exactly one [DONE] line with final stats,
+   * and unsubscribe from session events. Safe to call without a prior attach.
+   * The method only queues work, so it never waits for a slow disk.
    */
   finalize(stats: OutputFinalStats): void {
-    if (this.cleanup && this.statsRef) {
-      // Populate the mutable stats ref so streamToOutputFile's cleanup
-      // writes the actual final values to the DONE line.
-      this.statsRef.totalTokens = stats.totalTokens;
-      this.statsRef.cost = stats.cost;
-      this.cleanup();
-      this.cleanup = undefined;
-      this.statsRef = undefined;
-    } else {
-      // No attach was called — write DONE directly
-      safeAppend(this.path, formatDoneLine(stats));
+    if (this.finalized) return;
+    this.finalized = true;
+
+    const cleanup = this.cleanup;
+    const statsRef = this.statsRef;
+    this.cleanup = undefined;
+    this.statsRef = undefined;
+
+    try {
+      if (cleanup && statsRef) {
+        statsRef.totalTokens = stats.totalTokens;
+        statsRef.cost = stats.cost;
+        cleanup();
+      } else {
+        safeAppend(this.path, formatDoneLine(stats));
+      }
+    } catch {
+      // Logging must never block spawn/continue/stop or slot release.
     }
+  }
+
+  /** Wait for this path's queued writes without creating a retained idle writer. */
+  whenIdle(): Promise<void> {
+    return writers.get(resolve(this.path))?.whenIdle() ?? Promise.resolve();
   }
 }

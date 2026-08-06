@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { registerAgents, getAvailableAgents, setAgentScanDirs, scanAndMerge } from "./agents/agent-types.js";
+import { discoverNewAgents, getAvailableAgents, setAgentScanDirs } from "./agents/agent-types.js";
 import { AgentManager } from "./agents/agent-manager.js";
 import { SpawnCoordinator } from "./spawn/spawn-coordinator.js";
 import {
@@ -60,17 +60,16 @@ export async function scanAndRegisterAgents(
   const sharedAgentDir = projectTrusted ? path.join(ctx.cwd, ".agents", "agents") : "";
   const projectAgentDir = projectTrusted ? path.join(ctx.cwd, ".pi", "agents") : "";
 
-  // Store scan dirs for on-demand discovery (agents added during the session)
+  // Store scan dirs for on-demand discovery (agents added during the session).
+  // This also invalidates scans that were started with the previous session's
+  // directory snapshot.
   setAgentScanDirs(userAgentDir, projectAgentDir, sharedAgentDir);
 
   const disableDefaults = getStore().agent.disableDefaultAgents;
-  const merged = await scanAndMerge({ disableDefaultAgents: disableDefaults });
-
-  // A session can be shut down while its scan is pending. The catalog is a
-  // shared registry, so a stale scan must not overwrite a newer session's
-  // published definitions after it eventually resolves.
+  // Do not even start a stale startup refresh. If shutdown happens after this
+  // check, discoverNewAgents() still rejects publication using its scan token.
   if (shouldRegister()) {
-    registerAgents(merged, { disableDefaultAgents: disableDefaults });
+    await discoverNewAgents({ disableDefaultAgents: disableDefaults });
   }
 }
 
@@ -206,6 +205,9 @@ export function setupEventListeners(
   // session_shutdown — abort all root executions and dispose the manager.
   pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
     ++sessionEpoch;
+    // Invalidate pending parent scans before asynchronous cleanup. Worktree
+    // catalogs are invocation-local and do not need to be cleared here.
+    setAgentScanDirs("", "", "");
 
     // A standard host notification is retained for diagnostics; no custom
     // presentation state or terminal input is involved.

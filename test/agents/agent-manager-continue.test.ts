@@ -9,6 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fakeCtx, fakePi, makeResolvablePromise } from "../fixtures.ts";
+import { readFile } from "node:fs/promises";
 
 let uuidCounter = 0;
 
@@ -67,6 +68,7 @@ import {
   runWithSubagentRuntime,
 } from "../../src/shell.js";
 import { buildAgentDetails } from "../../src/agents/agent-details.js";
+import { whenOutputLogsIdle } from "../../src/agents/output-file.js";
 
 describe("AgentManager.continueAgent", () => {
   let manager: AgentManager;
@@ -667,7 +669,6 @@ describe("AgentManager.continueAgent", () => {
   it("appends continuation prompts to the same output log without truncating", async () => {
     manager = new AgentManager(onComplete);
     const { id } = await spawnCompletedAgent("initial task");
-    expect(mockModules.fsMock.writeFileSync).toHaveBeenCalledTimes(1); // initial [USER] entry
 
     mockModules.mockExecuteAgentTurn.mockResolvedValueOnce({
       responseText: "second", aborted: false,
@@ -675,12 +676,16 @@ describe("AgentManager.continueAgent", () => {
     const { promise } = manager.continueAgent(id, "second task", {});
     await promise;
 
-    // Append mode writes the continuation [USER] entry via appendFileSync and
-    // never re-truncates the file with writeFileSync.
-    expect(mockModules.fsMock.writeFileSync).toHaveBeenCalledTimes(1);
-    expect(mockModules.fsMock.appendFileSync).toHaveBeenCalled();
+    // Runtime logging is asynchronous. The shared writer preserves each
+    // execution's prompt/DONE boundaries without truncating the log.
     const record = manager.getRecord(id)!;
     expect(record.display.outputFile).toBeTruthy();
+    await whenOutputLogsIdle();
+    const content = await readFile(record.display.outputFile!, "utf-8");
+    expect(content.match(/\[USER\]/g)).toHaveLength(2);
+    expect(content.match(/\[DONE\]/g)).toHaveLength(2);
+    expect(content.indexOf("initial task")).toBeLessThan(content.indexOf("[DONE]"));
+    expect(content.indexOf("second task")).toBeGreaterThan(content.indexOf("[DONE]"));
   });
 
   it("appends to an already attached output log only when the continuation starts", async () => {

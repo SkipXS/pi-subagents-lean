@@ -252,17 +252,115 @@ export function parseAgentFile(
 /*  scanAgentFilesInDir                                                */
 /* ------------------------------------------------------------------ */
 
+interface AgentFileCacheEntry {
+  fingerprint: string;
+  config: AgentConfigFromMd;
+}
+
+interface AgentDirectoryCacheEntry {
+  fingerprint: string;
+  agents: AgentConfigFromMd[];
+}
+
+/**
+ * Parsed agent files are process-local input caches. The cache is deliberately
+ * keyed by source as well as path because the same directory can be used in a
+ * parent catalog and an invocation-local worktree catalog with different
+ * source metadata.
+ */
+const agentFileCache = new Map<string, AgentFileCacheEntry>();
+const agentDirectoryCache = new Map<string, AgentDirectoryCacheEntry>();
+const MAX_AGENT_FILE_CACHE_ENTRIES = 256;
+const MAX_AGENT_DIRECTORY_CACHE_ENTRIES = 128;
+
+/** Keep cache hits hot while bounding process-wide path retention. */
+function getAgentCacheEntry<T>(cache: Map<string, T>, key: string): T | undefined {
+  const entry = cache.get(key);
+  if (entry !== undefined) {
+    cache.delete(key);
+    cache.set(key, entry);
+  }
+  return entry;
+}
+
+function setAgentCacheEntry<T>(cache: Map<string, T>, key: string, value: T, limit: number): void {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > limit) {
+    const oldest = cache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+/** Remove direct-file entries left behind by a deleted or renamed directory child. */
+function removeAgentFileEntriesForDirectory(
+  source: "user" | "project",
+  resolvedDir: string,
+  activeFiles?: Set<string>,
+): void {
+  for (const [key] of agentFileCache) {
+    const separator = key.indexOf("\u0000");
+    if (separator < 0 || key.slice(0, separator) !== source) continue;
+    const filePath = key.slice(separator + 1);
+    if (path.dirname(filePath) !== resolvedDir) continue;
+    if (activeFiles?.has(filePath)) continue;
+    agentFileCache.delete(key);
+  }
+}
+
+/**
+ * Use filesystem metadata rather than file contents to decide whether a
+ * definition needs parsing. ctime/mode/inode are conservative additions to the
+ * stable path/type/size/mtime core: replacement and permission changes should
+ * not accidentally retain an old parsed definition.
+ */
+function agentFileFingerprint(filePath: string, stats: fs.Stats): string {
+  return JSON.stringify([
+    path.resolve(filePath),
+    stats.isFile() ? "file" : stats.isDirectory() ? "directory" : "other",
+    stats.size,
+    stats.mtimeMs,
+    stats.ctimeMs,
+    stats.mode,
+    stats.ino,
+  ]);
+}
+
+/** Return a detached parsed agent value for cache publication. */
+function cloneAgentFileConfig(config: AgentConfigFromMd): AgentConfigFromMd {
+  return {
+    ...config,
+    tools: Array.isArray(config.tools) ? [...config.tools] : config.tools,
+    exclude_tools: config.exclude_tools && [...config.exclude_tools],
+    extensions: Array.isArray(config.extensions) ? [...config.extensions] : config.extensions,
+    exclude_extensions: config.exclude_extensions && [...config.exclude_extensions],
+    skills: Array.isArray(config.skills) ? [...config.skills] : config.skills,
+    exclude_skills: config.exclude_skills && [...config.exclude_skills],
+  };
+}
+
 /**
  * Scan a directory for .md files and parse them into AgentConfigFromMd[].
  * Returns empty array if directory doesn't exist.
+ *
+ * Directory entries are fingerprinted on every call so additions, removals,
+ * and renames invalidate negative and positive results. Files whose metadata
+ * is unchanged reuse their parsed frontmatter and body.
  */
 export async function scanAgentFilesInDir(
   dirPath: string,
   source: "user" | "project" = "user",
 ): Promise<AgentConfigFromMd[]> {
+  const resolvedDir = path.resolve(dirPath);
+  const directoryKey = `${source}\0${resolvedDir}`;
   try {
     await fs.promises.access(dirPath);
   } catch {
+    // Do not retain a missing-directory result: a later file creation must be
+    // visible without an explicit cache reset.
+    agentDirectoryCache.delete(directoryKey);
+    removeAgentFileEntriesForDirectory(source, resolvedDir);
     return [];
   }
 
@@ -271,26 +369,86 @@ export async function scanAgentFilesInDir(
     entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
   } catch {
     // A path can be accessible yet unlistable (ACL/race); discovery is best effort.
+    agentDirectoryCache.delete(directoryKey);
+    removeAgentFileEntriesForDirectory(source, resolvedDir);
     return [];
   }
-  const mdFiles = entries.filter(
-    (e) => e.isFile() && e.name.endsWith(".md"),
-  );
+  const mdFiles = entries
+    .filter((e) => e.isFile() && e.name.endsWith(".md"))
+    // Do not rely on filesystem enumeration order. Relational string
+    // comparison is based on UTF-16 code units and is locale-independent.
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
-  const agents: AgentConfigFromMd[] = [];
+  const descriptors: Array<{ filePath: string; fingerprint: string }> = [];
+  let cacheable = true;
+
   for (const entry of mdFiles) {
     const filePath = path.join(dirPath, entry.name);
+    try {
+      const stats = await fs.promises.stat(filePath);
+      if (!stats.isFile()) {
+        cacheable = false;
+        continue;
+      }
+      descriptors.push({
+        filePath,
+        fingerprint: agentFileFingerprint(filePath, stats),
+      });
+    } catch {
+      // A file can disappear between readdir and stat. Do not cache this
+      // unstable snapshot so the next turn retries it.
+      cacheable = false;
+    }
+  }
+
+  const activeFiles = new Set(descriptors.map(({ filePath }) => path.resolve(filePath)));
+  removeAgentFileEntriesForDirectory(source, resolvedDir, activeFiles);
+
+  const directoryFingerprint = descriptors
+    .map(({ fingerprint }) => fingerprint)
+    .join("\n");
+  const cachedDirectory = getAgentCacheEntry(agentDirectoryCache, directoryKey);
+  if (cacheable && cachedDirectory?.fingerprint === directoryFingerprint) {
+    return cachedDirectory.agents.map(cloneAgentFileConfig);
+  }
+
+  const agents: AgentConfigFromMd[] = [];
+  for (const { filePath, fingerprint } of descriptors) {
+    const fileKey = `${source}\0${path.resolve(filePath)}`;
+    const cachedFile = getAgentCacheEntry(agentFileCache, fileKey);
+    if (cachedFile?.fingerprint === fingerprint) {
+      agents.push(cloneAgentFileConfig(cachedFile.config));
+      continue;
+    }
+
     try {
       const content = await fs.promises.readFile(filePath, "utf-8");
       const info = parseAgentFile(content, source);
       // The documented filename fallback makes a minimal `reviewer.md`
       // definition usable without broadening the frontmatter parser.
-      agents.push({ ...info, name: info.name ?? path.basename(entry.name, ".md") });
+      const config = { ...info, name: info.name ?? path.basename(filePath, ".md") };
+      setAgentCacheEntry(agentFileCache, fileKey, {
+        fingerprint,
+        config: cloneAgentFileConfig(config),
+      }, MAX_AGENT_FILE_CACHE_ENTRIES);
+      agents.push(config);
     } catch {
-      // Skip files that can't be read
+      // Skip files that can't be read. An unreadable snapshot must not be
+      // reused forever because ACLs and races can resolve on a later turn.
+      agentFileCache.delete(fileKey);
+      cacheable = false;
     }
   }
-  return agents;
+
+  if (cacheable) {
+    setAgentCacheEntry(agentDirectoryCache, directoryKey, {
+      fingerprint: directoryFingerprint,
+      agents: agents.map(cloneAgentFileConfig),
+    }, MAX_AGENT_DIRECTORY_CACHE_ENTRIES);
+  } else {
+    agentDirectoryCache.delete(directoryKey);
+  }
+  return agents.map(cloneAgentFileConfig);
 }
 
 /* ------------------------------------------------------------------ */

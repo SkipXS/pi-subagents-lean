@@ -63,6 +63,33 @@ describe("skill discovery through Pi's real loaders", () => {
     expect(byName.has("user-default")).toBe(true);
   });
 
+  it("refreshes a real cached negative source after creation and mutation", async () => {
+    const root = tempRoot();
+    const cwd = join(root, "repo");
+    const isolatedHome = join(root, "os-home");
+    const agentDir = join(root, "agent-home");
+    mkdirSync(join(cwd, ".git"), { recursive: true });
+    mkdirSync(isolatedHome, { recursive: true });
+    mkdirSync(cwd, { recursive: true });
+
+    vi.stubEnv("HOME", isolatedHome);
+    vi.stubEnv("USERPROFILE", isolatedHome);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.resetModules();
+    const { loadAllSkills } = await import("../../src/prompt/skill-loader.ts");
+
+    expect(loadAllSkills(cwd).some(({ name }) => name === "cached")).toBe(false);
+    const filePath = skill(join(cwd, ".pi", "skills"), "cached", "initial");
+    expect(loadAllSkills(cwd).find(({ name }) => name === "cached")?.description).toBe("initial");
+    expect(loadAllSkills(cwd).find(({ name }) => name === "cached")?.description).toBe("initial");
+
+    writeFileSync(filePath, "---\nname: cached\ndescription: changed\n---\n\n# changed\n", "utf8");
+    expect(loadAllSkills(cwd).find(({ name }) => name === "cached")?.description).toBe("changed");
+
+    rmSync(filePath, { force: true });
+    expect(loadAllSkills(cwd).some(({ name }) => name === "cached")).toBe(false);
+  });
+
   it("deduplicates a directory link by canonical skill path when the platform permits it", async () => {
     const root = tempRoot();
     const cwd = join(root, "repo");

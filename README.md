@@ -422,9 +422,11 @@ Each agent has an append-only, human-readable log at:
 <system temporary directory>/pi-agent-outputs/<agentId>.log
 ```
 
-Entries are ISO-8601 timestamped. On systems with `tail`, follow a log with
-`tail -f`; use an equivalent command elsewhere. A prompt containing embedded
-newlines can continue on an unprefixed log line.
+Entries are ISO-8601 timestamped. Writes are asynchronous and best effort, so
+agent lifecycle operations do not wait for a slow disk; an I/O failure does not
+fail the agent execution. On systems with `tail`, follow a log with `tail -f`;
+use an equivalent command elsewhere. A prompt containing embedded newlines can
+continue on an unprefixed log line.
 
 ```text
 2026-05-27T12:00:00.000Z [USER] Find all authentication files

@@ -30,6 +30,31 @@ let userAgentDir = "";
 let projectAgentDir = "";
 let sharedAgentDir = "";
 
+/**
+ * A scan may outlive the session or scan-directory configuration that started
+ * it. The request and directory revisions make publication conditional on the
+ * scan still being the newest global scan for the same directory snapshot.
+ */
+let agentScanDirsRevision = 0;
+let latestGlobalScanRequest = 0;
+
+interface AgentScanToken {
+  readonly request: number;
+  readonly dirsRevision: number;
+}
+
+function beginGlobalScan(): AgentScanToken {
+  return {
+    request: ++latestGlobalScanRequest,
+    dirsRevision: agentScanDirsRevision,
+  };
+}
+
+function canPublishGlobalScan(token: AgentScanToken): boolean {
+  return token.request === latestGlobalScanRequest
+    && token.dirsRevision === agentScanDirsRevision;
+}
+
 /** Options for registerAgents. */
 export interface RegisterAgentsOptions {
   /** When true, skip built-in DEFAULT_AGENTS. */
@@ -43,6 +68,9 @@ export interface RegisterAgentsOptions {
  * Hidden agents (hidden === true) are kept in the registry but excluded from spawning.
  */
 export function registerAgents(userAgents: Map<string, AgentConfig>, options?: RegisterAgentsOptions): void {
+  // A direct publication is also a newer global catalog mutation. Invalidate
+  // any scan that is still waiting to publish so it cannot roll this state back.
+  latestGlobalScanRequest++;
   agents.clear();
 
   // Start with defaults (unless disabled)
@@ -68,6 +96,12 @@ export function setAgentScanDirs(userDir: string, projectDir: string, sharedDir?
   userAgentDir = userDir;
   projectAgentDir = projectDir;
   sharedAgentDir = sharedDir ?? "";
+
+  // Any scan started with the previous directory configuration is stale, even
+  // if it finishes after this call. Also advance the request revision so a
+  // same-directory refresh cannot publish an older result after this change.
+  agentScanDirsRevision++;
+  latestGlobalScanRequest++;
 }
 
 /** Scan user, shared, and project agent directories, merge with defaults. Returns the merged Map. */
@@ -87,12 +121,16 @@ export async function scanAndMerge(options?: { disableDefaultAgents?: boolean })
  * newly added to the parent registry.
  */
 export async function discoverNewAgents(options?: RegisterAgentsOptions): Promise<number> {
+  const token = beginGlobalScan();
   const discovered = await scanAndMerge(options);
+
+  // The scan may have started in an older session, before a newer refresh, or
+  // before setAgentScanDirs() changed the source directories. Only the newest
+  // scan for the current directory snapshot may replace the parent registry.
+  if (!canPublishGlobalScan(token)) return 0;
+
   const previousNames = new Set(agents.keys());
-  agents.clear();
-  for (const [name, config] of discovered) {
-    agents.set(name, snapshotAgentConfig(config));
-  }
+  registerAgents(discovered, options);
   return [...discovered.keys()].filter((name) => !previousNames.has(name)).length;
 }
 

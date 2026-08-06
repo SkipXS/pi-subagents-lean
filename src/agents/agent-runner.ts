@@ -40,6 +40,7 @@ import { type AgentConfig, type SubagentType } from "./types.js";
 import { createSubagentRuntimeContext, getStore, getSubagentRuntimeContext, runWithSubagentRuntime } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import { revalidateWorktreePath } from "../spawn/worktree-validator.js";
+import type { AcceptedSpawn } from "../spawn/spawn-contract.js";
 
 // Cache: extension path → unscoped package name (lowercased), or undefined if not found
 const packageNameCache = new Map<string, string | undefined>();
@@ -124,6 +125,8 @@ export interface RunOptions extends RunTunables, RunCallbacks, SupplementalUsage
   signal?: AbortSignal;
   /** Detached at the accepted spawn boundary; never read from the root in ALS. */
   runtimeSettings?: SubagentRuntimeSettings;
+  /** Immutable preflight contract from the regular Agent tool path. */
+  acceptedSpawn?: AcceptedSpawn;
 }
 
 interface RunResult {
@@ -657,11 +660,19 @@ export async function runAgent(
   if (getSubagentRuntimeContext()) {
     throw new Error("Nested agent execution is unavailable from a child runtime");
   }
-  const settings = options.runtimeSettings ?? getStore().createSubagentRuntimeSettings();
+  const settings = options.acceptedSpawn?.runtimeSettings
+    ?? options.runtimeSettings
+    ?? getStore().createSubagentRuntimeSettings();
   const childContext = createSubagentRuntimeContext();
   return runWithSubagentRuntime(
     childContext,
-    () => runAgentImpl(ctx, type, prompt, options, settings),
+    () => runAgentImpl(
+      ctx,
+      options.acceptedSpawn?.type ?? type,
+      options.acceptedSpawn?.prompt ?? prompt,
+      options,
+      settings,
+    ),
   );
 }
 
@@ -678,29 +689,40 @@ async function runAgentImpl(
     throw error;
   }
 
-  // A queued run uses the definition selected at enqueue time. Registry lookup
-  // remains only for direct callers that did not provide a snapshot.
-  const agentConfig = options.agentConfig ?? getAgentConfig(type);
+  // A queued run uses the definition selected at acceptance. The regular Agent
+  // path carries an immutable contract and never performs a second registry or
+  // tunable lookup here. Direct runner callers retain the old defensive adapter.
+  const acceptedSpawn = options.acceptedSpawn;
+  const agentConfig = acceptedSpawn?.agentConfig ?? options.agentConfig ?? getAgentConfig(type);
   if (!agentConfig) throw new Error(`Unknown agent type: ${type}`);
 
-  // Direct runner callers may omit the already-resolved tunables. Resolve the
-  // same settings > Markdown > parent chain defensively; accepted internal
-  // values remain the lower-precedence base when supplied by the coordinator.
-  const resolvedTunables = resolveAgentTunables({
-    agentName: type,
-    agentConfig,
-    overrides: settings.agents,
-    modelRegistry: ctx.modelRegistry,
-    parentModel: ctx.model,
-    parentThinking: ctx.thinkingLevel,
-    baseModel: options.model,
-    baseThinking: options.thinkingLevel,
-  });
-  options = {
-    ...options,
-    model: resolvedTunables.model,
-    thinkingLevel: resolvedTunables.thinkingLevel,
-  };
+  if (acceptedSpawn) {
+    options = {
+      ...options,
+      agentConfig: acceptedSpawn.agentConfig,
+      model: acceptedSpawn.model,
+      thinkingLevel: acceptedSpawn.thinkingLevel,
+      runtimeSettings: acceptedSpawn.runtimeSettings,
+    };
+  } else {
+    // Direct runner callers may omit the already-resolved tunables. Resolve the
+    // same settings > Markdown > parent chain defensively.
+    const resolvedTunables = resolveAgentTunables({
+      agentName: type,
+      agentConfig,
+      overrides: settings.agents,
+      modelRegistry: ctx.modelRegistry,
+      parentModel: ctx.model,
+      parentThinking: ctx.thinkingLevel,
+      baseModel: options.model,
+      baseThinking: options.thinkingLevel,
+    });
+    options = {
+      ...options,
+      model: resolvedTunables.model,
+      thinkingLevel: resolvedTunables.thinkingLevel,
+    };
+  }
 
   const config = options.agentConfig
     ? resolveAgentConfig(options.agentConfig)

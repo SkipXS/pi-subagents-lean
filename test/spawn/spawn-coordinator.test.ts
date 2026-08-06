@@ -8,21 +8,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../../src/types.js";
+import { snapshotResolvedSpawn } from "../../src/spawn/spawn-contract.js";
 import { AgentManager } from "../../src/agents/agent-manager.js";
 import { ConfigStore } from "../../src/config/config-store.js";
 import type { SubagentsConfig } from "../../src/config/types.js";
 
 // --- Mock modules ---
 
-const { mockAgentConfig, mockRunAgent, mockExecuteAgentTurn, mockFindModelInRegistry } = vi.hoisted(() => ({
+const { mockAgentConfig, mockResolveType, mockRunAgent, mockExecuteAgentTurn, mockFindModelInRegistry, mockCreateRuntimeSettings } = vi.hoisted(() => ({
   mockAgentConfig: vi.fn(() => undefined),
+  mockResolveType: vi.fn((name: string) => name),
   mockRunAgent: vi.fn(),
   mockExecuteAgentTurn: vi.fn(),
   mockFindModelInRegistry: vi.fn((_key: unknown, _registry: unknown, fallback: unknown) => fallback),
+  mockCreateRuntimeSettings: vi.fn(() => ({ agent: {} })),
 }));
 
 vi.mock("../../src/agents/agent-types.js", () => ({
-  resolveType: vi.fn((name: string) => name),
+  resolveType: mockResolveType,
   snapshotAgentConfig: vi.fn((config: any) => ({
     ...config,
     registeredTools: config.registeredTools && [...config.registeredTools],
@@ -71,7 +74,7 @@ const { mockPi, mockGetPiInstance, mockIsIdle } = vi.hoisted(() => ({
 vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
   getStore: () => ({
-    createSubagentRuntimeSettings: () => ({ agent: {} }),
+    createSubagentRuntimeSettings: mockCreateRuntimeSettings,
   }),
   getPiInstance: () => mockGetPiInstance(),
   getSessionCtx: () => ({ isIdle: mockIsIdle }),
@@ -149,6 +152,8 @@ describe("SpawnCoordinator", () => {
     mockRunAgent.mockReset();
     mockExecuteAgentTurn.mockReset();
     mockFindModelInRegistry.mockReset().mockImplementation((_key: unknown, _registry: unknown, fallback: unknown) => fallback);
+    mockResolveType.mockReset().mockImplementation((name: string) => name);
+    mockCreateRuntimeSettings.mockReset().mockReturnValue({ agent: {} });
     mockAgentConfig.mockReset().mockReturnValue(undefined);
     mockGetPiInstance.mockReturnValue(mockPi);
     mockIsIdle.mockReturnValue(true);
@@ -254,6 +259,58 @@ describe("SpawnCoordinator", () => {
       skills: ["a-skill"],
     }));
     expect(snapshot).not.toBe(config);
+  });
+
+  it("carries an accepted snapshot without resolving registry, store, or tunables again", async () => {
+    const coordinator = new SpawnCoordinator(manager as any);
+    const config = {
+      name: "accepted",
+      description: "Accepted config",
+      systemPrompt: "Frozen instructions",
+      tools: ["read"],
+    } as any;
+    const runtimeSettings = {
+      agent: { includeContextFiles: false, disableDefaultAgents: true, orchestrationPrompt: false },
+      agents: { accepted: { model: "settings/model" } },
+    } as any;
+    const model = { provider: "accepted", id: "model" } as any;
+    const resolved = snapshotResolvedSpawn({
+      type: "accepted",
+      prompt: "accepted prompt",
+      description: "accepted description",
+      runInBackground: true,
+      agentConfig: config,
+      runtimeSettings,
+      model,
+      modelKey: "accepted/model",
+      thinkingLevel: "high",
+      invocation: { modelName: "model", modelKey: "accepted/model", thinkingLevel: "high" },
+    });
+
+    await coordinator.spawn(mockPi, ctx, {
+      type: "stale-type",
+      prompt: "stale prompt",
+      description: "stale description",
+      runInBackground: false,
+      resolvedSpawn: resolved,
+    });
+
+    config.tools.push("bash");
+    runtimeSettings.agents.accepted.model = "later/model";
+    expect(mockResolveType).not.toHaveBeenCalled();
+    expect(mockAgentConfig).not.toHaveBeenCalled();
+    expect(mockCreateRuntimeSettings).not.toHaveBeenCalled();
+    expect(mockFindModelInRegistry).not.toHaveBeenCalled();
+
+    const options = manager.spawn.mock.calls[0][4];
+    expect(options.acceptedSpawn.accepted).toBe(true);
+    expect(options.acceptedSpawn.type).toBe("accepted");
+    expect(options.acceptedSpawn.prompt).toBe("accepted prompt");
+    expect(options.agentConfig.tools).toEqual(["read"]);
+    expect(options.runtimeSettings.agents).toEqual({ accepted: { model: "settings/model" } });
+    expect(options.model).toBe(model);
+    expect(options.thinkingLevel).toBe("high");
+    expect(Object.isFrozen(options.acceptedSpawn)).toBe(true);
   });
 
   it("spawns a foreground agent and awaits its promise", async () => {

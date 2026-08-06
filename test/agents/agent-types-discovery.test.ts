@@ -2,7 +2,9 @@
  * agent-types-discovery.test.ts — Parent and worktree agent discovery.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import * as fs from "node:fs";
+import { join } from "node:path";
 import { makeAgentMd, tempDirWithFiles } from "../fixtures.ts";
 import {
   registerAgents,
@@ -70,6 +72,97 @@ describe("catalog role resolution", () => {
     expect(resolveType("REVIEWER")).toBe("reviewer");
     expect(resolveType("Reviewer")).toBe("reviewer");
     expect(resolveType("Reviewer label")).toBeUndefined();
+  });
+});
+
+describe("global discovery publication", () => {
+  beforeEach(() => {
+    registerAgents(new Map(), { disableDefaultAgents: true });
+    setAgentScanDirs("", "", "");
+  });
+
+  it("does not let an older scan overwrite a newer scan", async () => {
+    const { dir, cleanup } = tempDirWithFiles([
+      { name: "agent.md", content: makeAgentMd({ name: "agent", description: "filesystem" }) },
+    ], "global-discovery-race");
+    const agentPath = join(dir, "agent.md");
+    const oldContent = makeAgentMd({ name: "agent", description: "old" });
+    const newContent = makeAgentMd({ name: "agent", description: "new" });
+    let releaseOld!: () => void;
+    let oldReadStarted!: () => void;
+    const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
+    const oldStarted = new Promise<void>((resolve) => { oldReadStarted = resolve; });
+    const originalReadFile = fs.promises.readFile;
+    let readCount = 0;
+    const readFile = vi.spyOn(fs.promises, "readFile").mockImplementation(async (filePath, options) => {
+      if (filePath === agentPath) {
+        readCount++;
+        if (readCount === 1) {
+          oldReadStarted();
+          await oldGate;
+          return oldContent;
+        }
+        return newContent;
+      }
+      return originalReadFile(filePath, options as "utf-8");
+    });
+
+    try {
+      setAgentScanDirs("", dir);
+      const oldScan = discoverNewAgents({ disableDefaultAgents: true });
+      await oldStarted;
+
+      const newScan = discoverNewAgents({ disableDefaultAgents: true });
+      await newScan;
+      expect(getAgentConfig("agent")?.description).toBe("new");
+
+      releaseOld();
+      await oldScan;
+      expect(getAgentConfig("agent")?.description).toBe("new");
+    } finally {
+      readFile.mockRestore();
+      cleanup();
+    }
+  });
+
+  it("does not publish a scan invalidated by setAgentScanDirs", async () => {
+    const { dir: oldDir, cleanup: cleanupOld } = tempDirWithFiles([
+      { name: "agent.md", content: makeAgentMd({ name: "agent", description: "old" }) },
+    ], "old-discovery");
+    const { dir: newDir, cleanup: cleanupNew } = tempDirWithFiles([
+      { name: "agent.md", content: makeAgentMd({ name: "agent", description: "new" }) },
+    ], "new-discovery");
+    const oldPath = join(oldDir, "agent.md");
+    let releaseOld!: () => void;
+    let oldReadStarted!: () => void;
+    const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
+    const oldStarted = new Promise<void>((resolve) => { oldReadStarted = resolve; });
+    const originalReadFile = fs.promises.readFile;
+    const readFile = vi.spyOn(fs.promises, "readFile").mockImplementation(async (filePath, options) => {
+      if (filePath === oldPath) {
+        oldReadStarted();
+        await oldGate;
+      }
+      return originalReadFile(filePath, options as "utf-8");
+    });
+
+    try {
+      setAgentScanDirs("", oldDir);
+      const oldScan = discoverNewAgents({ disableDefaultAgents: true });
+      await oldStarted;
+
+      setAgentScanDirs("", newDir);
+      await discoverNewAgents({ disableDefaultAgents: true });
+      expect(getAgentConfig("agent")?.description).toBe("new");
+
+      releaseOld();
+      await oldScan;
+      expect(getAgentConfig("agent")?.description).toBe("new");
+    } finally {
+      readFile.mockRestore();
+      cleanupOld();
+      cleanupNew();
+    }
   });
 });
 

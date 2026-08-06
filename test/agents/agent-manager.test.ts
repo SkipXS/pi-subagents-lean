@@ -75,6 +75,7 @@ import {
   setSessionCtx,
 } from "../../src/shell.js";
 import { registerAgents } from "../../src/agents/agent-types.js";
+import { acceptResolvedSpawn, snapshotResolvedSpawn } from "../../src/spawn/spawn-contract.js";
 
 describe("AgentManager", () => {
   let manager: AgentManager;
@@ -316,17 +317,13 @@ describe("AgentManager", () => {
       continuation.resolve(mockRunResult());
     });
 
-    it("starts a queued agent and frees queue capacity when output-log initialization fails", async () => {
+    it("starts a queued agent without waiting for output-log I/O", async () => {
       manager = new AgentManager(onComplete, { default: 1 });
       const first = makeResolvablePromise();
       const queued = makeResolvablePromise();
       mockModules.mockRunAgent
         .mockReturnValueOnce(first.promise)
         .mockReturnValueOnce(queued.promise);
-      mockModules.fsMock.writeFileSync
-        .mockImplementationOnce(() => undefined)
-        .mockImplementationOnce(() => { throw new Error("queued log init failed"); });
-
       manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", {
         description: "first", isBackground: true,
       });
@@ -339,8 +336,9 @@ describe("AgentManager", () => {
       first.resolve(mockRunResult());
       await vi.waitFor(() => expect(queuedRecord.lifecycle.status).toBe("running"));
       expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2);
-      expect(queuedRecord.execution.outputLog).toBeUndefined();
-      expect(queuedRecord.display.outputFile).toBeUndefined();
+      // Log setup is queued best effort and does not hold the scheduler slot.
+      expect(queuedRecord.execution.outputLog).toBeDefined();
+      expect(queuedRecord.display.outputFile).toBeTruthy();
 
       queued.resolve(mockRunResult({ responseText: "queued done" }));
       await expect(queuedWaiter).resolves.toBe("queued done");
@@ -489,6 +487,70 @@ describe("AgentManager", () => {
       expect(mockModules.mockRunAgent.mock.calls[1]?.[3].agentConfig).toMatchObject({ systemPrompt: "frozen prompt", tools: ["read"] });
       second.resolve(mockRunResult());
     });
+
+    it("carries one accepted contract through the queue without registry re-resolution", async () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const blocker = makeResolvablePromise();
+      const acceptedRun = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise).mockReturnValueOnce(acceptedRun.promise);
+
+      const config = {
+        name: "accepted",
+        description: "Accepted definition",
+        systemPrompt: "Frozen instructions",
+        tools: ["read"],
+      } as any;
+      const runtimeSettings = {
+        agent: { includeContextFiles: false, disableDefaultAgents: false, orchestrationPrompt: true },
+        agents: { accepted: { model: "settings/model" } },
+      } as any;
+      const model = { provider: "accepted", id: "model" } as any;
+      const acceptedSpawn = acceptResolvedSpawn(snapshotResolvedSpawn({
+        type: "accepted",
+        prompt: "accepted prompt",
+        description: "accepted description",
+        runInBackground: true,
+        agentConfig: config,
+        runtimeSettings,
+        model,
+        modelKey: "accepted/model",
+        thinkingLevel: "high",
+      }));
+
+      manager.spawn(fakePi(), fakeCtx(), "blocker", "blocker", {
+        description: "blocker",
+        isBackground: true,
+      });
+      const acceptedId = manager.spawn(fakePi(), fakeCtx(), "stale", "stale", {
+        description: "caller description",
+        isBackground: false,
+        acceptedSpawn,
+      });
+      expect(manager.getRecord(acceptedId)?.lifecycle.status).toBe("queued");
+
+      config.tools.push("bash");
+      runtimeSettings.agents.accepted.model = "later/model";
+      blocker.resolve(mockRunResult());
+      await vi.waitFor(() => expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2));
+
+      const call = mockModules.mockRunAgent.mock.calls[1]!;
+      expect(call[1]).toBe("accepted");
+      expect(call[2]).toBe("accepted prompt");
+      expect(call[3].agentConfig).toMatchObject({
+        name: "accepted",
+        description: "Accepted definition",
+        systemPrompt: "Frozen instructions",
+        tools: ["read"],
+      });
+      expect(call[3].runtimeSettings.agents).toEqual({ accepted: { model: "settings/model" } });
+      expect(call[3].model).toBe(model);
+      expect(call[3].acceptedSpawn.modelKey).toBe("accepted/model");
+      expect(call[3].thinkingLevel).toBe("high");
+      expect(call[3].acceptedSpawn.accepted).toBe(true);
+
+      acceptedRun.resolve(mockRunResult());
+      await manager.getRecord(acceptedId)!.execution.promise;
+    });
   });
 
   // ── Cost accumulation ──
@@ -634,11 +696,8 @@ describe("AgentManager", () => {
       await manager.getRecord(nextId)!.execution.promise;
     });
 
-    it("runs a foreground agent when output-log initialization fails", async () => {
+    it("runs a foreground agent while output-log I/O is best effort", async () => {
       manager = new AgentManager(onComplete, { default: 1 });
-      mockModules.fsMock.writeFileSync.mockImplementationOnce(() => {
-        throw new Error("log init failed");
-      });
       mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult({ responseText: "done without log" }));
 
       const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
@@ -647,8 +706,8 @@ describe("AgentManager", () => {
       const record = manager.getRecord(id)!;
 
       expect(mockModules.mockRunAgent).toHaveBeenCalledOnce();
-      expect(record.execution.outputLog).toBeUndefined();
-      expect(record.display.outputFile).toBeUndefined();
+      expect(record.execution.outputLog).toBeDefined();
+      expect(record.display.outputFile).toBeTruthy();
       await expect(record.execution.promise).resolves.toBe("done without log");
       expect(record.lifecycle.status).toBe("completed");
       expect(manager.getTotalAgentCount()).toBe(1);

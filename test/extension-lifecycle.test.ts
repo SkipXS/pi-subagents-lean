@@ -9,7 +9,10 @@ const state = vi.hoisted(() => ({
   coordinators: [] as any[],
   coordinatorDisposeError: undefined as unknown,
   coordinatorDisposePending: undefined as Promise<void> | undefined,
+  scanGeneration: 0,
   registerAgents: vi.fn(),
+  setAgentScanDirs: vi.fn(),
+  discoverNewAgents: vi.fn(),
   scanAndMerge: vi.fn(async () => new Map()),
   store: {
     agent: {
@@ -28,10 +31,9 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 }));
 
 vi.mock("../src/agents/agent-types.js", () => ({
-  registerAgents: state.registerAgents,
+  discoverNewAgents: state.discoverNewAgents,
   getAvailableAgents: () => [],
-  setAgentScanDirs: vi.fn(),
-  scanAndMerge: state.scanAndMerge,
+  setAgentScanDirs: state.setAgentScanDirs,
 }));
 
 vi.mock("../src/agents/agent-manager.js", () => ({
@@ -89,8 +91,17 @@ describe("headless extension session lifecycle", () => {
     state.coordinators.length = 0;
     state.coordinatorDisposeError = undefined;
     state.coordinatorDisposePending = undefined;
+    state.scanGeneration = 0;
     state.store.dispose.mockReset();
+    state.registerAgents.mockReset();
+    state.setAgentScanDirs.mockReset().mockImplementation(() => { state.scanGeneration++; });
     state.scanAndMerge.mockReset().mockResolvedValue(new Map());
+    state.discoverNewAgents.mockReset().mockImplementation(async () => {
+      const scanGeneration = state.scanGeneration;
+      const merged = await state.scanAndMerge();
+      if (scanGeneration === state.scanGeneration) state.registerAgents(merged);
+      return 0;
+    });
   });
 
   it("registers root lifecycle hooks without terminal input listeners", () => {
