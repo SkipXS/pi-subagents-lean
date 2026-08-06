@@ -76,6 +76,8 @@ export interface SpawnConfig extends RunTunables {
   worktreeLabel?: string;
   /** Parent repository cwd used to revalidate a selected worktree at runner start. */
   worktreeParentCwd?: string;
+  /** Trust snapshot captured by the parent tool preflight. Legacy callers default to false. */
+  projectTrusted?: boolean;
   /** Original selected path retained to detect a later symlink/path retarget. */
   worktreeSelectionPath?: string;
   invocation?: AgentInvocation;

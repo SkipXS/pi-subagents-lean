@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AgentExecutionSummary, AgentRecord, AgentStatus, SpawnConfig } from "../types.js";
 import type { AgentManager, SpawnOptions } from "../agents/agent-manager.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
-import { acceptResolvedSpawn, type ResolvedSpawn } from "./spawn-contract.js";
+import type { ResolvedSpawn } from "./spawn-contract.js";
 import { getAgentConfig, resolveType, snapshotAgentConfig } from "../agents/agent-types.js";
 import { buildAgentDetails } from "../agents/agent-details.js";
 import { executionKind, formatExecutionLabels } from "../agents/execution-display.js";
@@ -18,8 +18,11 @@ import { executionKind, formatExecutionLabels } from "../agents/execution-displa
  * Single entry point for the LLM tool spawn path. It owns background-result
  * delivery; AgentManager owns execution and records.
  */
-/** Input for spawn(). Built by each caller from its own validation. */
-export interface SpawnIntent extends SpawnConfig {
+/**
+ * Legacy input for direct coordinator callers. The regular Agent tool passes a
+ * ResolvedSpawn directly instead of duplicating these fields beside it.
+ */
+export interface LegacySpawnIntent extends SpawnConfig {
   type: string;
   prompt: string;
   runInBackground: boolean;
@@ -27,8 +30,25 @@ export interface SpawnIntent extends SpawnConfig {
   signal?: AbortSignal;
   /** Runtime settings snapshot captured by callers that resolve fields before entering the coordinator. */
   runtimeSettingsSnapshot?: SubagentRuntimeSettings;
-  /** Preflight contract for the regular Agent tool path. */
+  /** Transitional adapter for callers from the pre-unified contract shape. */
   resolvedSpawn?: ResolvedSpawn;
+}
+
+/** Transitional wrapper retained for callers migrating from the old intent shape. */
+export interface ResolvedSpawnIntent {
+  resolvedSpawn: ResolvedSpawn;
+}
+
+/** Normal authoritative input or one of the explicitly retained adapters. */
+export type SpawnIntent = ResolvedSpawn | LegacySpawnIntent | ResolvedSpawnIntent;
+
+function isResolvedSpawn(intent: SpawnIntent): intent is ResolvedSpawn {
+  return "runtimeSettings" in intent && intent.runtimeSettings !== undefined;
+}
+
+function resolvedSpawnFromIntent(intent: SpawnIntent): ResolvedSpawn | undefined {
+  if (isResolvedSpawn(intent)) return intent;
+  return "resolvedSpawn" in intent ? intent.resolvedSpawn : undefined;
 }
 
 export interface SpawnResult {
@@ -132,44 +152,27 @@ export class SpawnCoordinator {
     ctx: ExtensionContext,
     intent: SpawnIntent,
   ): Promise<SpawnResult> {
-    let type: string;
-    let prompt: string;
     let runInBackground: boolean;
     let signal: AbortSignal | undefined;
-    let spawnOptions: SpawnOptions;
+    let agentId: string;
+    const resolvedSpawn = resolvedSpawnFromIntent(intent);
 
-    if (intent.resolvedSpawn) {
+    if (resolvedSpawn) {
       // The regular Agent tool has already completed discovery, worktree
-      // preflight, settings capture, and model/thinking resolution. Accept a
-      // defensive copy and carry it through untouched; no mutable registry,
-      // store, or model resolver is consulted on this path.
-      const accepted = acceptResolvedSpawn(intent.resolvedSpawn);
-      type = accepted.type;
-      prompt = accepted.prompt;
-      runInBackground = accepted.runInBackground;
-      signal = accepted.signal;
-      spawnOptions = {
-        description: accepted.description,
-        model: accepted.model,
-        modelKey: accepted.modelKey,
-        thinkingLevel: accepted.thinkingLevel,
-        agentConfig: accepted.agentConfig,
-        worktreePath: accepted.worktreePath,
-        worktreeLabel: accepted.worktreeLabel,
-        worktreeParentCwd: accepted.worktreeParentCwd,
-        worktreeSelectionPath: accepted.worktreeSelectionPath,
-        invocation: accepted.invocation,
-        isBackground: accepted.runInBackground,
-        signal: accepted.signal,
-        runtimeSettings: accepted.runtimeSettings,
-        acceptedSpawn: accepted,
-      };
+      // preflight, settings capture, and model/thinking resolution. Pass that
+      // authoritative contract to AgentManager; it is the sole acceptance
+      // boundary that turns ResolvedSpawn into AcceptedSpawn.
+      runInBackground = resolvedSpawn.runInBackground;
+      signal = resolvedSpawn.signal;
+      agentId = this.manager.spawn(pi, ctx, resolvedSpawn);
     } else {
       // Narrow compatibility adapter for direct coordinator callers that have
-      // not migrated to the accepted contract yet.
-      const runtimeSettings = intent.runtimeSettingsSnapshot ?? getStore().createSubagentRuntimeSettings();
-      const canonicalType = resolveType(intent.type) ?? intent.type;
-      const selectedConfig = intent.agentConfig ?? getAgentConfig(canonicalType);
+      // not migrated to the authoritative contract yet. This is the only
+      // coordinator path allowed to retain registry/config/model resolution.
+      const legacyIntent = intent as LegacySpawnIntent;
+      const runtimeSettings = legacyIntent.runtimeSettingsSnapshot ?? getStore().createSubagentRuntimeSettings();
+      const canonicalType = resolveType(legacyIntent.type) ?? legacyIntent.type;
+      const selectedConfig = legacyIntent.agentConfig ?? getAgentConfig(canonicalType);
       const agentConfig = selectedConfig ? snapshotAgentConfig(selectedConfig) : undefined;
       const resolvedTunables = resolveAgentTunables({
         agentName: canonicalType,
@@ -178,12 +181,12 @@ export class SpawnCoordinator {
         modelRegistry: ctx.modelRegistry,
         parentModel: ctx.model,
         parentThinking: ctx.thinkingLevel,
-        baseModel: intent.model,
-        requestedThinking: intent.thinkingLevel,
+        baseModel: legacyIntent.model,
+        requestedThinking: legacyIntent.thinkingLevel,
       });
       const model = resolvedTunables.model;
       const thinkingLevel = resolvedTunables.thinkingLevel;
-      const modelKey = resolvedTunables.modelKey ?? intent.modelKey;
+      const modelKey = resolvedTunables.modelKey ?? legacyIntent.modelKey;
       const {
         type: legacyType,
         prompt: legacyPrompt,
@@ -192,29 +195,26 @@ export class SpawnCoordinator {
         runtimeSettingsSnapshot: _runtimeSettingsSnapshot,
         resolvedSpawn: _resolvedSpawn,
         ...legacyConfig
-      } = intent;
-      type = legacyType;
-      prompt = legacyPrompt;
+      } = legacyIntent;
       runInBackground = legacyRunInBackground;
       signal = legacySignal;
-      spawnOptions = {
+      agentId = this.manager.spawn(pi, ctx, legacyType, legacyPrompt, {
         ...legacyConfig,
         signal,
         model,
         modelKey,
         thinkingLevel,
+        projectTrusted: legacyIntent.projectTrusted === true,
         agentConfig,
         invocation: {
-          ...intent.invocation,
+          ...legacyIntent.invocation,
           ...(modelKey !== undefined ? { modelKey } : {}),
           thinkingLevel,
         },
         isBackground: runInBackground,
         runtimeSettings,
-      };
+      });
     }
-
-    const agentId = this.manager.spawn(pi, ctx, type, prompt, spawnOptions);
     const record = this.manager.getRecord(agentId)!;
     const executionId = record.stats.executions?.[0]?.id;
     if (runInBackground && executionId) {

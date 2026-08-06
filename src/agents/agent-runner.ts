@@ -125,6 +125,8 @@ export interface RunOptions extends RunTunables, RunCallbacks, SupplementalUsage
   signal?: AbortSignal;
   /** Detached at the accepted spawn boundary; never read from the root in ALS. */
   runtimeSettings?: SubagentRuntimeSettings;
+  /** Parent trust snapshot for direct/legacy calls; accepted contracts are authoritative. */
+  projectTrusted?: boolean;
   /** Immutable preflight contract from the regular Agent tool path. */
   acceptedSpawn?: AcceptedSpawn;
 }
@@ -330,14 +332,40 @@ async function detectEnv(pi: ExtensionAPI, cwd: string): Promise<EnvInfo> {
 
 // ── runAgent phases ────────────────────────────────────────────────
 
-/** Load AGENTS.md context files when the setting is enabled. */
+/** Context filenames recognized by Pi's project-context loader. */
+const CONTEXT_FILE_NAMES = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"] as const;
+
+/** Load the user-global context file without walking the untrusted project. */
+function loadUserContextFiles(agentDir: string): Array<{ path: string; content: string }> {
+  const resolvedAgentDir = path.resolve(agentDir);
+  for (const filename of CONTEXT_FILE_NAMES) {
+    const filePath = path.join(resolvedAgentDir, filename);
+    try {
+      const stats = fs.statSync(filePath);
+      if (!stats.isFile()) continue;
+      return [{ path: filePath, content: fs.readFileSync(filePath, "utf-8") }];
+    } catch {
+      // A missing or unreadable supplementary file is non-fatal.
+    }
+  }
+  return [];
+}
+
+/** Load context files when enabled, respecting the immutable trust snapshot. */
 function resolvePromptExtras(
   cwd: string,
   settings: SubagentRuntimeSettings,
+  projectTrusted: boolean,
+  agentDir: string,
 ): Pick<PromptExtras, "contextFiles"> {
   if (!settings.agent.includeContextFiles) return {};
   try {
-    return { contextFiles: loadProjectContextFiles({ cwd, agentDir: getAgentDir() }) };
+    if (projectTrusted) {
+      // Keep the trusted Pi loader shape unchanged, including an empty array.
+      return { contextFiles: loadProjectContextFiles({ cwd, agentDir }) };
+    }
+    const contextFiles = loadUserContextFiles(agentDir);
+    return contextFiles.length > 0 ? { contextFiles } : {};
   } catch {
     // Non-fatal: context files are supplementary.
     return {};
@@ -351,11 +379,16 @@ function buildPrompt(
   cwd: string,
   env: EnvInfo,
   resolverExtras: Pick<PromptExtras, "contextFiles"> = {},
+  projectTrusted = true,
 ): string {
   const extras: PromptExtras = { ...resolverExtras };
   const excludeSkills = config.excludeSkills ?? agentConfig?.excludeSkills;
   if (Array.isArray(config.skills)) {
-    extras.skillMetas = loadSkillMeta(config.skills, cwd, excludeSkills);
+    // Preserve the established trusted call shape; legacy/direct runs use the
+    // explicit false argument so project skill discovery stays closed.
+    extras.skillMetas = projectTrusted
+      ? loadSkillMeta(config.skills, cwd, excludeSkills)
+      : loadSkillMeta(config.skills, cwd, excludeSkills, false);
   }
   if (!agentConfig) throw new Error(`Unknown agent type: ${type}`);
   return buildAgentPrompt(agentConfig, cwd, env, extras);
@@ -485,15 +518,16 @@ function createResourceLoader(
   config: ReturnType<typeof resolveAgentConfig>,
   agentConfig: AgentConfig | undefined,
   cwd: string,
+  agentDir: string,
   systemPrompt: string,
+  settingsManager: SettingsManager,
   notify?: (msg: string) => void,
 ) {
   const extensions = config.extensions;
   const excludeSkills = config.excludeSkills ?? agentConfig?.excludeSkills;
   const noSkills = config.skills === false || Array.isArray(config.skills);
-  const agentDir = getAgentDir();
   const loaderOpts: ConstructorParameters<typeof DefaultResourceLoader>[0] = {
-    cwd, agentDir,
+    cwd, agentDir, settingsManager,
     noExtensions: extensions === false, noSkills,
     noPromptTemplates: true, noThemes: true, noContextFiles: true,
     systemPromptOverride: () => systemPrompt,
@@ -519,7 +553,9 @@ async function initSession(
   agentConfig: AgentConfig | undefined,
   type: SubagentType,
   cwd: string,
+  agentDir: string,
   loader: DefaultResourceLoader,
+  settingsManager: SettingsManager,
   extToolMap: Map<string, string[]>,
 ) {
   // The spawn boundary resolves Agent Markdown model/thinking values against
@@ -527,11 +563,10 @@ async function initSession(
   // inherits from its parent defensively for direct callers.
   const model = options.model ?? ctx.model;
   const thinkingLevel = options.thinkingLevel ?? ctx.thinkingLevel;
-  const agentDir = getAgentDir();
   const sessionOpts: Parameters<typeof createAgentSession>[0] = {
     cwd, agentDir,
     sessionManager: SessionManager.inMemory(cwd),
-    settingsManager: SettingsManager.create(cwd, agentDir),
+    settingsManager,
     model,
     tools: resolveSessionAllowedTools({
       registeredTools: agentConfig?.tools === undefined && agentConfig?.registeredTools?.length
@@ -558,11 +593,13 @@ async function createAndConfigureSession(
   agentConfig: AgentConfig | undefined,
   type: SubagentType,
   cwd: string,
+  agentDir: string,
   loader: DefaultResourceLoader,
+  settingsManager: SettingsManager,
   extToolMap: Map<string, string[]>,
   notify: (msg: string) => void,
 ): Promise<AgentSession> {
-  const { session } = await initSession(ctx, options, agentConfig, type, cwd, loader, extToolMap);
+  const { session } = await initSession(ctx, options, agentConfig, type, cwd, agentDir, loader, settingsManager, extToolMap);
   try {
     const baseName = agentConfig?.name ?? type;
     session.setSessionName(
@@ -693,6 +730,11 @@ async function runAgentImpl(
   // path carries an immutable contract and never performs a second registry or
   // tunable lookup here. Direct runner callers retain the old defensive adapter.
   const acceptedSpawn = options.acceptedSpawn;
+  // An accepted contract is authoritative. Legacy/direct calls without a
+  // snapshot are conservatively untrusted.
+  const projectTrusted = acceptedSpawn
+    ? acceptedSpawn.projectTrusted === true
+    : options.projectTrusted === true;
   const agentConfig = acceptedSpawn?.agentConfig ?? options.agentConfig ?? getAgentConfig(type);
   if (!agentConfig) throw new Error(`Unknown agent type: ${type}`);
 
@@ -703,6 +745,7 @@ async function runAgentImpl(
       model: acceptedSpawn.model,
       thinkingLevel: acceptedSpawn.thinkingLevel,
       runtimeSettings: acceptedSpawn.runtimeSettings,
+      projectTrusted,
     };
   } else {
     // Direct runner callers may omit the already-resolved tunables. Resolve the
@@ -750,18 +793,25 @@ async function runAgentImpl(
     }
     effectiveCwd = validation.resolvedPath;
   }
+  const agentDir = getAgentDir();
+  // The same Pi SettingsManager instance must govern both resource discovery
+  // and session creation. Its trust bit is the immutable parent snapshot, not
+  // a fresh lookup against the worktree or child session.
+  const settingsManager = SettingsManager.create(effectiveCwd, agentDir, { projectTrusted });
   const env = await detectEnv(options.pi, effectiveCwd);
 
   // Resolve the replacement prompt's optional project context.
-  const promptExtras = resolvePromptExtras(effectiveCwd, settings);
+  const promptExtras = resolvePromptExtras(effectiveCwd, settings, projectTrusted, agentDir);
 
   const systemPrompt = buildPrompt(
-    type, agentConfig, config, effectiveCwd, env, promptExtras,
+    type, agentConfig, config, effectiveCwd, env, promptExtras, projectTrusted,
   );
-  const { loader, reloadAndMap } = createResourceLoader(config, agentConfig, effectiveCwd, systemPrompt, bufferNotify);
+  const { loader, reloadAndMap } = createResourceLoader(
+    config, agentConfig, effectiveCwd, agentDir, systemPrompt, settingsManager, bufferNotify,
+  );
   const { extToolMap } = await reloadAndMap();
   const session = await createAndConfigureSession(
-    ctx, options, agentConfig, type, effectiveCwd, loader, extToolMap, bufferNotify,
+    ctx, options, agentConfig, type, effectiveCwd, agentDir, loader, settingsManager, extToolMap, bufferNotify,
   );
   // Session setup is asynchronous, so shutdown may have aborted the run while
   // the session was being created. Never publish or prompt a late session.

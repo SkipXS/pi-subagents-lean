@@ -204,34 +204,40 @@ function loadSkillsFromDirCached(dir: string, source: string): Skill[] {
   return skills.map(cloneSkill);
 }
 
-function loadPiDefaultSkillsCached(cwd: string, agentDir: string): Skill[] {
+function loadPiDefaultSkillsCached(cwd: string, agentDir: string, projectTrusted: boolean): Skill[] {
   const resolvedCwd = resolve(cwd);
   const resolvedAgentDir = resolve(agentDir);
-  const sourceRoots = [
-    join(agentDir, "skills"),
-    join(resolvedCwd, ".pi", "skills"),
-  ];
+  const sourceRoots = projectTrusted
+    ? [
+      join(agentDir, "skills"),
+      join(resolvedCwd, ".pi", "skills"),
+    ]
+    : [join(agentDir, "skills")];
   const rootFingerprints = sourceRoots.map(fingerprintResourceTree);
   const fingerprint = JSON.stringify([
     resolvedCwd,
     resolvedAgentDir,
+    projectTrusted,
     ...rootFingerprints.map((entry) => entry.value),
   ]);
-  const key = `${resolvedAgentDir}\0${resolvedCwd}`;
+  const key = `${resolvedAgentDir}\0${resolvedCwd}\0${projectTrusted ? "trusted" : "untrusted"}`;
   const cached = getSkillCacheEntry(piDefaultSkillCache, key);
   if (rootFingerprints.every((entry) => entry.stable) && cached?.fingerprint === fingerprint) {
     return cached.skills.map(cloneSkill);
   }
 
-  const result = loadSkills({
-    cwd: resolvedCwd,
-    // Preserve Pi's path verbatim. Resolving a Windows-style mocked/configured
-    // path on POSIX would incorrectly prefix the current working directory.
-    agentDir,
-    skillPaths: [],
-    includeDefaults: true,
-  });
-  const skills = result.skills.map(cloneSkill);
+  const skills = projectTrusted
+    ? loadSkills({
+      cwd: resolvedCwd,
+      // Preserve Pi's path verbatim. Resolving a Windows-style mocked/configured
+      // path on POSIX would incorrectly prefix the current working directory.
+      agentDir,
+      skillPaths: [],
+      includeDefaults: true,
+    }).skills.map(cloneSkill)
+    // Pi's combined includeDefaults loader also reads <cwd>/.pi/skills. Keep
+    // that call out of the untrusted path so project files are never opened.
+    : loadSkillsFromDirCached(join(agentDir, "skills"), "user");
   if (rootFingerprints.every((entry) => entry.stable)) {
     setSkillCacheEntry(piDefaultSkillCache, key, {
       fingerprint,
@@ -253,11 +259,12 @@ function loadPiDefaultSkillsCached(cwd: string, agentDir: string): Skill[] {
  *
  * Deduplication: by canonical path (symlink dedup) and by name (first match wins).
  */
-export function loadAllSkills(cwd: string): Skill[] {
+export function loadAllSkills(cwd: string, projectTrusted = true): Skill[] {
   const resolvedCwd = resolve(cwd);
 
-  // Ancestor .agents/skills (highest precedence)
-  const ancestorsSkills = loadAncestorAgentsSkills(resolvedCwd);
+  // Ancestor .agents/skills are project-controlled and therefore require the
+  // parent trust snapshot. The global user roots below remain available.
+  const ancestorsSkills = projectTrusted ? loadAncestorAgentsSkills(resolvedCwd) : [];
 
   // ~/.agents/skills
   const homeAgentsDir = join(homedir(), ".agents", "skills");
@@ -269,7 +276,7 @@ export function loadAllSkills(cwd: string): Skill[] {
   // Pi defaults: Pi's user agent directory and <cwd>/.pi/skills. This cache
   // only memoizes the helper's metadata result; each child session still owns
   // and reloads its normal DefaultResourceLoader below the caller.
-  const defaultsSkills = loadPiDefaultSkillsCached(resolvedCwd, getAgentDir());
+  const defaultsSkills = loadPiDefaultSkillsCached(resolvedCwd, getAgentDir(), projectTrusted);
 
   // Merge in precedence order: ancestors first, then home, then defaults.
   // First match wins by name and by canonical path.
@@ -355,11 +362,12 @@ export function loadSkillMeta(
   skillNames: string[],
   cwd: string,
   excludeSkills?: string[],
+  projectTrusted = true,
 ): SkillMeta[] {
   const excluded = new Set(excludeSkills ?? []);
   const selectedNames = skillNames.filter((name) => !excluded.has(name));
   if (selectedNames.length === 0) return [];
-  const skills = loadAllSkills(cwd);
+  const skills = loadAllSkills(cwd, projectTrusted);
   return selectedNames.map((name) => {
     const match = skills.find((s) => s.name === name);
     if (!match) {

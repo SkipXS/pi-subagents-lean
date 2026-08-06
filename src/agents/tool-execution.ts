@@ -16,14 +16,9 @@ import {
 } from "./agent-renderer.js";
 import type { AgentRenderMetadataBridge } from "./agent-render-bridge.js";
 import { SHORT_ID_LENGTH } from "../types.js";
-import type { AgentConfig } from "./types.js";
-import { resolveType, getAgentConfig, discoverNewAgents, resolveAgentCatalog, resolveTypeInCatalog } from "./agent-types.js";
 import { buildAgentDetails } from "./agent-details.js";
 export { buildAgentDetails } from "./agent-details.js";
-import { revalidateWorktreePath, validateWorktreePath } from "../spawn/worktree-validator.js";
-import { snapshotResolvedSpawn, snapshotRuntimeSettings } from "../spawn/spawn-contract.js";
-
-import { resolveAgentTunables } from "../models/agent-resolution.js";
+import { runSpawnPreflight } from "../spawn/spawn-preflight.js";
 import { getSubagentRuntimeContext } from "../shell.js";
 import type { AgentManager } from "./agent-manager.js";
 import type { SpawnCoordinator } from "../spawn/spawn-coordinator.js";
@@ -262,116 +257,41 @@ export async function executeAgentTool(
     return errorResult("Agent execution is unavailable until the root session is ready");
   }
   const store = getStore();
+  // Trust is a preflight input, not a live capability. Snapshot it before the
+  // first async validation/discovery boundary so a later trust change cannot
+  // reinterpret this tool call. Missing legacy context methods are untrusted.
+  let projectTrusted = false;
+  try {
+    projectTrusted = ctx.isProjectTrusted?.() === true;
+  } catch {
+    projectTrusted = false;
+  }
 
-  // Validate worktree_path early — needed for on-demand agent discovery
-  const rawWorktreePath = params.worktree_path as string | undefined;
   const parentCwd = getSessionCtx()?.cwd ?? ctx.cwd;
-  let validatedWorktreePath: string | undefined;
-  let worktreeLabel: string | undefined;
-  if (rawWorktreePath && rawWorktreePath.trim() !== "") {
-    try {
-      const warnings: string[] = [];
-      const onWarning = (msg: string) => { warnings.push(msg); };
-      const validation = await validateWorktreePath(getPiInstance(), rawWorktreePath, parentCwd, onWarning);
-      if (signal?.aborted) return cancelledResult();
-      if (!validation.ok) {
-        for (const msg of warnings) {
-          if (ctx.ui?.notify) ctx.ui.notify(`[pi-subagents-lean] ${msg}`, "warning");
-        }
-        return errorResult(validation.error);
-      }
-      validatedWorktreePath = validation.resolvedPath;
-      worktreeLabel = validation.label;
-    } catch (err: unknown) {
-      if (signal?.aborted) return cancelledResult();
-      const msg = err instanceof Error ? err.message : String(err);
-      return errorResult(`worktree_path validation failed: ${msg}`);
-    }
-  }
-
-  const rawType = params.agent;
-  if (typeof rawType !== "string" || rawType.trim() === "") {
-    return errorResult("Agent type is required");
-  }
-  const type = rawType.trim();
-  const trustedWorktreeDir = validatedWorktreePath && (ctx.isProjectTrusted?.() ?? false)
-    ? `${validatedWorktreePath}/.pi/agents`
-    : undefined;
-
-  // Worktree catalogs are local to this tool call. Never use the shared
-  // registry for a worktree name: it may be an override of a parent type.
-  let resolvedType: string | undefined;
-  let agentConfig: AgentConfig | undefined;
-  if (trustedWorktreeDir) {
-    // Repeat validation directly before reading project-controlled overlays.
-    // A deleted or swapped path must not contribute an agent definition.
-    const validation = await revalidateWorktreePath(getPiInstance(), rawWorktreePath!, parentCwd, validatedWorktreePath!);
-    if (signal?.aborted) return cancelledResult();
-    if (!validation.ok || !validation.resolvedPath) return errorResult(validation.ok ? "worktree_path validation failed" : validation.error);
-    validatedWorktreePath = validation.resolvedPath;
-    worktreeLabel = validation.label;
-    const catalog = await resolveAgentCatalog(`${validatedWorktreePath}/.pi/agents`, {
-      disableDefaultAgents: store.agent.disableDefaultAgents,
-    });
-    if (signal?.aborted) return cancelledResult();
-    resolvedType = resolveTypeInCatalog(catalog, type);
-    agentConfig = resolvedType ? catalog.get(resolvedType) : undefined;
-  } else {
-    resolvedType = resolveType(type);
-    if (!resolvedType) {
-      await discoverNewAgents({ disableDefaultAgents: store.agent.disableDefaultAgents });
-      if (signal?.aborted) return cancelledResult();
-      resolvedType = resolveType(type);
-    }
-    agentConfig = resolvedType ? getAgentConfig(resolvedType) : undefined;
-  }
-  if (!resolvedType || !agentConfig) return errorResult(`Unknown agent type: ${type}`);
-
-  const prompt = params.prompt as string;
-  const description = (params.description as string | undefined) || prompt.split("\n")[0].slice(0, 80) || prompt.slice(0, 80);
-  const runInBackground = params.run_in_background as boolean | undefined;
-
-  // Persisted per-agent settings are applied above the effective merged
-  // Markdown definition. The runtime snapshot keeps the accepted spawn stable
-  // if config is reloaded while it waits for a concurrency slot.
-  const runtimeSettingsSnapshot = typeof store.createSubagentRuntimeSettings === "function"
-    ? store.createSubagentRuntimeSettings()
-    : undefined;
-  const runtimeSettings = snapshotRuntimeSettings(runtimeSettingsSnapshot);
-  const shouldRunInBackground = runInBackground === true;
-  const resolvedTunables = resolveAgentTunables({
-    agentName: resolvedType,
-    agentConfig,
-    overrides: runtimeSettings.agents,
-    modelRegistry: ctx.modelRegistry,
-    parentModel: ctx.model,
-    parentThinking: ctx.thinkingLevel,
-  });
-  const model = resolvedTunables.model;
-  const modelKey = resolvedTunables.modelKey;
-  const modelName = model?.id;
-  const thinkingLevel = resolvedTunables.thinkingLevel;
-  const resolvedSpawn = snapshotResolvedSpawn({
-    type: resolvedType,
-    prompt,
-    description,
-    runInBackground: shouldRunInBackground,
-    agentConfig,
-    runtimeSettings,
-    model,
-    modelKey,
-    thinkingLevel,
-    worktreePath: validatedWorktreePath,
-    worktreeLabel,
-    worktreeParentCwd: validatedWorktreePath ? parentCwd : undefined,
-    worktreeSelectionPath: validatedWorktreePath ? rawWorktreePath : undefined,
-    invocation: {
-      modelName,
-      ...(modelKey !== undefined ? { modelKey } : {}),
-      thinkingLevel,
-    },
+  const preflight = await runSpawnPreflight({
+    params,
     signal,
+    pi: getPiInstance(),
+    ctx,
+    store,
+    parentCwd,
+    projectTrusted,
   });
+
+  if (preflight.kind === "cancelled") return cancelledResult();
+  if (preflight.kind === "error") {
+    for (const msg of preflight.warnings) {
+      if (ctx.ui?.notify) ctx.ui.notify(`[pi-subagents-lean] ${msg}`, "warning");
+    }
+    return errorResult(preflight.error);
+  }
+
+  const { resolvedSpawn } = preflight;
+  const resolvedType = resolvedSpawn.type;
+  const prompt = resolvedSpawn.prompt;
+  const modelKey = resolvedSpawn.modelKey;
+  const thinkingLevel = resolvedSpawn.thinkingLevel;
+  const shouldRunInBackground = resolvedSpawn.runInBackground;
 
   // renderCall runs before this asynchronous resolution. Publish the resolved
   // values as a row-local partial update immediately, including the abort and
@@ -406,28 +326,10 @@ export async function executeAgentTool(
   // throwing contract.
   let result: Awaited<ReturnType<SpawnCoordinator["spawn"]>>;
   try {
-    result = await coordinator.spawn(getPiInstance(), ctx, {
-      type: resolvedType,
-      agentConfig,
-      prompt,
-      description,
-      model,
-      modelKey,
-      thinkingLevel,
-      worktreePath: validatedWorktreePath,
-      worktreeLabel,
-      worktreeParentCwd: validatedWorktreePath ? parentCwd : undefined,
-      worktreeSelectionPath: validatedWorktreePath ? rawWorktreePath : undefined,
-      invocation: {
-        modelName,
-        ...(modelKey !== undefined ? { modelKey } : {}),
-        thinkingLevel,
-      },
-      runtimeSettingsSnapshot,
-      resolvedSpawn,
-      runInBackground: shouldRunInBackground,
-      signal,
-    });
+    // The resolved contract is authoritative. Do not repeat its fields in a
+    // parallel SpawnIntent object: Coordinator and Manager must consume this
+    // exact snapshot through the normal acceptance path.
+    result = await coordinator.spawn(getPiInstance(), ctx, resolvedSpawn);
   } catch (error) {
     const details = agentRenderDetails(undefined, renderMetadata);
     if (signal?.aborted) return cancelledResult(details);

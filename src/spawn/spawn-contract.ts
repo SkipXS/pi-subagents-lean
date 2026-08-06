@@ -18,6 +18,8 @@ export interface ResolvedSpawn {
   readonly runInBackground: boolean;
   readonly agentConfig: AgentConfig;
   readonly runtimeSettings: SubagentRuntimeSettings;
+  /** Trust snapshot captured before tool-preflight awaits. */
+  readonly projectTrusted: boolean;
   readonly model?: Model<any>;
   readonly modelKey?: string;
   readonly thinkingLevel?: ThinkingLevel;
@@ -107,7 +109,12 @@ export function snapshotRuntimeSettings(
   });
 }
 
-function snapshotResolvedFields(spawn: ResolvedSpawn): ResolvedSpawn {
+type ResolvedSpawnInput = Omit<ResolvedSpawn, "projectTrusted"> & {
+  /** Optional only for legacy/direct callers; snapshots always materialize false. */
+  readonly projectTrusted?: boolean;
+};
+
+function snapshotResolvedFields(spawn: ResolvedSpawnInput): ResolvedSpawn {
   return Object.freeze({
     type: spawn.type,
     prompt: spawn.prompt,
@@ -115,6 +122,7 @@ function snapshotResolvedFields(spawn: ResolvedSpawn): ResolvedSpawn {
     runInBackground: spawn.runInBackground,
     agentConfig: freezeAgentConfig(spawn.agentConfig),
     runtimeSettings: snapshotRuntimeSettings(spawn.runtimeSettings),
+    projectTrusted: spawn.projectTrusted === true,
     model: spawn.model,
     modelKey: spawn.modelKey,
     thinkingLevel: spawn.thinkingLevel,
@@ -128,12 +136,12 @@ function snapshotResolvedFields(spawn: ResolvedSpawn): ResolvedSpawn {
 }
 
 /** Create the detached, immutable pre-acceptance resolution snapshot. */
-export function snapshotResolvedSpawn(spawn: ResolvedSpawn): ResolvedSpawn {
+export function snapshotResolvedSpawn(spawn: ResolvedSpawnInput): ResolvedSpawn {
   return snapshotResolvedFields(spawn);
 }
 
 /** Mark a resolved snapshot as accepted while retaining a fresh defensive copy. */
-export function acceptResolvedSpawn(spawn: ResolvedSpawn): AcceptedSpawn {
+export function acceptResolvedSpawn(spawn: ResolvedSpawnInput): AcceptedSpawn {
   return Object.freeze({
     ...snapshotResolvedFields(spawn),
     accepted: true as const,

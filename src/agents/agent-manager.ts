@@ -28,7 +28,7 @@ import { ExecutionTelemetry, type ExecutionBaseline } from "./execution-telemetr
 import { errorMessage } from "../utils.js";
 import { getSubagentRuntimeContext } from "../shell.js";
 import type { SubagentRuntimeSettings } from "../config/config-store.js";
-import { snapshotAcceptedSpawn, type AcceptedSpawn } from "../spawn/spawn-contract.js";
+import { acceptResolvedSpawn, snapshotAcceptedSpawn, type AcceptedSpawn, type ResolvedSpawn } from "../spawn/spawn-contract.js";
 
 /** UUID prefix length for agent IDs stored in the agents map. */
 const AGENT_ID_PREFIX_LENGTH = 17;
@@ -42,8 +42,12 @@ type OnAgentStart = (record: AgentRecord) => void;
 interface SpawnArgs {
   pi: ExtensionAPI;
   ctx: ExtensionContext;
-  type: SubagentType;
-  prompt: string;
+  /** Present only for the retained direct-call adapter. */
+  type?: SubagentType;
+  /** Present only for the retained direct-call adapter. */
+  prompt?: string;
+  /** The immutable contract accepted by AgentManager for the normal path. */
+  acceptedSpawn?: AcceptedSpawn;
   options: SpawnOptions;
 }
 
@@ -134,18 +138,73 @@ export class AgentManager {
     ));
   }
 
-  /** Accept a root agent and return its id immediately. */
+  /**
+   * Accept a pre-resolved root agent and return its id immediately.
+   *
+   * This overload is the normal Agent-tool path. It is deliberately the only
+   * ResolvedSpawn -> AcceptedSpawn boundary in the spawn pipeline.
+   */
+  spawn(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    resolvedSpawn: ResolvedSpawn,
+  ): string;
+  /** Legacy adapter for direct callers that still provide scalar spawn fields. */
   spawn(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
     type: SubagentType,
     prompt: string,
     options: SpawnOptions,
+  ): string;
+  spawn(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    typeOrResolved: SubagentType | ResolvedSpawn,
+    promptOrOptions?: string | SpawnOptions,
+    legacyOptions?: SpawnOptions,
   ): string {
     if (getSubagentRuntimeContext()) {
       throw new Error("Root agent spawning is unavailable from a child runtime");
     }
-    return this.spawnInternal(pi, ctx, type, prompt, options);
+    if (typeof typeOrResolved === "object" && typeOrResolved !== null) {
+      const acceptedSpawn = acceptResolvedSpawn(typeOrResolved);
+      const options: SpawnOptions = {
+        description: acceptedSpawn.description,
+        model: acceptedSpawn.model,
+        modelKey: acceptedSpawn.modelKey,
+        thinkingLevel: acceptedSpawn.thinkingLevel,
+        projectTrusted: acceptedSpawn.projectTrusted,
+        agentConfig: acceptedSpawn.agentConfig,
+        worktreePath: acceptedSpawn.worktreePath,
+        worktreeLabel: acceptedSpawn.worktreeLabel,
+        worktreeParentCwd: acceptedSpawn.worktreeParentCwd,
+        worktreeSelectionPath: acceptedSpawn.worktreeSelectionPath,
+        invocation: acceptedSpawn.invocation,
+        isBackground: acceptedSpawn.runInBackground,
+        signal: acceptedSpawn.signal,
+        runtimeSettings: acceptedSpawn.runtimeSettings,
+        acceptedSpawn,
+      };
+      return this.spawnInternal(
+        pi,
+        ctx,
+        acceptedSpawn.type,
+        acceptedSpawn.prompt,
+        options,
+        acceptedSpawn,
+      );
+    }
+    // Direct manager callers remain on the old adapter. They retain the
+    // manager's historical registry/config fallback and optional accepted
+    // contract support, but never participate in the normal tool path.
+    return this.spawnInternal(
+      pi,
+      ctx,
+      typeOrResolved,
+      promptOrOptions as string,
+      legacyOptions!,
+    );
   }
 
   private spawnInternal(
@@ -154,12 +213,14 @@ export class AgentManager {
     type: SubagentType,
     prompt: string,
     options: SpawnOptions,
+    acceptedContract?: AcceptedSpawn,
   ): string {
     const id = randomUUID().slice(0, AGENT_ID_PREFIX_LENGTH);
     const abortController = new AbortController();
-    const acceptedSpawn = options.acceptedSpawn
-      ? snapshotAcceptedSpawn(options.acceptedSpawn)
-      : undefined;
+    // Normal calls pass the accepted contract explicitly. The acceptedSpawn
+    // option remains a compatibility adapter for direct manager callers.
+    const acceptedSpawn = acceptedContract
+      ?? (options.acceptedSpawn ? snapshotAcceptedSpawn(options.acceptedSpawn) : undefined);
 
     let canonicalType: SubagentType;
     let effectivePrompt: string;
@@ -175,6 +236,7 @@ export class AgentManager {
         model: acceptedSpawn.model,
         modelKey: acceptedSpawn.modelKey,
         thinkingLevel: acceptedSpawn.thinkingLevel,
+        projectTrusted: acceptedSpawn.projectTrusted,
         agentConfig: acceptedSpawn.agentConfig,
         worktreePath: acceptedSpawn.worktreePath,
         worktreeLabel: acceptedSpawn.worktreeLabel,
@@ -199,7 +261,9 @@ export class AgentManager {
       };
     }
 
-    const args: SpawnArgs = { pi, ctx, type: canonicalType, prompt: effectivePrompt, options: frozenOptions };
+    const args: SpawnArgs = acceptedSpawn
+      ? { pi, ctx, acceptedSpawn, options: frozenOptions }
+      : { pi, ctx, type: canonicalType, prompt: effectivePrompt, options: frozenOptions };
     const queueDecision = this.scheduler.decide();
     const queued = queueDecision === "queued";
     let resolveQueued: ((result: string) => void) | undefined;
@@ -297,13 +361,18 @@ export class AgentManager {
   private startAgent(
     id: string,
     record: AgentRecord,
-    { pi, ctx, type, prompt, options }: SpawnArgs,
+    { pi, ctx, type, prompt, acceptedSpawn, options }: SpawnArgs,
   ): Promise<string> {
+    const acceptedType = acceptedSpawn?.type ?? type;
+    const acceptedPrompt = acceptedSpawn?.prompt ?? prompt;
+    if (!acceptedType || acceptedPrompt === undefined) {
+      throw new Error("Accepted spawn is missing type or prompt");
+    }
     this.setStatus(record, "running");
     record.lifecycle.startedAt = Date.now();
 
     try {
-      record.execution.outputLog = new AgentOutputLog(id, prompt);
+      record.execution.outputLog = new AgentOutputLog(id, acceptedPrompt);
       record.display.outputFile = record.execution.outputLog.path;
     } catch { /* output logs are optional telemetry */ }
 
@@ -311,7 +380,7 @@ export class AgentManager {
     const execution = record.stats.executions!.at(-1)!;
     execution.status = "running";
 
-    const promise = runAgent(ctx, record.display.type, prompt, {
+    const promise = runAgent(ctx, acceptedType, acceptedPrompt, {
       pi,
       agentId: id,
       agentConfig: options.agentConfig,
@@ -321,7 +390,8 @@ export class AgentManager {
       cwd: options.worktreePath,
       worktreeParentCwd: options.worktreeParentCwd,
       worktreeSelectionPath: options.worktreeSelectionPath,
-      acceptedSpawn: options.acceptedSpawn,
+      projectTrusted: options.projectTrusted === true,
+      acceptedSpawn,
       signal: record.execution.abortController!.signal,
       ...this.telemetry.createCallbacks(record, options, execution.id),
       onTextDelta: (delta, fullText) => {

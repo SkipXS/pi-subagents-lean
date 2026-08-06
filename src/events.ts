@@ -56,7 +56,8 @@ export async function scanAndRegisterAgents(
   const userAgentDir = path.join(getAgentDir(), "agents");
   // Agent descriptions become parent system instructions, so never discover
   // project-controlled definitions unless Pi has established project trust.
-  const projectTrusted = ctx.isProjectTrusted();
+  // Missing legacy host trust APIs are conservative: project catalogs stay closed.
+  const projectTrusted = ctx.isProjectTrusted?.() === true;
   const sharedAgentDir = projectTrusted ? path.join(ctx.cwd, ".agents", "agents") : "";
   const projectAgentDir = projectTrusted ? path.join(ctx.cwd, ".pi", "agents") : "";
 

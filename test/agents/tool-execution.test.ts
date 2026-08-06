@@ -56,6 +56,7 @@ const {
       invocation: intent.invocation,
       thinkingLevel: intent.thinkingLevel,
       modelKey: intent.modelKey,
+      projectTrusted: intent.projectTrusted,
       worktreePath: intent.worktreePath,
       worktreeLabel: intent.worktreeLabel,
       worktreeParentCwd: intent.worktreeParentCwd,
@@ -415,6 +416,39 @@ describe("executeAgentTool — worktree_path validation", () => {
       expect.objectContaining({ signal }),
     );
     expect(mockSpawn.mock.calls[0][4].signal).toBe(signal);
+  });
+
+  it("snapshots parent trust before an asynchronous worktree preflight", async () => {
+    let trusted = true;
+    ctx.isProjectTrusted = vi.fn(() => trusted);
+    let releaseValidation!: () => void;
+    const validation = new Promise<void>((resolve) => { releaseValidation = resolve; });
+    mockValidateWorktreePath.mockImplementationOnce(async () => {
+      await validation;
+      return { ok: true, resolvedPath: "/wt/feature", worktreeRoot: "/wt/feature", label: "feature" };
+    });
+
+    const run = executeAgentTool(
+      "tc-trust-snapshot",
+      makeParams({ worktree_path: "/wt/feature" }),
+      undefined,
+      undefined,
+      ctx,
+    );
+    await vi.waitFor(() => expect(mockValidateWorktreePath).toHaveBeenCalledOnce());
+    trusted = false;
+    releaseValidation();
+    await run;
+
+    expect(ctx.isProjectTrusted).toHaveBeenCalledOnce();
+    expect(mockCoordinatorSpawn).toHaveBeenCalledWith(
+      expect.anything(),
+      ctx,
+      expect.objectContaining({ projectTrusted: true }),
+    );
+    const spawnArgument = mockCoordinatorSpawn.mock.calls[0]?.[2] as Record<string, unknown>;
+    expect(Object.isFrozen(spawnArgument)).toBe(true);
+    expect(Object.keys(spawnArgument).some((key) => key === "resolvedSpawn")).toBe(false);
   });
 
   it("returns a cancellation error when the parent aborts after foreground start", async () => {
