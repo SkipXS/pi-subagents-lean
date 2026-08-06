@@ -1,5 +1,4 @@
 import { getPiInstance, getSessionCtx, getStore, getSubagentRuntimeContext } from "../shell.js";
-import { SHORT_ID_LENGTH } from "../types.js";
 import { resolveAgentTunables } from "../models/agent-resolution.js";
 import { getStatusNote } from "../status-note.js";
 
@@ -10,7 +9,7 @@ import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import type { ResolvedSpawn } from "./spawn-contract.js";
 import { getAgentConfig, resolveType, snapshotAgentConfig } from "../agents/agent-types.js";
 import { buildAgentDetails } from "../agents/agent-details.js";
-import { executionKind, formatExecutionLabels } from "../agents/execution-display.js";
+import { executionKind, formatAgentStatusLine } from "../agents/execution-display.js";
 
 /**
  * spawn-coordinator.ts — Spawn-and-track coordination for subagents.
@@ -140,17 +139,19 @@ export class SpawnCoordinator {
     pi: ExtensionAPI,
     ctx: ExtensionContext,
     intent: SpawnIntent,
+    onAccepted?: (record: AgentRecord) => void,
   ): Promise<SpawnResult> {
     if (getSubagentRuntimeContext()) {
       throw new Error("Root agent spawning is unavailable from a child runtime");
     }
-    return this.spawnInternal(pi, ctx, intent);
+    return this.spawnInternal(pi, ctx, intent, onAccepted);
   }
 
   private async spawnInternal(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
     intent: SpawnIntent,
+    onAccepted?: (record: AgentRecord) => void,
   ): Promise<SpawnResult> {
     let runInBackground: boolean;
     let signal: AbortSignal | undefined;
@@ -216,6 +217,16 @@ export class SpawnCoordinator {
       });
     }
     const record = this.manager.getRecord(agentId)!;
+    // Foreground callers await below, so publish the accepted record's full ID
+    // before that await. Rendering is observational and must never affect the
+    // accepted execution if a host-side observer fails.
+    if (!runInBackground && onAccepted) {
+      try {
+        onAccepted(record);
+      } catch {
+        // Render observers are best-effort and cannot change spawn semantics.
+      }
+    }
     const executionId = record.stats.executions?.[0]?.id;
     if (runInBackground && executionId) {
       // The initial spawn is execution 0. Claims are deliberately keyed only
@@ -462,14 +473,17 @@ export class SpawnCoordinator {
   private capturePayload(record: AgentRecord, execution: AgentExecutionSummary): BackgroundPayload {
     const executions = record.stats.executions;
     const index = executions?.indexOf(execution) ?? 0;
-    const labels = formatExecutionLabels(execution.mode, executionKind(execution, index));
+    const kind = executionKind(execution, index);
     const result = execution.responseText ?? record.result ?? "";
     return {
       agentId: record.id,
       type: record.display.type,
       status: execution.status,
       result,
-      content: `[Subagent "${record.display.type}" ${record.id.slice(0, SHORT_ID_LENGTH)} ${execution.status} | ${labels}]\n\nResponse:\n${result}${getStatusNote({ ...record.lifecycle, status: execution.status })}`,
+      content: `${formatAgentStatusLine(record.id, record.display.type, execution.status, {
+        mode: execution.mode,
+        kind,
+      })}\n\nResponse:\n${result}${getStatusNote({ ...record.lifecycle, status: execution.status })}`,
       details: buildAgentDetails(record, { includeStats: true, includeStatus: true, execution }),
     };
   }

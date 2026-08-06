@@ -61,7 +61,7 @@ describe("AgentStatus tool execute behavior", () => {
     expect(result.isError).toBeUndefined();
   });
 
-  it("formats each agent as {shortId} ({type}) {status}", async () => {
+  it("formats each agent as [{shortId}] ({type}) {status}", async () => {
     mockListAgents.mockReturnValue([
       {
         id: "abc123def456ghi",
@@ -86,8 +86,8 @@ describe("AgentStatus tool execute behavior", () => {
     );
 
     const text = result.content[0].text;
-    // Contract: agent entries use "id (type) status" format, short ID is 8 chars
-    expect(text).toMatch(/[a-z0-9]{8} \(builder\) running/);
+    // Contract: agent entries use "[id] (type) status" format, short ID is 8 chars
+    expect(text).toMatch(/\[[a-z0-9]{8}\] \(builder\) running/);
     expect(text).toContain("Mode: Background | Run: Continued");
     expect(text).toContain("Don't poll");
   });
@@ -109,8 +109,8 @@ describe("AgentStatus tool execute behavior", () => {
     );
 
     const text = result.content[0].text;
-    // Contract: multiple agents comma-separated, each matching the format
-    expect(text).toMatch(/[a-z0-9]{8} \(builder\) running, [a-z0-9]{8} \(reviewer\) completed/);
+    // Contract: multiple agents comma-separated, each matching the bracketed format
+    expect(text).toMatch(/\[[a-z0-9]{8}\] \(builder\) running, \[[a-z0-9]{8}\] \(reviewer\) completed/);
     expect(text).toContain("Don't poll");
   });
 
@@ -134,12 +134,12 @@ describe("AgentStatus tool execute behavior", () => {
     );
 
     const text = result.content[0].text;
-    // Contract: each agent entry matches the format pattern with its status
-    expect(text).toMatch(/id1 \(a\) running/);
-    expect(text).toMatch(/id2 \(b\) queued/);
-    expect(text).toMatch(/id3 \(c\) completed/);
-    expect(text).toMatch(/id4 \(d\) stopped/);
-    expect(text).toMatch(/id5 \(e\) error/);
+    // Contract: each agent entry matches the bracketed format pattern with its status
+    expect(text).toMatch(/\[id1\] \(a\) running/);
+    expect(text).toMatch(/\[id2\] \(b\) queued/);
+    expect(text).toMatch(/\[id3\] \(c\) completed/);
+    expect(text).toMatch(/\[id4\] \(d\) stopped/);
+    expect(text).toMatch(/\[id5\] \(e\) error/);
     expect(text).toContain("Don't poll");
   });
 
@@ -187,7 +187,7 @@ describe("AgentStatus tool execute behavior", () => {
     );
 
     // Contract: short ID is always 8 characters
-    expect(result.content[0].text).toMatch(/[a-z0-9-]{8} \(reviewer\) completed/);
+    expect(result.content[0].text).toMatch(/\[[a-z0-9-]{8}\] \(reviewer\) completed/);
   });
 
   it("returns no error flag on success", async () => {

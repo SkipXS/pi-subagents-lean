@@ -1,4 +1,5 @@
 import { getStatusNote } from "../status-note.js";
+import { formatAgentIdFirstContent } from "./execution-display.js";
 /**
  * tool-execution.ts — Agent tool execution handlers.
  *
@@ -92,8 +93,10 @@ function finalAgentRenderMetadata(
     // Terminal/legacy records may expose no live session; keep the resolved
     // preflight values, which are still sufficient to render the row.
   }
+  const agentId = typeof record?.id === "string" && record.id.length > 0 ? record.id : undefined;
   return {
     ...metadata,
+    ...(agentId !== undefined ? { agentId } : {}),
     ...(modelKey !== undefined ? { model: modelKey } : {}),
     ...(thinking !== undefined ? { thinking } : {}),
   };
@@ -231,7 +234,7 @@ export function formatResultContent(record: AgentRecord): string {
 
 /** Format the shared canonical-ID/response envelope for successful foreground results. */
 export function formatForegroundAgentResultContent(record: AgentRecord): string {
-  return `Agent ID: ${record.id}\n\nResponse:\n${formatResultContent(record)}`;
+  return formatAgentIdFirstContent(record.id, `Response:\n${formatResultContent(record)}`);
 }
 
 // ============================================================================
@@ -329,7 +332,17 @@ export async function executeAgentTool(
     // The resolved contract is authoritative. Do not repeat its fields in a
     // parallel SpawnIntent object: Coordinator and Manager must consume this
     // exact snapshot through the normal acceptance path.
-    result = await coordinator.spawn(getPiInstance(), ctx, resolvedSpawn);
+    result = await coordinator.spawn(
+      getPiInstance(),
+      ctx,
+      resolvedSpawn,
+      shouldRunInBackground
+        ? undefined
+        : (acceptedRecord) => {
+          const acceptedRenderMetadata = finalAgentRenderMetadata(renderMetadata, acceptedRecord);
+          emitAgentRenderUpdate(toolCallId, onUpdate, acceptedRenderMetadata, renderBridge);
+        },
+    );
   } catch (error) {
     const details = agentRenderDetails(undefined, renderMetadata);
     if (signal?.aborted) return cancelledResult(details);
@@ -338,6 +351,9 @@ export async function executeAgentTool(
 
   const { agentId, record } = result;
   const finalRenderMetadata = finalAgentRenderMetadata(renderMetadata, record);
+  // Keep the bridge hydrated for throwing/error paths where Pi may not retain
+  // the final ToolResult details for renderAgentResult to consume.
+  renderBridge?.update(toolCallId, finalRenderMetadata);
 
   // A background spawn may complete its abort path while coordinator.spawn()
   // is still pending. Its stopped record is not a successful tool result.
@@ -355,13 +371,16 @@ export async function executeAgentTool(
       finalRenderMetadata,
     );
     if (!isActive) {
-      return successResult(`[Agent ${record.lifecycle.status}] Agent ID: ${agentId}`, details);
+      return successResult(
+        formatAgentIdFirstContent(agentId, `[Agent ${record.lifecycle.status}]`),
+        details,
+      );
     }
 
     // Background: return immediately
-    const suffix = `A notification will arrive when done - User asks you not to poll, check status or duplicate the delegated work.\n\nAgent ID: ${agentId}`;
     const label = record.lifecycle.status === "queued" ? "Agent queued" : "Agent running";
-    return successResult(`[${label}] ${suffix}`, details);
+    const acknowledgement = `[${label}] A notification will arrive when done - User asks you not to poll, check status or duplicate the delegated work.`;
+    return successResult(formatAgentIdFirstContent(agentId, acknowledgement), details);
   }
 
   // Foreground: record.execution.promise is already awaited by coordinator.spawn()
@@ -561,11 +580,8 @@ export async function executeContinueAgentTool(
       if (signal?.aborted || record.lifecycle.status === "aborted" || record.lifecycle.status === "stopped") {
         return cancelledResult(details);
       }
-      const suffix = "A notification will arrive when done - User asks you not to poll, check status or duplicate the delegated work.\n\n"
-        // The manager resolved the caller's id (possibly a short prefix) to
-        // the record's full id; the acknowledgement must carry the resolved id.
-        + `Agent ID: ${record.id}`;
-      return successResult(`[AgentContinue] ${suffix}`, details);
+      const acknowledgement = "[AgentContinue] A notification will arrive when done - User asks you not to poll, check status or duplicate the delegated work.";
+      return successResult(formatAgentIdFirstContent(record.id, acknowledgement), details);
     }
 
     const details = agentRenderDetails(buildAgentDetails(record, { includeStats: true }), renderMetadata);
