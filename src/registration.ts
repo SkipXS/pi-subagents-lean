@@ -50,7 +50,7 @@ function registerAgentTool(pi: ExtensionAPI, renderBridge: AgentRenderMetadataBr
   pi.registerTool({
     name: "Agent",
     label: "Agent",
-    description: "Delegate a task to a specialized agent.",
+    description: "Delegate to a context-isolated specialized agent. It cannot see the parent conversation, parent tool results, or other agents' output, so its prompt must be self-contained.",
     parameters: Type.Object({
       prompt: Type.String({ maxLength: MAX_AGENT_PROMPT_BYTES }),
       description: Type.Optional(Type.String({ maxLength: MAX_DESCRIPTION_BYTES })),
