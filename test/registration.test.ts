@@ -54,7 +54,7 @@ describe("tool registration", () => {
     registerTools(api.api as any);
     const tool = api.tools[0]!;
 
-    expect(tool.description).toBe("Delegate a task to a specialized agent.");
+    expect(tool.description).toBe("Delegate to a context-isolated specialized agent. It cannot see the parent conversation, parent tool results, or other agents' output, so its prompt must be self-contained.");
     expect(JSON.parse(JSON.stringify(tool.parameters))).toEqual({
       type: "object",
       additionalProperties: false,

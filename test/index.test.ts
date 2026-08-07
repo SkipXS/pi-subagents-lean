@@ -111,7 +111,7 @@ describe("Agent tool schema — fixed public contract", () => {
 
   it("has Pi's required description without extra prompt metadata", () => {
     expect(agentTool()).toBeDefined();
-    expect(agentTool()!.description).toBe("Delegate a task to a specialized agent.");
+    expect(agentTool()!.description).toBe("Delegate to a context-isolated specialized agent. It cannot see the parent conversation, parent tool results, or other agents' output, so its prompt must be self-contained.");
   });
 
   it("has no promptSnippet", () => {
