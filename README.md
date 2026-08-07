@@ -16,6 +16,7 @@ the parent tool interface small.
 ## Table of contents
 
 - [Install and first use](#install-and-first-use)
+- [Public package surface](#public-package-surface)
 - [Tools and execution](#tools-and-execution)
 - [Agent definitions](#agent-definitions)
   - [Dynamic catalog, discovery, and trust](#dynamic-catalog-discovery-and-trust)
@@ -54,6 +55,27 @@ Parent session
 Use background work only for independent work. Do not poll `AgentStatus`, sleep,
 or repeat the task while waiting for a background result; resume dependent work
 when its notification arrives.
+
+## Public package surface
+
+The supported package surface is Pi's manifest-driven extension entry point:
+
+- **Pi manifest entry:** `./src/index.ts` is the file target in the
+  `package.json` `pi.extensions` field. This is a Pi file target, not a general
+  Node or bare-package import contract. The package currently has no `main`,
+  `types`, or `exports` entry points.
+- **Default agent resources:** the five bundled Markdown resources are
+  `src/agents/defaults/architect.md`, `src/agents/defaults/scout.md`,
+  `src/agents/defaults/implementer.md`, `src/agents/defaults/reviewer.md`, and
+  `src/agents/defaults/verifier.md`.
+- **Tool contracts:** Pi exposes these four stable tools: `Agent` (`prompt`,
+  `agent`, with optional `description`, `run_in_background`, and
+  `worktree_path`), `AgentContinue` (`agent_id`, `prompt`,
+  `run_in_background`), `StopAgent` (`agent_id`), and `AgentStatus` (no
+  parameters). Their detailed behavior and limits are documented below.
+
+All other `src/**` paths are internal implementation details and have no
+compatibility guarantee. This includes source-path imports not listed above.
 
 ## Tools and execution
 
@@ -601,13 +623,22 @@ See [docs/coverage.md](docs/coverage.md) for coverage thresholds, compatibility
 checks, package smoke testing, and required CI checks for `main`. Maintainers
 should follow the [release checklist](docs/releasing.md) before creating a tag.
 
-### Compatibility, origin, and license
+### Deprecated legacy shell functions
 
-Published `src/shell` paths still export `enterSubagentSpawn`,
-`exitSubagentSpawn`, and `isInsideSubagentSpawn` for older integrations. They
-are deprecated inert-extension-registration markers. AsyncLocalStorage is the
-runtime authority for isolated agent sessions; the legacy pair cannot provide
-async isolation, root shell controls, or override an active session's guards.
+`enterSubagentSpawn`, `exitSubagentSpawn`, and `isInsideSubagentSpawn` are
+**deprecated** legacy source-level functions. They are planned for removal in
+the next major release and have no external replacement. Normal usage should go
+through Pi: load the supported `./src/index.ts` manifest entry and use the four
+Pi tools above. Do not build new integrations against `src/shell` or any other
+internal source path.
+
+These functions currently remain only as transitional inert-extension
+registration markers; their availability is not a compatibility guarantee.
+AsyncLocalStorage is the runtime authority for isolated agent sessions, and
+these legacy functions cannot provide async isolation, root shell controls, or
+override an active session's guards.
+
+### Compatibility, origin, and license
 
 This fork preserves the project's MIT license and Alexander Paramonov's
 copyright notice. See [LICENSE](LICENSE).

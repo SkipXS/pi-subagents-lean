@@ -55,6 +55,20 @@ try {
       if (installedPackage.version !== "${rootPackage.version}") {
         throw new Error("Installed package version does not match the tarball version");
       }
+      if (JSON.stringify(installedPackage.pi) !== JSON.stringify({ extensions: ["./src/index.ts"] })) {
+        throw new Error("Unexpected Pi manifest entry");
+      }
+      for (const field of ["main", "types", "exports"]) {
+        if (Object.prototype.hasOwnProperty.call(installedPackage, field)) {
+          throw new Error("Unexpected package entry field: " + field);
+        }
+      }
+      const packagedFiles = [
+        "src/", "docs/coverage.md", "docs/releasing.md", "CHANGELOG.md", "README.md", "LICENSE",
+      ];
+      if (JSON.stringify(installedPackage.files) !== JSON.stringify(packagedFiles)) {
+        throw new Error("Unexpected package files metadata");
+      }
       for (const file of [
         "README.md", "LICENSE", "CHANGELOG.md", "docs/coverage.md", "docs/releasing.md", "src/index.ts",
         "src/agents/defaults/architect.md", "src/agents/defaults/scout.md", "src/agents/defaults/implementer.md",
@@ -67,9 +81,71 @@ try {
       if (result.errors.length > 0) throw new Error(JSON.stringify(result.errors));
       if (result.extensions.length !== 1) throw new Error("Expected exactly one loaded extension");
       const extension = result.extensions[0];
+      const expectedToolNames = ["Agent", "AgentContinue", "StopAgent", "AgentStatus"];
       const tools = [...extension.tools.keys()];
-      if (tools.join(",") !== "Agent,AgentContinue,StopAgent,AgentStatus") {
+      if (JSON.stringify(tools) !== JSON.stringify(expectedToolNames)) {
         throw new Error("Unexpected tools: " + tools.join(","));
+      }
+      const expectedToolContracts = {
+        Agent: {
+          type: "object",
+          additionalProperties: false,
+          required: ["prompt", "agent"],
+          properties: {
+            prompt: { type: "string", maxLength: 262144 },
+            description: { type: "string", maxLength: 8192 },
+            agent: { type: "string" },
+            run_in_background: { type: "boolean" },
+            worktree_path: { type: "string" },
+          },
+        },
+        AgentContinue: {
+          type: "object",
+          additionalProperties: false,
+          required: ["agent_id", "prompt", "run_in_background"],
+          properties: {
+            agent_id: { type: "string", maxLength: 128 },
+            prompt: { type: "string", maxLength: 262144 },
+            run_in_background: { type: "boolean" },
+          },
+        },
+        StopAgent: {
+          type: "object",
+          additionalProperties: false,
+          required: ["agent_id"],
+          properties: { agent_id: { type: "string", maxLength: 128 } },
+        },
+        AgentStatus: {
+          type: "object",
+          additionalProperties: false,
+          required: [],
+          properties: {},
+        },
+      };
+      function normalizedContract(definition) {
+        const schema = definition.parameters ?? {};
+        const properties = schema.properties ?? {};
+        return {
+          type: schema.type,
+          additionalProperties: schema.additionalProperties,
+          required: schema.required ?? [],
+          properties: Object.fromEntries(Object.entries(properties).map(([key, value]) => [
+            key,
+            {
+              type: value.type,
+              ...(value.maxLength === undefined ? {} : { maxLength: value.maxLength }),
+            },
+          ])),
+        };
+      }
+      for (const name of expectedToolNames) {
+        const definition = extension.tools.get(name)?.definition;
+        if (!definition || definition.name !== name || typeof definition.execute !== "function") {
+          throw new Error("Invalid tool definition: " + name);
+        }
+        if (JSON.stringify(normalizedContract(definition)) !== JSON.stringify(expectedToolContracts[name])) {
+          throw new Error("Unexpected contract for tool: " + name);
+        }
       }
       if (extension.commands.size !== 0) throw new Error("Unexpected custom commands");
       for (const event of ["session_start", "session_shutdown"]) {

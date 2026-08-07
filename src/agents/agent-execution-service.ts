@@ -7,7 +7,8 @@
  */
 
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { executeAgentTurn, runAgent } from "./agent-runner.js";
+import { runAgent } from "./agent-runner.js";
+import { executeAgentTurn } from "./agent-session-runtime.js";
 import { AgentExecutionResources } from "./agent-execution-resources.js";
 import type {
   AgentExecutionSummary,

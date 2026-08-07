@@ -19,7 +19,7 @@ import {
   formatForegroundAgentResultContent,
   successResult,
 } from "./agent-tool-results.js";
-import type { AgentCallRenderMetadata } from "./agent-tool-results.js";
+import type { AgentCallRenderMetadata } from "./agent-render-format.js";
 import type { AgentRenderMetadataBridge } from "./agent-render-bridge.js";
 import { buildAgentDetails } from "./agent-details.js";
 import { runSpawnPreflight } from "../spawn/spawn-preflight.js";

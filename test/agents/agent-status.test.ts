@@ -14,14 +14,19 @@ import { shellMock } from "../fixtures.ts";
 /* ------------------------------------------------------------------ */
 
 const mockListAgents = vi.fn();
+const mockReadiness = vi.hoisted(() => ({ coordinatorReady: true }));
 
 /* ------------------------------------------------------------------ */
 /*  Global mocks                                                      */
 /* ------------------------------------------------------------------ */
 
-vi.mock("../../src/shell.js", () => shellMock({
-  manager: { listAgents: mockListAgents },
-}));
+vi.mock("../../src/shell.js", () => {
+  const shell = shellMock({ manager: { listAgents: mockListAgents } });
+  return {
+    ...shell,
+    getCoordinator: () => mockReadiness.coordinatorReady ? shell.getCoordinator() : undefined,
+  };
+});
 
 /* ------------------------------------------------------------------ */
 /*  Execute behavior tests                                            */
@@ -30,6 +35,7 @@ vi.mock("../../src/shell.js", () => shellMock({
 describe("AgentStatus tool execute behavior", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockReadiness.coordinatorReady = true;
   });
 
   it("returns cancellation before reading agent status", async () => {
@@ -39,8 +45,25 @@ describe("AgentStatus tool execute behavior", () => {
 
     const result = await executeAgentStatusTool("call_cancelled", {}, controller.signal, undefined, {} as any);
 
-    expect(result).toMatchObject({ isError: true, content: [{ text: "Agent execution cancelled" }] });
+    expect(result).toEqual({
+      content: [{ type: "text", text: "Agent execution cancelled" }],
+      isError: true,
+    });
+    expect(Object.hasOwn(result, "details")).toBe(false);
     expect(mockListAgents).not.toHaveBeenCalled();
+  });
+
+  it("returns the unavailable error without a details property", async () => {
+    mockReadiness.coordinatorReady = false;
+    const { executeAgentStatusTool } = await import("../../src/agents/agent-status.js");
+
+    const result = await executeAgentStatusTool("call_unavailable", {}, undefined, undefined, {} as any);
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "Agent status is unavailable until the root session is ready" }],
+      isError: true,
+    });
+    expect(Object.hasOwn(result, "details")).toBe(false);
   });
 
   it("returns empty state message when no agents exist", async () => {
@@ -59,6 +82,7 @@ describe("AgentStatus tool execute behavior", () => {
     expect(result.content[0].text).toContain("No agents");
     expect(result.content[0].text).toContain("Don't poll");
     expect(result.isError).toBeUndefined();
+    expect(Object.hasOwn(result, "details")).toBe(false);
   });
 
   it("formats each agent as [{shortId}] ({type}) {status}", async () => {
@@ -90,6 +114,7 @@ describe("AgentStatus tool execute behavior", () => {
     expect(text).toMatch(/\[[a-z0-9]{8}\] \(builder\) running/);
     expect(text).toContain("Mode: Background | Run: Continued");
     expect(text).toContain("Don't poll");
+    expect(Object.hasOwn(result, "details")).toBe(false);
   });
 
   it("separates multiple agents with commas", async () => {

@@ -18,7 +18,6 @@ import {
 } from "./types.js";
 
 const CONFIG_DIR = getAgentDir();
-const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lean.json");
 
 export const DEFAULT_CONCURRENCY: SubagentsConfig["concurrency"] = {
   default: DEFAULT_CONCURRENCY_DEFAULT,

@@ -5,14 +5,16 @@
  * User agents override defaults with the same name. Disabled agents are kept but excluded from spawning.
  */
 
-import { scanAgentFilesInDir, mergeAgents } from "./agent-discovery.js";
+import { mergeAgents, snapshotAgentConfig } from "./agent-discovery.js";
+import { scanAgentFilesInDir } from "./agent-directory-scan.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import type { AgentConfig } from "./types.js";
-import { retainAgentDescription } from "./agent-string-limits.js";
 import { resolveAgentConfig } from "./agent-tool-policy.js";
 import type { ResolvedAgentConfig } from "./agent-tool-policy.js";
 export { BUILTIN_TOOL_NAMES, EXCLUDED_TOOL_NAMES, resolveAgentConfig, resolveSessionAllowedTools, resolveVisibleTools } from "./agent-tool-policy.js";
 export type { ResolvedAgentConfig } from "./agent-tool-policy.js";
+/** Preserve the established registry import path for detached AgentConfig snapshots. */
+export { snapshotAgentConfig } from "./agent-discovery.js";
 
 /** Unified runtime registry of all agents (defaults + user-defined). */
 const agents = new Map<string, AgentConfig>();
@@ -301,21 +303,6 @@ export async function resolveWorktreeAgent(
   const localAgents = await discoverWorktreeAgents(worktreeDir, options);
   const type = resolveTypeInCatalog(localAgents, name);
   return type ? { type, config: localAgents.get(type)! } : undefined;
-}
-
-/** Return a detached config snapshot safe to retain while a run is queued. */
-export function snapshotAgentConfig(config: AgentConfig): AgentConfig {
-  return {
-    ...config,
-    description: retainAgentDescription(config.description),
-    registeredTools: config.registeredTools && [...config.registeredTools],
-    tools: Array.isArray(config.tools) ? [...config.tools] : config.tools,
-    excludeTools: config.excludeTools && [...config.excludeTools],
-    extensions: Array.isArray(config.extensions) ? [...config.extensions] : config.extensions,
-    excludeExtensions: config.excludeExtensions && [...config.excludeExtensions],
-    skills: Array.isArray(config.skills) ? [...config.skills] : config.skills,
-    excludeSkills: config.excludeSkills && [...config.excludeSkills],
-  };
 }
 
 /** Resolve a canonical role name case-insensitively. Returns the catalog key or undefined. */

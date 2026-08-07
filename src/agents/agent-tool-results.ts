@@ -4,7 +4,7 @@ import type { AgentRecord } from "../types.js";
 import {
   type AgentCallRenderMetadata,
   withAgentCallRenderMetadata,
-} from "./agent-renderer.js";
+} from "./agent-render-format.js";
 import type { AgentRenderMetadataBridge } from "./agent-render-bridge.js";
 
 export type { AgentCallRenderMetadata };

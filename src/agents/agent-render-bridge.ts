@@ -1,9 +1,11 @@
 import {
   type AgentCallRenderMetadata,
   type AgentRenderToolName,
+  agentCallRenderMetadataEqual,
   getAgentCallRenderMetadata,
+  mergeAgentCallRenderMetadata,
   withAgentCallRenderMetadata,
-} from "./agent-renderer.js";
+} from "./agent-render-format.js";
 
 interface BridgeEntry {
   metadata?: AgentCallRenderMetadata;
@@ -25,16 +27,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isRenderableToolName(value: unknown): value is AgentRenderToolName {
   return value === "Agent" || value === "AgentContinue" || value === "StopAgent";
-}
-
-function sameMetadata(a: AgentCallRenderMetadata | undefined, b: AgentCallRenderMetadata): boolean {
-  return a?.role === b.role
-    && a?.model === b.model
-    && a?.thinking === b.thinking
-    && a?.prompt === b.prompt
-    && a?.agentId === b.agentId
-    && a?.mode === b.mode
-    && a?.kind === b.kind;
 }
 
 /**
@@ -72,18 +64,8 @@ export class AgentRenderMetadataBridge {
     // prevents a late update from a disposed session recreating stale state.
     if (!entry) return;
     const previous = entry.metadata;
-    const merged: AgentCallRenderMetadata = {
-      role: metadata.role || previous?.role || "—",
-      model: metadata.model ?? previous?.model,
-      thinking: metadata.thinking ?? previous?.thinking,
-      prompt: metadata.prompt ?? previous?.prompt ?? "",
-      ...(metadata.agentId ?? previous?.agentId
-        ? { agentId: metadata.agentId ?? previous?.agentId }
-        : {}),
-      ...(metadata.mode ?? previous?.mode ? { mode: metadata.mode ?? previous?.mode } : {}),
-      ...(metadata.kind ?? previous?.kind ? { kind: metadata.kind ?? previous?.kind } : {}),
-    };
-    if (!sameMetadata(previous, merged)) entry.metadata = merged;
+    const merged = mergeAgentCallRenderMetadata(previous, metadata);
+    if (!agentCallRenderMetadataEqual(previous, merged)) entry.metadata = merged;
     this.entries.set(toolCallId, entry);
   }
 
@@ -126,7 +108,7 @@ export class AgentRenderMetadataBridge {
     // Later tool_result handlers may replace details after this hook runs.
     const metadata = entry?.metadata;
     if (!metadata) return undefined;
-    if (sameMetadata(eventMetadata, metadata)) return undefined;
+    if (agentCallRenderMetadataEqual(eventMetadata, metadata)) return undefined;
     return { details: withAgentCallRenderMetadata(isRecord(event.details) ? event.details : undefined, metadata) };
   }
 
@@ -151,7 +133,7 @@ export class AgentRenderMetadataBridge {
 
     const metadata = entry.metadata;
     this.entries.delete(toolCallId);
-    if (!metadata || sameMetadata(eventMetadata, metadata)) return undefined;
+    if (!metadata || agentCallRenderMetadataEqual(eventMetadata, metadata)) return undefined;
 
     return {
       message: {

@@ -1,8 +1,12 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { executeAgentTool, executeContinueAgentTool, executeStopAgentTool } from "./agents/tool-execution.js";
+import { executeAgentTool } from "./agents/tool-execution.js";
+import {
+  executeAgentStatusTool,
+  executeContinueAgentTool,
+  executeStopAgentTool,
+} from "./agents/agent-control-execution.js";
 import type { AgentRenderMetadataBridge } from "./agents/agent-render-bridge.js";
-import { executeAgentStatusTool } from "./agents/agent-status.js";
 import {
   MAX_AGENT_ID_BYTES,
   MAX_AGENT_PROMPT_BYTES,

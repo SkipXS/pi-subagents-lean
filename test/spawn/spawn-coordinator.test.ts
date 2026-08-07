@@ -25,6 +25,8 @@ vi.mock("../../src/spawn/worktree-validator.js", () => ({
 
 vi.mock("../../src/agents/agent-runner.js", () => ({
   runAgent: mockRunAgent,
+}));
+vi.mock("../../src/agents/agent-session-runtime.js", () => ({
   executeAgentTurn: mockExecuteAgentTurn,
 }));
 

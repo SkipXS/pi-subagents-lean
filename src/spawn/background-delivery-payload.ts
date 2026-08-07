@@ -99,16 +99,20 @@ export function captureBackgroundPayload(
   });
 }
 
+/** Convert a thrown delivery value into bounded diagnostic text. */
+function retainDeliveryDiagnostic(error: unknown, maxBytes: number): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return truncateUtf8(message, maxBytes);
+}
+
 /** Convert a thrown sendMessage value into the retained diagnostic text. */
 export function retainBackgroundDeliveryError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return truncateUtf8(message, MAX_BACKGROUND_ERROR_BYTES);
+  return retainDeliveryDiagnostic(error, MAX_BACKGROUND_ERROR_BYTES);
 }
 
 /** Convert a delivery error into the smaller per-record failure projection. */
 export function retainBackgroundDeliveryFailure(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return truncateUtf8(message, MAX_BACKGROUND_FAILURE_BYTES);
+  return retainDeliveryDiagnostic(error, MAX_BACKGROUND_FAILURE_BYTES);
 }
 
 function serializedUtf8ByteLength(value: unknown): number {

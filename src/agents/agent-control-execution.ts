@@ -4,7 +4,8 @@ import type { AgentRecord } from "../types.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 import { buildAgentDetails } from "./agent-details.js";
 import type { AgentRenderMetadataBridge } from "./agent-render-bridge.js";
-import { validateAgentId, validateAgentPrompt } from "./agent-string-limits.js";
+import { MAX_BACKGROUND_FAILURE_BYTES } from "../spawn/background-delivery-diagnostics.js";
+import { truncateUtf8, validateAgentId, validateAgentPrompt } from "./agent-string-limits.js";
 import type { AgentManager } from "./agent-manager.js";
 import {
   agentControlRenderMetadata,
@@ -21,7 +22,11 @@ import {
   getCoordinator,
   getManager,
 } from "../shell.js";
-import { formatAgentIdFirstContent } from "./execution-display.js";
+import {
+  executionKind,
+  formatAgentIdFirstContent,
+  formatAgentStatusLine,
+} from "./execution-display.js";
 
 interface ControlRecordResolution {
   record?: AgentRecord;
@@ -78,6 +83,58 @@ function formatRunningAgents(manager: AgentManager): string {
   return agents
     .map((a) => `${typeof a.id === "string" ? a.id.slice(0, SHORT_ID_LENGTH) : "—"} (${a.display?.type ?? "—"})`)
     .join(", ");
+}
+
+/** Format a single agent record for the AgentStatus control tool. */
+function formatAgentStatus(record: AgentRecord): string {
+  const executions = record.stats?.executions;
+  const latest = executions?.at(-1);
+  const statusLine = formatAgentStatusLine(
+    record.id,
+    record.display.type,
+    record.lifecycle.status,
+    latest
+      ? { mode: latest.mode, kind: executionKind(latest, (executions?.length ?? 1) - 1) }
+      : undefined,
+    record.delivery?.state,
+  );
+  const failure = record.delivery?.lastFailure?.lastError;
+  return typeof failure === "string" && failure.length > 0
+    ? `${statusLine} delivery-failure:${truncateUtf8(failure, MAX_BACKGROUND_FAILURE_BYTES)}`
+    : statusLine;
+}
+
+/** Keep AgentStatus's established result shape without an implicit details key. */
+function agentStatusResult(text: string, isError = false) {
+  return {
+    content: [{ type: "text", text }],
+    ...(isError ? { isError: true as const } : {}),
+  };
+}
+
+/** Execute the AgentStatus control tool without changing its text contract. */
+export async function executeAgentStatusTool(
+  _toolCallId: string,
+  _params: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  _onUpdate: ((update: any) => void) | undefined,
+  _ctx: ExtensionContext,
+): Promise<any> {
+  if (signal?.aborted) return agentStatusResult("Agent execution cancelled", true);
+
+  const manager = getManager();
+  if (!manager || !getCoordinator()) {
+    return agentStatusResult("Agent status is unavailable until the root session is ready", true);
+  }
+  const agents = manager.listAgents();
+  const nudge = "Don't poll — you'll receive notifications when agents complete.";
+
+  if (agents.length === 0) {
+    return agentStatusResult(`No agents running or completed.\n\n${nudge}`);
+  }
+
+  const formatted = agents.map(formatAgentStatus).join(", ");
+  return agentStatusResult(`${formatted}\n\n${nudge}`);
 }
 
 /**
