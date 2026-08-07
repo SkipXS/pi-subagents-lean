@@ -8,7 +8,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { buildSkillsOverride } from "../src/agents/agent-runner.js";
+import { buildSkillsOverride } from "../src/agents/agent-runner-policy.js";
 
 type SkillPolicy = {
   skills: true | string[] | false;

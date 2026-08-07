@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../../src/types.js";
-import { ExecutionTelemetry } from "../../src/agents/execution-telemetry.js";
+import {
+  ExecutionTelemetry,
+  MAX_COMPACTION_REASON_TEXT_BYTES,
+  MAX_RETAINED_COMPACTION_REASONS,
+} from "../../src/agents/execution-telemetry.js";
+import { utf8ByteLength } from "../../src/utils.js";
 
 function makeRecord(session: any = {}): AgentRecord {
   return {
@@ -53,6 +58,70 @@ describe("ExecutionTelemetry", () => {
     callbacks.onAssistantUsage({ input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
     expect(record.stats.lifetimeUsage.input).toBe(35);
     expect(onAssistantUsage).toHaveBeenCalledOnce();
+  });
+
+  it("bounds newest compaction metadata and caps nested multibyte strings without changing fields", () => {
+    const huge = "界".repeat(5_000);
+    const record = makeRecord();
+    record.stats.compactionReasons = [{
+      reason: "threshold",
+      tokensBefore: 1,
+      summary: huge,
+      error: huge,
+      nested: { text: huge, count: 7 },
+    } as any];
+    const telemetry = new ExecutionTelemetry((candidate) => candidate === record);
+    telemetry.initializeRecord(record);
+
+    const existing = record.stats.compactionReasons![0] as any;
+    for (const value of [existing.summary, existing.error, existing.nested.text]) {
+      expect(utf8ByteLength(value)).toBeLessThanOrEqual(MAX_COMPACTION_REASON_TEXT_BYTES);
+      expect(value).toContain("[TRUNCATED]");
+    }
+    expect(existing.nested.count).toBe(7);
+
+    const callbacks = telemetry.createCallbacks(record, {}, "execution-1");
+    for (let index = 0; index < MAX_RETAINED_COMPACTION_REASONS + 2; index++) {
+      callbacks.onCompaction({ reason: "threshold", tokensBefore: index + 1 });
+    }
+
+    const reasons = record.stats.compactionReasons!;
+    expect(reasons).toHaveLength(MAX_RETAINED_COMPACTION_REASONS);
+    expect(reasons[0]!.tokensBefore).toBe(3);
+    expect(reasons.at(-1)!.tokensBefore).toBe(MAX_RETAINED_COMPACTION_REASONS + 2);
+  });
+
+  it("caps compaction summary, boundary id, and leaf id at UTF-8 byte boundaries", () => {
+    const huge = "😀界".repeat(4_000);
+    const session = {
+      sessionManager: {
+        getLeafEntry: () => ({
+          type: "compaction",
+          id: huge,
+          tokensBefore: 900,
+          summary: huge,
+          firstKeptEntryId: huge,
+        }),
+      },
+    };
+    const record = makeRecord(session);
+    const telemetry = new ExecutionTelemetry((candidate) => candidate === record);
+    telemetry.initializeRecord(record);
+    const callbacks = telemetry.createCallbacks(record, {}, "execution-1");
+
+    callbacks.onCompaction({
+      reason: "threshold",
+      tokensBefore: 900,
+      summary: huge,
+      firstKeptEntryId: huge,
+    });
+
+    const metadata = record.stats.compactionReasons![0]!;
+    for (const key of ["summary", "firstKeptEntryId", "entryId"] as const) {
+      const value = metadata[key]!;
+      expect(utf8ByteLength(value)).toBeLessThanOrEqual(MAX_COMPACTION_REASON_TEXT_BYTES);
+      expect(value).toContain("[TRUNCATED]");
+    }
   });
 
   it("persists context snapshots and compaction metadata through guarded callbacks", () => {

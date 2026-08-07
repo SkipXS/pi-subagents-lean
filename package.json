@@ -53,7 +53,7 @@
     "npm:production:smoke": "bun scripts/npm-production-smoke.ts",
     "release:validate": "bun scripts/release-validate.ts",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage --maxWorkers=1",
+    "test:coverage": "vitest run --coverage --maxWorkers=2",
     "test:watch": "vitest"
   },
   "pi": {

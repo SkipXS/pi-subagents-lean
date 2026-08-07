@@ -1,6 +1,8 @@
 import type { AgentRecord } from "../types.js";
 import { executionKind } from "./execution-display.js";
 import { getSessionUsageSnapshot } from "./usage.js";
+import { retainAgentDescription, retainAgentError, retainAgentText, truncateUtf8 } from "./agent-string-limits.js";
+import { MAX_BACKGROUND_FAILURE_BYTES } from "../spawn/background-delivery-diagnostics.js";
 
 /**
  * Build a details Record from an AgentRecord, controlled by options.
@@ -19,11 +21,33 @@ export function buildAgentDetails(
   const details: Record<string, unknown> = {
     agentId: record.id,
     type: record.display.type,
-    description: record.display.description,
+    description: typeof record.display.description === "string"
+      ? retainAgentDescription(record.display.description)
+      : record.display.description,
   };
 
   if (record.display.worktreePath) {
     details.worktreePath = record.display.worktreePath;
+  }
+
+  if (record.delivery) {
+    const delivery = record.delivery;
+    details.delivery = {
+      state: delivery.state,
+      attempts: delivery.attempts,
+      ...(delivery.lastAttemptAt !== undefined ? { lastAttemptAt: delivery.lastAttemptAt } : {}),
+      ...(delivery.lastError !== undefined ? { lastError: retainAgentError(delivery.lastError) } : {}),
+      ...(delivery.lastFailure !== undefined ? {
+        lastFailure: {
+          executionId: delivery.lastFailure.executionId,
+          attempts: delivery.lastFailure.attempts,
+          ...(delivery.lastFailure.lastAttemptAt !== undefined
+            ? { lastAttemptAt: delivery.lastFailure.lastAttemptAt }
+            : {}),
+          lastError: truncateUtf8(delivery.lastFailure.lastError, MAX_BACKGROUND_FAILURE_BYTES),
+        },
+      } : {}),
+    };
   }
 
   if (opts?.includeStatus) {
@@ -108,10 +132,10 @@ export function buildAgentDetails(
         mode: current.mode,
         kind: currentKind,
         status: current.status,
-        ...(current.responseText !== undefined ? { responseText: current.responseText } : {}),
+        ...(current.responseText !== undefined ? { responseText: retainAgentText(current.responseText) } : {}),
         ...(current.usage !== undefined ? { usage: current.usage } : {}),
         ...(current.compactionCount !== undefined ? { compactionCount: current.compactionCount } : {}),
-        ...(current.error !== undefined ? { error: current.error } : {}),
+        ...(current.error !== undefined ? { error: retainAgentError(current.error) } : {}),
       };
     }
   }

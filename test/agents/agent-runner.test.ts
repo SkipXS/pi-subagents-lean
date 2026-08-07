@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fakeCtx, fakePi as makeFakePi } from "../fixtures.ts";
+import { acceptedSpawnFixture, fakeCtx, fakePi as makeFakePi } from "../fixtures.ts";
 import type { AgentConfig } from "../../src/agents/types.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { acceptResolvedSpawn, snapshotResolvedSpawn } from "../../src/spawn/spawn-contract.js";
@@ -41,11 +41,13 @@ const mockModules = vi.hoisted(() => ({
   mockBuildAgentPrompt: vi.fn(),
   mockExtractText: vi.fn(),
   mockLoadSkillMeta: vi.fn().mockReturnValue([]),
+  mockLoadSkillMetaAsync: vi.fn().mockResolvedValue([]),
   mockCreateAgentSession: vi.fn(),
   mockDefaultResourceLoader: MockDefaultResourceLoader,
   mockGetAgentDir: vi.fn(() => "/home/test/.pi/agent"),
   mockSettingsManager: { id: "shared-settings-manager" },
   mockLoadProjectContextFiles: vi.fn().mockReturnValue([]),
+  mockLoadBoundedContextFiles: vi.fn().mockResolvedValue([]),
   mockIncludeContextFiles: true as boolean,
   loaderReloadFailure: undefined as Error | undefined,
   loaderExtensionsFailure: undefined as Error | undefined,
@@ -83,6 +85,11 @@ vi.mock("../../src/prompt/context.js", () => ({
 
 vi.mock("../../src/prompt/skill-loader.js", () => ({
   loadSkillMeta: mockModules.mockLoadSkillMeta,
+  loadSkillMetaAsync: mockModules.mockLoadSkillMetaAsync,
+}));
+
+vi.mock("../../src/agents/context-file-loader.js", () => ({
+  loadBoundedContextFiles: mockModules.mockLoadBoundedContextFiles,
 }));
 
 vi.mock("../../src/shell.js", () => ({
@@ -115,12 +122,9 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 
 // --- Import the module under test ---
 
-import {
-  buildSkillsOverride,
-  executeAgentTurn,
-  runAgent,
-  subscribeToSessionEvents,
-} from "../../src/agents/agent-runner.js";
+import { runAgent as runAcceptedAgent } from "../../src/agents/agent-runner.js";
+import { buildSkillsOverride } from "../../src/agents/agent-runner-policy.js";
+import { executeAgentTurn, subscribeToSessionEvents } from "../../src/agents/agent-session-runtime.js";
 
 const defaultConfig = {
   description: "Test agent",
@@ -138,6 +142,48 @@ const defaultAgentConfig = {
   tools: undefined as (true | string[] | false | undefined),
 };
 
+/** Supply a real accepted contract for each runner test invocation. */
+function runAgent(
+  ctx: any,
+  type: string,
+  prompt: string,
+  options: Record<string, any> = {},
+): Promise<any> {
+  if (options.acceptedSpawn) return runAcceptedAgent(ctx, type, prompt, options as any);
+
+  const agentConfig = options.agentConfig ?? {
+    ...defaultAgentConfig,
+    ...(mockModules.mockGetAgentConfig() ?? {}),
+    ...(mockModules.mockGetConfig() ?? {}),
+    name: type,
+  };
+  const runtimeSettings = options.runtimeSettings ?? {
+    agent: {
+      includeContextFiles: mockModules.mockIncludeContextFiles,
+      disableDefaultAgents: false,
+      orchestrationPrompt: true,
+    },
+  };
+  const acceptedSpawn = acceptedSpawnFixture({
+    type,
+    prompt,
+    description: options.description ?? prompt,
+    runInBackground: options.runInBackground ?? options.isBackground === true,
+    agentConfig,
+    runtimeSettings,
+    projectTrusted: options.projectTrusted === true,
+    model: options.model,
+    modelKey: options.modelKey,
+    thinkingLevel: options.thinkingLevel,
+    worktreePath: options.worktreePath ?? options.cwd,
+    worktreeParentCwd: options.worktreeParentCwd,
+    worktreeSelectionPath: options.worktreeSelectionPath,
+    invocation: options.invocation,
+    signal: options.signal,
+  });
+  return runAcceptedAgent(ctx, type, prompt, { ...options, acceptedSpawn } as any);
+}
+
 /**
  * Reset all mocks to their default state.
  */
@@ -146,6 +192,7 @@ function resetMocks() {
   mockModules.clearLoaderOpts();
   mockModules.clearLoaderExtensions();
   mockModules.mockIncludeContextFiles = true;
+  mockModules.mockLoadBoundedContextFiles.mockResolvedValue([]);
   mockModules.loaderReloadFailure = undefined;
   mockModules.loaderExtensionsFailure = undefined;
   mockModules.mockLoadProjectContextFiles.mockReturnValue([]);
@@ -154,6 +201,8 @@ function resetMocks() {
   mockModules.mockGetAgentConfig.mockReturnValue({ ...defaultAgentConfig });
   mockModules.mockBuildAgentPrompt.mockReturnValue("system prompt");
   mockModules.mockExtractText.mockReturnValue("");
+  mockModules.mockLoadSkillMeta.mockReturnValue([]);
+  mockModules.mockLoadSkillMetaAsync.mockResolvedValue([]);
   mockModules.mockGetAgentDir.mockReturnValue("/home/test/.pi/agent");
   mockModules.mockManager = null;
   mockModules.mockCoordinator = null;
@@ -729,9 +778,10 @@ describe("runAgent — skill selection and exclusion", () => {
 
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, projectTrusted: true });
 
-    expect(mockModules.mockLoadSkillMeta).toHaveBeenCalledWith(
+    expect(mockModules.mockLoadSkillMetaAsync).toHaveBeenCalledWith(
       ["visible", "blocked"], expect.any(String), excludeSkills,
     );
+    expect(mockModules.mockLoadSkillMeta).not.toHaveBeenCalled();
     const loader = mockModules.getLoaderOpts();
     expect(loader.noSkills).toBe(true);
     expect(loader.skillsOverride({
@@ -784,8 +834,11 @@ describe("runAgent — skill selection and exclusion", () => {
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
 
     expect(mockModules.mockLoadSkillMeta).not.toHaveBeenCalled();
+    expect(mockModules.mockLoadSkillMetaAsync).toHaveBeenCalledWith(
+      true, expect.any(String), ["blocked"], false,
+    );
     const loader = mockModules.getLoaderOpts();
-    expect(loader.noSkills).toBe(false);
+    expect(loader.noSkills).toBe(true);
     expect(loader.skillsOverride({
       skills: [{ name: "allowed" }, { name: "blocked" }],
       diagnostics: ["kept"],
@@ -1512,13 +1565,15 @@ describe("runAgent — context file gating", () => {
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
     mockModules.mockIncludeContextFiles = true;
-    mockModules.mockLoadProjectContextFiles.mockReturnValue([
+    mockModules.mockLoadBoundedContextFiles.mockResolvedValue([
       { path: "AGENTS.md", content: "project instructions" },
     ]);
 
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, projectTrusted: true });
 
-    expect(mockModules.mockLoadProjectContextFiles).toHaveBeenCalled();
+    expect(mockModules.mockLoadBoundedContextFiles).toHaveBeenCalledWith(expect.objectContaining({
+      projectTrusted: true,
+    }));
     expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
@@ -1537,7 +1592,7 @@ describe("runAgent — context file gating", () => {
 
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, projectTrusted: true });
 
-    expect(mockModules.mockLoadProjectContextFiles).not.toHaveBeenCalled();
+    expect(mockModules.mockLoadBoundedContextFiles).not.toHaveBeenCalled();
     expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
@@ -1551,14 +1606,12 @@ describe("runAgent — context file gating", () => {
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
     mockModules.mockIncludeContextFiles = true;
-    mockModules.mockLoadProjectContextFiles.mockImplementation(() => {
-      throw new Error("permission denied");
-    });
+    mockModules.mockLoadBoundedContextFiles.mockRejectedValue(new Error("permission denied"));
 
     // Should not throw
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, projectTrusted: true });
 
-    expect(mockModules.mockLoadProjectContextFiles).toHaveBeenCalled();
+    expect(mockModules.mockLoadBoundedContextFiles).toHaveBeenCalled();
     // buildAgentPrompt still called (without contextFiles)
     expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalled();
   });
@@ -1568,13 +1621,13 @@ describe("runAgent — context file gating", () => {
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
     mockModules.mockIncludeContextFiles = true;
-    mockModules.mockLoadProjectContextFiles.mockReturnValue([
-      { path: "AGENTS.md", content: "must stay out" },
-    ]);
+    mockModules.mockLoadBoundedContextFiles.mockResolvedValue([]);
 
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
 
-    expect(mockModules.mockLoadProjectContextFiles).not.toHaveBeenCalled();
+    expect(mockModules.mockLoadBoundedContextFiles).toHaveBeenCalledWith(expect.objectContaining({
+      projectTrusted: false,
+    }));
     expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
@@ -1592,10 +1645,15 @@ describe("runAgent — context file gating", () => {
       session.getActiveToolNames.mockReturnValue(["read"]);
       mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
       mockModules.mockGetAgentDir.mockReturnValue(root);
+      mockModules.mockLoadBoundedContextFiles.mockResolvedValue([
+        { path: join(root, "AGENTS.md"), content: "global user instructions" },
+      ]);
 
       await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
 
-      expect(mockModules.mockLoadProjectContextFiles).not.toHaveBeenCalled();
+      expect(mockModules.mockLoadBoundedContextFiles).toHaveBeenCalledWith(expect.objectContaining({
+        projectTrusted: false,
+      }));
       expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
@@ -1877,6 +1935,7 @@ describe("runAgent — agent config snapshot", () => {
       model: model as any,
       modelKey: "accepted/model",
       thinkingLevel: "high",
+      projectTrusted: false,
     }));
     mockModules.mockGetConfig.mockImplementation(() => { throw new Error("config registry must not be read"); });
     mockModules.mockGetAgentConfig.mockImplementation(() => { throw new Error("agent registry must not be read"); });
@@ -1901,12 +1960,6 @@ describe("runAgent — agent config snapshot", () => {
     expect(session.prompt).toHaveBeenCalledWith("accepted prompt");
   });
 
-  it("rejects an unknown type instead of applying a fallback definition", async () => {
-    mockModules.mockGetAgentConfig.mockReturnValue(undefined);
-
-    await expect(runAgent(fakeCtx(), "unknown", "work", { pi: fakePi }))
-      .rejects.toThrow("Unknown agent type: unknown");
-  });
 });
 
 /* ------------------------------------------------------------------ */

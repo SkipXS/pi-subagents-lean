@@ -9,14 +9,24 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SubagentsConfig } from "./types.js";
-import { normalizeAgentEntries, normalizeAgentSettingsOverrides } from "./types.js";
+import {
+  DEFAULT_CONCURRENCY_DEFAULT,
+  MAX_SUBAGENTS_CONFIG_BYTES,
+  normalizeAgentEntries,
+  normalizeAgentSettingsOverrides,
+  normalizeConcurrencyDefault,
+} from "./types.js";
 
 const CONFIG_DIR = getAgentDir();
 const CONFIG_PATH = path.join(CONFIG_DIR, "subagents-lean.json");
 
-export const DEFAULT_CONCURRENCY: SubagentsConfig["concurrency"] = { default: 4 };
+export const DEFAULT_CONCURRENCY: SubagentsConfig["concurrency"] = {
+  default: DEFAULT_CONCURRENCY_DEFAULT,
+};
 /** Persisted configuration changes fail promptly rather than block on lock contention. */
 export const CONFIG_LOCK_TIMEOUT_MS = 0;
+/** Publicly named config-file byte boundary used by load and persistence. */
+export const MAX_CONFIG_FILE_BYTES = MAX_SUBAGENTS_CONFIG_BYTES;
 
 const DEFAULT_AGENT: SubagentsConfig["agent"] = {
   includeContextFiles: true,
@@ -215,7 +225,11 @@ function loadResult(configPath: string, backupPath: string): ConfigLoadResult {
 
   const backup = readCandidate(backupPath);
   if (backup.state === "valid") {
-    return { config: backup.config!, health: "using-backup", canRepair: primary.state === "invalid" };
+    return {
+      config: backup.config!,
+      health: "using-backup",
+      canRepair: primary.state === "invalid" && primary.bytes !== undefined,
+    };
   }
   return { config: defaultConfig(), health: "unrecoverable", canRepair: false };
 }
@@ -223,7 +237,26 @@ function loadResult(configPath: string, backupPath: string): ConfigLoadResult {
 function readCandidate(filePath: string): Candidate {
   let bytes: Buffer;
   try {
+    // Use metadata when the host exposes it so an oversized regular file is
+    // rejected before readFileSync. The encoded-buffer check below remains the
+    // authoritative parse boundary for races and lightweight adapters.
+    const fsAdapter = fs as unknown as Record<string, unknown>;
+    const lstat = Object.hasOwn(fsAdapter, "lstatSync")
+      ? fsAdapter.lstatSync as ((path: string) => unknown) | undefined
+      : undefined;
+    if (typeof lstat === "function") {
+      try {
+        const stats = lstat(filePath) as { isFile?: unknown; size?: unknown } | undefined;
+        if (typeof stats?.isFile === "function" && stats.isFile() && typeof stats.size === "number") {
+          if (!Number.isSafeInteger(stats.size) || stats.size < 0) return { state: "unreadable" };
+          if (stats.size > MAX_CONFIG_FILE_BYTES) return { state: "invalid" };
+        }
+      } catch {
+        // Let readFileSync classify missing/unreadable files and adapters.
+      }
+    }
     bytes = readBytes(filePath);
+    if (bytes.byteLength > MAX_CONFIG_FILE_BYTES) return { state: "invalid" };
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "ENOENT" ? { state: "missing" } : { state: "unreadable" };
   }
@@ -246,7 +279,7 @@ function defaultConfig(): SubagentsConfig {
 
 function normalizeConfig(raw: SubagentsConfig): SubagentsConfig {
   const concurrency: SubagentsConfig["concurrency"] = {
-    default: raw.concurrency?.default ?? DEFAULT_CONCURRENCY.default,
+    default: normalizeConcurrencyDefault(raw.concurrency?.default),
   };
   const rawAgent = { ...(raw.agent ?? {}) } as Record<string, unknown>;
   const agent = {

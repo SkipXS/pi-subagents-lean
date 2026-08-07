@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentActivitySnapshot } from "./agent-manager.js";
-import type { DeliveryActivitySnapshot } from "../spawn/spawn-coordinator.js";
+import type { DeliveryActivitySnapshot } from "../spawn/background-delivery.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 
 /** Stable key used for the subagent activity entry in the host footer. */

@@ -2,11 +2,11 @@
  * Type definitions for the subagent system.
  */
 
-import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentOutputLog } from "./agents/output-file.js";
 import type { ContextStats, LifetimeUsage, AgentUsage } from "./agents/usage.js";
-import type { SubagentType, AgentInvocation, AgentConfig } from "./agents/types.js";
+import type { SubagentType, AgentInvocation } from "./agents/types.js";
 export type { AgentConfig } from "./agents/types.js";
 
 /** Thinking level for agent models (sourced from @earendil-works/pi-ai). */
@@ -18,19 +18,11 @@ export interface ToolActivity {
   toolName: string;
 }
 
-/**
- * Resolved model tunables shared by every spawn/run shape (RunOptions,
- * SpawnOptions, SpawnIntent). Add a tunable here once and it flows through
- * the whole chain.
- */
-export interface RunTunables {
-  model?: Model<any>;
-  thinkingLevel?: ThinkingLevel;
-}
-
 export interface AgentRecord {
   id: string;
+  /** Retained result projection; UTF-8 bounded at 64 KiB with `[TRUNCATED]`. */
   result?: string;
+  /** Retained error projection; UTF-8 bounded at 8 KiB with `[TRUNCATED]`. */
   error?: string;
   /** Background-result handoff state; absent for foreground agents. */
   delivery?: BackgroundDelivery;
@@ -50,37 +42,13 @@ export interface EnvInfo {
   platform: string;
 }
 
-/**
- * Streaming/callback surface shared by RunOptions and SpawnOptions.
- * Bridges agent-runner events to record tracking and result observers.
- */
+/** Streaming/callback surface shared by the runner and continuation turns. */
 export interface RunCallbacks {
   onToolActivity?: (activity: ToolActivity) => void;
   onTextDelta?: (delta: string, fullText: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
   onAssistantUsage?: (usage: AgentUsage) => void;
   onCompaction?: (info: CompactionInfo) => void;
-}
-
-/**
- * Coordinator-side spawn config shared by SpawnOptions and SpawnIntent.
- * The resolved run params that both the manager and coordinator agree on;
- * extends RunTunables with metadata and identity fields.
- */
-export interface SpawnConfig extends RunTunables {
-  /** Detached definition resolved at selection/tool invocation time. */
-  agentConfig?: AgentConfig;
-  description: string;
-  modelKey?: string;
-  worktreePath?: string;
-  worktreeLabel?: string;
-  /** Parent repository cwd used to revalidate a selected worktree at runner start. */
-  worktreeParentCwd?: string;
-  /** Trust snapshot captured by the parent tool preflight. Legacy callers default to false. */
-  projectTrusted?: boolean;
-  /** Original selected path retained to detect a later symlink/path retarget. */
-  worktreeSelectionPath?: string;
-  invocation?: AgentInvocation;
 }
 
 /** How many characters of agent ID to show in status output. */
@@ -138,7 +106,7 @@ export type AgentExecutionKind = "new" | "continued";
 export interface AgentExecutionSummary {
   /** Manager-assigned execution id; unique within the record. */
   id: string;
-  /** Prompt that started this execution. */
+  /** Retained prompt projection, capped at 64 KiB UTF-8; active tasks may hold the full accepted input separately. */
   prompt: string;
   mode: AgentExecutionMode;
   /** Optional so records persisted before this field was introduced remain valid. */
@@ -147,25 +115,38 @@ export interface AgentExecutionSummary {
   status: AgentStatus;
   startedAt: number;
   completedAt?: number;
-  /** Assistant text generated during this execution (trimmed). */
+  /** Retained assistant text projection, UTF-8 bounded at 64 KiB. */
   responseText?: string;
-  /** Text delivered to the caller (foreground result or background notification). */
+  /** Retained caller-delivery projection, UTF-8 bounded at 64 KiB. */
   deliveredText?: string;
   /** Usage delta accumulated during this execution only. */
   usage?: AgentUsage;
   /** Compactions that occurred during this execution only. */
   compactionCount?: number;
-  /** Terminal error for this execution, when failed. */
+  /** Retained terminal error projection, UTF-8 bounded at 8 KiB. */
   error?: string;
 }
 
-/** Delivery diagnostics retained with a background result until session shutdown. */
+/** Payload-free failure projection retained on a record across delivery generations. */
+export interface BackgroundDeliveryFailure {
+  /** Execution whose automatic delivery failed. */
+  executionId: string;
+  attempts: number;
+  lastAttemptAt?: number;
+  /** UTF-8-bounded to 4 KiB; oversized values carry `[TRUNCATED]`. */
+  lastError: string;
+}
+
+/** Delivery diagnostics retained with a background result while its record is retained. */
 export interface BackgroundDelivery {
   state: BackgroundDeliveryState;
   /** Number of automatic sendMessage attempts; failed delivery is not retried. */
   attempts: number;
   lastAttemptAt?: number;
+  /** UTF-8-bounded delivery diagnostic for the current/latest claim. */
   lastError?: string;
+  /** Latest claim-ordered failure, including failures from older claims. */
+  lastFailure?: BackgroundDeliveryFailure;
 }
 
 /**
@@ -197,6 +178,7 @@ export interface AgentLifecycle {
  */
 export interface AgentDisplayInfo {
   type: SubagentType;
+  /** Retained description projection, UTF-8 bounded at 8 KiB. */
   description: string;
   /** Path to the streaming output transcript file. */
   outputFile?: string;
@@ -246,7 +228,7 @@ export interface AgentAccumulatedStats {
   usingSubscription?: boolean;
   /** Context telemetry kept separate from cumulative billing usage. */
   contextStats?: ContextStats;
-  /** Compaction reasons retained for execution diagnostics. */
+  /** Newest bounded compaction reasons; retained string fields are UTF-8-capped. */
   compactionReasons?: CompactionReasonMetadata[];
   /** Per-execution summaries: the initial run plus every AgentContinue execution. */
   executions?: AgentExecutionSummary[];

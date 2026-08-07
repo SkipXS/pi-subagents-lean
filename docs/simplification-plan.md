@@ -73,7 +73,7 @@ Für `AgentContinue` gelten folgende Invarianten:
 4. Gestoppte, abgebrochene oder fehlgeschlagene Agents bleiben gemäß bestehendem Vertrag nicht fortsetzbar.
 5. `run_in_background` bleibt unterstützt; jede Background-Ausführung erhält
    ihren eigenen exactly-once-Nudge über den normalen Zustellungsweg.
-6. Beendete Agent-Records bleiben bis zum Ende der Parent-Session verfügbar; `session_shutdown` gibt Sessions und Ressourcen frei.
+6. Bis zu 64 sichere, beendete Agent-Records bleiben für Status und Fortsetzung verfügbar; ältere terminale Records werden deterministisch evicted und ihre Sessions freigegeben. Aktive, wartende, ungesettelte und noch auszuliefernde Records sind geschützt.
 
 ### `StopAgent`
 
@@ -145,7 +145,7 @@ Subagent-Sessions dürfen die Extension weiterhin isoliert laden, aber sie erhal
 - Output-Logs;
 - Background-Zustellung über `sendMessage()`;
 - sauberer Shutdown und Abbruch laufender Root-Agents;
-- Aufbewahrung beendeter Root-Records bis zum Ende der Parent-Session für `AgentContinue`.
+- begrenzte Aufbewahrung der neuesten 64 sicher terminalen Root-Records für `AgentContinue`.
 
 ## Bestätigte Vereinfachung: Agent-Definition und Laufzeitauflösung
 
@@ -173,8 +173,10 @@ weitergetragen werden; `AgentContinue` nutzt die ursprüngliche Session.
 Die Konfiguration akzeptiert und persistiert `includeContextFiles`,
 `disableDefaultAgents`, `orchestrationPrompt`, `concurrency.default` und die
 per-Agent-Map `agents.<name>`. Unbekannte oder ungültige Felder werden an der
-Persistenzgrenze verworfen und nicht als Modelle interpretiert. Es gibt keine
-benannte Legacy-Migration oder Bereinigung.
+Persistenzgrenze verworfen und nicht als Modelle interpretiert. `concurrency.default`
+akzeptiert nur ganze Zahlen von `1` bis `64`; alle anderen Werte einschließlich
+Werten über `64` fallen auf `4` zurück. Es gibt keine benannte Legacy-Migration
+oder Bereinigung.
 
 README, `CONTEXT.md`, Agent-Beispiele, ADR und Konfigurationsreferenz beschreiben
 diesen flachen Ausführungsbaum.
@@ -245,8 +247,15 @@ Diese Phase ist eine interne Vereinfachung und keine Entfernung des Features.
 - Hintergrundzustellung ist pro Ausführung claim-basiert: jede Background- oder
   `AgentContinue`-Ausführung erhält nach kurzer Verzögerung ihre eigene Message
   und genau einen automatischen `sendMessage`-Versuch. Ein `sendMessage`-Fehler
-  bleibt bis zum Ende der Parent-Session als diagnostischer Delivery-Fehler
-  erhalten; ein Retry-Pfad ist nicht Bestandteil des Vertrags.
+  bleibt als payload-freie, per Record aggregierte `lastFailure`-Diagnose sichtbar,
+  solange der bounded Record retained ist; zusätzlich behält der
+  Delivery-Service höchstens 64 terminale Diagnosen. Ein Retry-Pfad ist nicht
+  Bestandteil des Vertrags. Background-Resultat/Details bleiben als
+  UTF-8-Textdarstellung insgesamt auf 64 KiB, sekundäre Detailtexte auf 8 KiB,
+  aktuelle Delivery-Fehler auf 8 KiB und die aggregierte `lastFailure`-Diagnose
+  auf 4 KiB begrenzt; Überschreitungen tragen `[TRUNCATED]`.
+  `stats.compactionReasons` behält nur die neuesten 128 Einträge, deren
+  Stringfelder jeweils auf 8 KiB begrenzt sind.
 - `refreshActiveSessions`, `SessionRevision` und der alte Viewer-Cadence-Pfad
   samt ausschließlich zugehöriger Tests sind entfernt.
 - Stale Präsentationskommentare, Testnamen, Fixtures und historische TUI-
@@ -291,10 +300,12 @@ Nested Delegation nutzt Teile der Session-Isolation. Beim Entfernen darf nicht a
 
 ### Records durch `AgentContinue`
 
-Beendete Sessions bleiben bis zum Ende der Parent-Session im Speicher, damit
-`AgentStatus` und `AgentContinue` zuverlässig auf erfolgreiche terminale Records
-zugreifen können. `session_shutdown` beziehungsweise `AgentManager.dispose`
-entfernt anschließend Records, Sessions, Queue-Einträge und Ressourcen.
+Die neuesten 64 sicher terminalen Sessions bleiben für `AgentStatus` und
+`AgentContinue` im Speicher. Ältere Records werden deterministisch entfernt und
+ihre Sessions freigegeben; aktive, wartende, ungesettelte sowie pending/armed
+Background-Delivery-Records sind von der Eviction ausgenommen. `session_shutdown`
+beziehungsweise `AgentManager.dispose` entfernt die verbleibenden Records,
+Sessions, Queue-Einträge und Ressourcen.
 
 ## Finale Entscheidungen und verbleibende Fragen
 

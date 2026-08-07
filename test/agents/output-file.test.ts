@@ -1,14 +1,15 @@
 /**
  * output-file.test.ts — Tests for output-file.ts.
  *
- * Covers both the AgentOutputLog lifecycle class and the lower-level
- * functions (createOutputFilePath, writeInitialEntry, streamToOutputFile).
+ * Covers the AgentOutputLog lifecycle class and transcript functions
+ * (writeInitialEntry, streamToOutputFile). Root/path security contracts live
+ * in output-log-store.test.ts; queue ordering lives in output-log-writer.test.ts.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { createMockSession, tempDirFixture } from "../fixtures.ts";
 import {
   createOutputFilePath,
@@ -30,36 +31,6 @@ beforeEach(() => fixture.setup());
 afterEach(async () => {
   await whenOutputLogsIdle();
   fixture.teardown();
-});
-
-// ------------------------------------------------------------------
-// createOutputFilePath
-// ------------------------------------------------------------------
-
-describe("createOutputFilePath", () => {
-  it("returns <baseDir>/<agentId>.log", async () => {
-    const dir = fixture.getDir();
-    const result = createOutputFilePath(testAgentId, dir);
-    expect(result).toBe(join(dir, `${testAgentId}.log`));
-  });
-
-  it.skipIf(process.platform === "win32")("creates the directory with 0o700 permissions", async () => {
-    const dir = fixture.getDir() + "/sub";
-    createOutputFilePath(testAgentId, dir);
-    await whenOutputLogsIdle();
-    expect(existsSync(dir)).toBe(true);
-    expect(statSync(dir).isDirectory()).toBe(true);
-    expect(statSync(dir).mode & 0o077).toBeLessThanOrEqual(0);
-  });
-
-  it("returns consistent path for same agentId", async () => {
-    const dir = fixture.getDir();
-    expect(createOutputFilePath("same-id", dir)).toBe(createOutputFilePath("same-id", dir));
-  });
-
-  it("defaults to the system temporary directory when baseDir is omitted", async () => {
-    expect(createOutputFilePath("test")).toBe(join(tmpdir(), "pi-agent-outputs", "test.log"));
-  });
 });
 
 // ------------------------------------------------------------------
@@ -446,9 +417,11 @@ describe("AgentOutputLog", () => {
     expect(await readLog(log.path)).toMatch(/\[USER\]\s+explore auth/);
   });
 
-  it("uses the system temporary directory when baseDir is omitted", async () => {
+  it("uses an absolute private temp root when baseDir is omitted", async () => {
     const log = new AgentOutputLog(testAgentId, "test prompt");
-    expect(log.path).toBe(join(tmpdir(), "pi-agent-outputs", `${testAgentId}.log`));
+    expect(isAbsolute(log.path)).toBe(true);
+    expect(log.path).toContain("pi-subagents-outputs-");
+    expect(log.path).not.toBe(join(tmpdir(), "pi-agent-outputs", `${testAgentId}.log`));
   });
 
   it("subscribes to session events on attach", async () => {
@@ -531,33 +504,6 @@ describe("AgentOutputLog", () => {
     const dir = fixture.getDir();
     const log = new AgentOutputLog(testAgentId, "test", dir);
     expect(log.path).toBe(join(dir, `${testAgentId}.log`));
-  });
-
-  it("orders immediate continuation entries after the prior DONE line", async () => {
-    const dir = fixture.getDir();
-    const first = new AgentOutputLog(testAgentId, "first prompt", dir);
-    const session = createMockSession() as any;
-    Object.defineProperty(session, "messages", {
-      get: () => [
-        { role: "user", content: "first prompt" },
-        { role: "assistant", content: [{ type: "text", text: "first answer" }] },
-      ],
-      configurable: true,
-    });
-    first.attach(session);
-    session._fireTurnEnd();
-    first.finalize({ totalTokens: 1, cost: 0 });
-
-    // This is deliberately created immediately, before the first queue drains.
-    // It must share the path writer rather than racing the prior DONE append.
-    const second = new AgentOutputLog(testAgentId, "second prompt", dir, true);
-    second.finalize({ totalTokens: 2, cost: 0 });
-
-    const lines = (await readLog(first.path)).trim().split("\n");
-    expect(lines.filter((line) => line.includes("[DONE]")).length).toBe(2);
-    expect(lines.findIndex((line) => line.includes("[DONE]"))).toBeGreaterThan(-1);
-    expect(lines.findIndex((line) => line.includes("second prompt")))
-      .toBeGreaterThan(lines.findIndex((line) => line.includes("[DONE]")));
   });
 
   it("makes finalize idempotent and swallows filesystem failures", async () => {

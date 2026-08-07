@@ -19,7 +19,7 @@ vi.mock("../../src/shell.js", () => shellMock({
   },
 }));
 
-import { executeStopAgentTool } from "../../src/agents/tool-execution.js";
+import { executeStopAgentTool } from "../../src/agents/agent-control-execution.js";
 
 describe("executeStopAgentTool", () => {
   beforeEach(() => {

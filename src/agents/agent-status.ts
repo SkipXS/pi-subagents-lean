@@ -10,12 +10,14 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
 import { getCoordinator, getManager } from "../shell.js";
 import { executionKind, formatAgentStatusLine } from "./execution-display.js";
+import { MAX_BACKGROUND_FAILURE_BYTES } from "../spawn/background-delivery-diagnostics.js";
+import { truncateUtf8 } from "./agent-string-limits.js";
 
 /** Format a single agent record as "[short_id] (type) status [delivery state]". */
 function formatAgent(record: AgentRecord): string {
   const executions = record.stats?.executions;
   const latest = executions?.at(-1);
-  return formatAgentStatusLine(
+  const statusLine = formatAgentStatusLine(
     record.id,
     record.display.type,
     record.lifecycle.status,
@@ -24,6 +26,10 @@ function formatAgent(record: AgentRecord): string {
       : undefined,
     record.delivery?.state,
   );
+  const failure = record.delivery?.lastFailure?.lastError;
+  return typeof failure === "string" && failure.length > 0
+    ? `${statusLine} delivery-failure:${truncateUtf8(failure, MAX_BACKGROUND_FAILURE_BYTES)}`
+    : statusLine;
 }
 
 /**

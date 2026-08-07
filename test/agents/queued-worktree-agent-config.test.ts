@@ -3,7 +3,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeAgentMd, tempDirWithFiles } from "../fixtures.ts";
+import { fakeCtx, fakePi, makeAgentMd, resolvedSpawnFixture, spawnWithResolvedFixture, tempDirWithFiles } from "../fixtures.ts";
 
 const mocks = vi.hoisted(() => ({
   runAgent: vi.fn(),
@@ -84,18 +84,20 @@ describe("queued worktree agent configuration", () => {
       const blocked = new Promise<ReturnType<typeof runResult>>((resolve) => { unblock = resolve; });
       mocks.runAgent.mockReturnValueOnce(blocked).mockResolvedValue(runResult());
 
-      manager.spawn(pi, ctx, "blocker", "hold the slot", {
+      spawnWithResolvedFixture(manager, pi, ctx, "blocker", "hold the slot", {
         description: "blocker",
         modelKey: "test/model",
       });
-      await coordinator.spawn(pi, ctx, {
+      await coordinator.spawn(pi, ctx, resolvedSpawnFixture({
         type: "reviewer",
         prompt: "review A",
         description: "queued A",
         modelKey: "test/model",
         agentConfig: a!.config,
         runInBackground: true,
-      });
+        worktreePath: worktreeA.dir,
+        projectTrusted: false,
+      }));
 
       expect(mocks.runAgent).toHaveBeenCalledTimes(1);
       const b = await resolveWorktreeAgent("reviewer", worktreeB.dir, { disableDefaultAgents: true });
@@ -105,7 +107,7 @@ describe("queued worktree agent configuration", () => {
       await vi.waitFor(() => expect(mocks.runAgent).toHaveBeenCalledTimes(2));
 
       const queuedOptions = mocks.runAgent.mock.calls[1][3];
-      expect(queuedOptions.agentConfig).toEqual(expect.objectContaining({
+      expect(queuedOptions.acceptedSpawn.agentConfig).toEqual(expect.objectContaining({
         description: "Worktree A reviewer",
         systemPrompt: "A-only prompt.",
         registeredTools: ["read"],

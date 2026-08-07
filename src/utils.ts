@@ -8,6 +8,9 @@
 import { lstatSync, readFileSync } from "node:fs";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "./types.js";
+import { truncateUtf8, utf8ByteLength } from "./agents/agent-string-limits.js";
+
+export { TRUNCATED_TEXT_MARKER, truncateUtf8, utf8ByteLength } from "./agents/agent-string-limits.js";
 
 /**
  * Returns true if a name contains characters not allowed in agent/skill names.
@@ -61,6 +64,87 @@ export function parseThinkingLevel(raw: unknown): ThinkingLevel | undefined {
  */
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Clone JSON-shaped metadata while capping only its string fields. Arrays and
+ * plain records retain their keys/order/shape; other values pass through.
+ */
+export function capUtf8Strings<T>(value: T, maxBytes: number): T {
+  return capUtf8StringsInternal(value, maxBytes, new WeakMap<object, unknown>()) as T;
+}
+
+/**
+ * Clone JSON-shaped metadata while sharing one UTF-8 budget across all string
+ * fields. This is used for a message's secondary details object so a large
+ * result cannot be retained a second time there.
+ */
+export function capUtf8StringsToBudget<T>(value: T, maxBytes: number): T {
+  const state = {
+    remaining: Number.isFinite(maxBytes) ? Math.max(0, Math.floor(maxBytes)) : maxBytes,
+  };
+  return capUtf8StringsWithinBudget(value, state, new WeakMap<object, unknown>()) as T;
+}
+
+function capUtf8StringsInternal(
+  value: unknown,
+  maxBytes: number,
+  seen: WeakMap<object, unknown>,
+): unknown {
+  if (typeof value === "string") return truncateUtf8(value, maxBytes);
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return seen.get(value);
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    seen.set(value, copy);
+    for (const item of value) copy.push(capUtf8StringsInternal(item, maxBytes, seen));
+    return copy;
+  }
+  if (!isPlainRecord(value)) return value;
+
+  const copy = Object.create(Object.getPrototypeOf(value)) as Record<string, unknown>;
+  seen.set(value, copy);
+  for (const key of Object.keys(value)) {
+    copy[key] = capUtf8StringsInternal(value[key], maxBytes, seen);
+  }
+  return copy;
+}
+
+function capUtf8StringsWithinBudget(
+  value: unknown,
+  state: { remaining: number },
+  seen: WeakMap<object, unknown>,
+): unknown {
+  if (typeof value === "string") {
+    if (utf8ByteLength(value) <= state.remaining) {
+      state.remaining -= utf8ByteLength(value);
+      return value;
+    }
+    const bounded = truncateUtf8(value, state.remaining);
+    state.remaining = Math.max(0, state.remaining - utf8ByteLength(bounded));
+    return bounded;
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return seen.get(value);
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    seen.set(value, copy);
+    for (const item of value) copy.push(capUtf8StringsWithinBudget(item, state, seen));
+    return copy;
+  }
+  if (!isPlainRecord(value)) return value;
+
+  const copy = Object.create(Object.getPrototypeOf(value)) as Record<string, unknown>;
+  seen.set(value, copy);
+  for (const key of Object.keys(value)) {
+    copy[key] = capUtf8StringsWithinBudget(value[key], state, seen);
+  }
+  return copy;
+}
+
+function isPlainRecord(value: object): value is Record<string, unknown> {
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 /**

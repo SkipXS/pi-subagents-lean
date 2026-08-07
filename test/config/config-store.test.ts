@@ -61,6 +61,26 @@ describe("ConfigStore runtime settings", () => {
     expect(Object.isFrozen(snapshot.agents?.scout)).toBe(true);
   });
 
+  it("keeps runtime snapshots bounded for oversized adapter data", () => {
+    const many = {
+      valid: { model: "m".repeat(257), thinking: "high" },
+      ["x".repeat(129)]: { model: "provider/too-long-name" },
+      ...Object.fromEntries(Array.from(
+        { length: 300 },
+        (_, index) => [`agent-${index}`, { model: `provider/model-${index}` }],
+      )),
+    };
+    const { io } = memIO({ agents: many as any });
+    const snapshot = new ConfigStore(io).createSubagentRuntimeSettings();
+
+    expect(Object.keys(snapshot.agents ?? {}).length).toBeLessThanOrEqual(256);
+    expect(snapshot.agents?.["x".repeat(129)]).toBeUndefined();
+    expect(snapshot.agents?.valid).toEqual({ thinking: "high" });
+    for (const override of Object.values(snapshot.agents ?? {})) {
+      expect((override.model ?? "").length).toBeLessThanOrEqual(256);
+    }
+  });
+
   it("captures a frozen stable snapshot of current settings", () => {
     const { io } = memIO({ agent: { includeContextFiles: false } });
     const store = new ConfigStore(io);
@@ -95,7 +115,25 @@ describe("ConfigStore persistence and manager effects", () => {
     });
   });
 
-  it("updates concurrency through the manager", () => {
+  it.each([Number.POSITIVE_INFINITY, 1.5, 0, -1, 65, Number.MAX_SAFE_INTEGER, 1e100])(
+    "normalizes unsafe loaded and mutated concurrency values %p",
+    (loadedValue) => {
+      const { io, current } = memIO({ concurrency: { default: loadedValue } as any });
+      const { manager, concurrencies } = managerStub();
+      const store = new ConfigStore(io);
+      store.setDeps({ manager });
+      concurrencies.length = 0;
+
+      expect(store.concurrency).toEqual({ default: 4 });
+      store.mutate.concurrency.setDefault(loadedValue);
+
+      expect(store.concurrency).toEqual({ default: 4 });
+      expect(current().concurrency).toEqual({ default: 4 });
+      expect(concurrencies).toEqual([{ default: 4 }]);
+    },
+  );
+
+  it("updates valid concurrency through the manager", () => {
     const { io } = memIO();
     const { manager, concurrencies } = managerStub();
     const store = new ConfigStore(io);

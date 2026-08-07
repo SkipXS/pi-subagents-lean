@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { canCreateDirectoryLinks, createDirectoryLink } from "../fixtures.ts";
+import { canCreateDirectoryLinks, createDirectoryLink, fakeCtx, fakePi, spawnWithResolvedFixture } from "../fixtures.ts";
 import {
   revalidateWorktreePath,
   validateWorktreePath,
@@ -729,7 +729,7 @@ describe("worktree deletion mid-run", () => {
 
     // Spawn should not throw — the error is caught inside startAgent.
     // The agent record transitions to "error" status.
-    const agentId = manager.spawn(
+    const agentId = spawnWithResolvedFixture(manager,
       { exec: vi.fn() } as any,
       mockCtx,
       "general-purpose",

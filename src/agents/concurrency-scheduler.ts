@@ -4,6 +4,8 @@
  * nothing about records or how a queued task is started.
  */
 
+import { normalizeConcurrencyDefault } from "../config/types.js";
+
 export type QueueDecision = "queued" | "running";
 
 /** Queue entries carry an id so a caller can cancel a retained task. */
@@ -16,7 +18,11 @@ export type QueueEligibility<T> = (entry: T) => boolean;
 const ALWAYS_ELIGIBLE: QueueEligibility<never> = () => true;
 
 function normalizeLimit(limit: number): number {
-  return Math.max(1, limit);
+  // The scheduler is also a runtime boundary: callers can originate outside
+  // the typed config path, so never let coercion, NaN, Infinity, or a fraction
+  // alter slot accounting. Invalid values use the same durable default as the
+  // persistence/store layers.
+  return normalizeConcurrencyDefault(limit);
 }
 
 export class FifoConcurrencyScheduler<T extends SchedulerEntry> {
@@ -36,8 +42,14 @@ export class FifoConcurrencyScheduler<T extends SchedulerEntry> {
     return this.running;
   }
 
-  get queuedCount(): number {
+  /** Number of accepted tasks waiting for a slot. */
+  get pendingCount(): number {
     return this.queue.length;
+  }
+
+  /** Existing queued-count alias retained for scheduler callers. */
+  get queuedCount(): number {
+    return this.pendingCount;
   }
 
   /** Decide whether a newly accepted task must wait for a slot. */

@@ -11,7 +11,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildExtOverride } from "../../src/agents/agent-runner.js";
+import { buildExtOverride } from "../../src/agents/agent-runner-policy.js";
 
 /**
  * Create a temp directory with a package.json that declares an extension entry.

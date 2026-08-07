@@ -26,7 +26,7 @@ vi.mock("../../src/agents/usage.js", () => ({
   getSessionUsageSnapshot: vi.fn(() => undefined),
 }));
 
-import { executeContinueAgentTool, executeStopAgentTool } from "../../src/agents/tool-execution.js";
+import { executeContinueAgentTool, executeStopAgentTool } from "../../src/agents/agent-control-execution.js";
 
 const fullId = "agent-full-id-123";
 
@@ -183,6 +183,33 @@ describe("AgentContinue and StopAgent control rendering", () => {
       mode: "foreground",
       kind: "continued",
     });
+    expect(state.continueAgent).not.toHaveBeenCalled();
+  });
+
+  it("rejects ASCII and multibyte oversized control IDs before record reflection", async () => {
+    const oversizedAscii = "a".repeat(129);
+    const oversizedUnicode = "界".repeat(43); // 129 UTF-8 bytes
+
+    const stopAscii = await executeStopAgentTool(
+      "oversized-stop-ascii",
+      { agent_id: oversizedAscii },
+      undefined,
+      undefined,
+      ctx(),
+    );
+    const continueUnicode = await executeContinueAgentTool(
+      "oversized-continue-unicode",
+      { agent_id: oversizedUnicode, prompt: "continue", run_in_background: false },
+      undefined,
+      undefined,
+      ctx(),
+    );
+
+    expect(stopAscii.content[0].text).toBe("agent_id exceeds the maximum of 128 UTF-8 bytes");
+    expect(continueUnicode.content[0].text).toBe("agent_id exceeds the maximum of 128 UTF-8 bytes");
+    expect(state.getRecord).not.toHaveBeenCalled();
+    expect(state.listAgents).not.toHaveBeenCalled();
+    expect(state.abort).not.toHaveBeenCalled();
     expect(state.continueAgent).not.toHaveBeenCalled();
   });
 

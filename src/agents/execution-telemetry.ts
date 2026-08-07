@@ -23,6 +23,12 @@ import {
   type AgentUsage,
   type SessionStatsContextUsage,
 } from "./usage.js";
+import { capUtf8Strings } from "../utils.js";
+
+/** Maximum number of newest compaction metadata entries retained per record. */
+export const MAX_RETAINED_COMPACTION_REASONS = 128;
+/** Maximum UTF-8 bytes for each string field in retained compaction metadata. */
+export const MAX_COMPACTION_REASON_TEXT_BYTES = 8 * 1024;
 
 export interface ExecutionBaseline {
   usage: AgentUsage;
@@ -53,7 +59,7 @@ export class ExecutionTelemetry {
   /** Initialize optional telemetry collections on a newly accepted record. */
   initializeRecord(record: AgentRecord): void {
     record.stats.contextStats ??= createContextStats();
-    record.stats.compactionReasons ??= [];
+    record.stats.compactionReasons = capCompactionReasons(record.stats.compactionReasons);
   }
 
   /** Capture and retain the cumulative baseline for one accepted execution. */
@@ -239,6 +245,15 @@ export class ExecutionTelemetry {
         && (info.firstKeptEntryId === undefined || leaf.firstKeptEntryId === info.firstKeptEntryId)
       ) metadata.entryId = leaf.id;
     } catch { /* optional session-manager fields */ }
-    (record.stats.compactionReasons ??= []).push(metadata);
+    const reasons = capCompactionReasons(record.stats.compactionReasons);
+    reasons.push(capUtf8Strings(metadata, MAX_COMPACTION_REASON_TEXT_BYTES));
+    record.stats.compactionReasons = reasons.slice(-MAX_RETAINED_COMPACTION_REASONS);
   }
+}
+
+function capCompactionReasons(raw: unknown): CompactionReasonMetadata[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .slice(-MAX_RETAINED_COMPACTION_REASONS)
+    .map((entry) => capUtf8Strings(entry, MAX_COMPACTION_REASON_TEXT_BYTES)) as CompactionReasonMetadata[];
 }

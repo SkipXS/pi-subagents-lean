@@ -6,6 +6,7 @@ export type SubagentType = string;
 /** Unified agent configuration — used for both default and user-defined agents. */
 export interface AgentConfig {
   name: string;
+  /** Retained/display description is capped at 8 KiB UTF-8. */
   description: string;
   /** Tools to register with the session (controls availability, not LLM visibility). */
   registeredTools?: string[];
@@ -30,6 +31,7 @@ export interface AgentConfig {
   excludeSkills?: string[];
   model?: string;
   thinkingLevel?: ThinkingLevel;
+  /** Preflight rejects values above 512 KiB UTF-8; it is never silently truncated. */
   systemPrompt: string;
 
   /** true = this is an embedded default agent (informational) */

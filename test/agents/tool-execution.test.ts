@@ -30,6 +30,7 @@ const {
   mockDiscoverNewAgents,
   mockResolveWorktreeAgent,
   mockResolveAgentCatalog,
+  mockResolveProjectFreeAgentCatalog,
   mockCoordinatorSpawn,
   runtimeSettingsSnapshot,
   liveStoreAgent,
@@ -48,6 +49,7 @@ const {
     config: { thinkingLevel: undefined },
   })),
   mockResolveAgentCatalog: vi.fn(async () => new Map<string, any>([["general-purpose", { thinkingLevel: undefined }]])),
+  mockResolveProjectFreeAgentCatalog: vi.fn(async () => new Map<string, any>([["general-purpose", { thinkingLevel: undefined }]])),
   mockCoordinatorSpawn: vi.fn(async (_pi: any, _ctx: any, intent: any) => {
     const id = mockSpawn(_pi, _ctx, intent.type, intent.prompt, {
       description: intent.description,
@@ -88,6 +90,7 @@ vi.mock("../../src/agents/agent-types.js", () => ({
   discoverNewAgents: mockDiscoverNewAgents,
   resolveWorktreeAgent: mockResolveWorktreeAgent,
   resolveAgentCatalog: mockResolveAgentCatalog,
+  resolveProjectFreeAgentCatalog: mockResolveProjectFreeAgentCatalog,
   resolveTypeInCatalog: vi.fn((catalog: Map<string, unknown>, type: string) => catalog.has(type) ? type : undefined),
 }));
 
@@ -98,8 +101,6 @@ vi.mock("../../src/utils.js", () => ({
 vi.mock("../../src/shell.js", () => {
   const coordinator = {
     spawn: mockCoordinatorSpawn,
-    isBackground: vi.fn(() => false),
-    scheduleNudge: vi.fn(),
     onAgentComplete: vi.fn(),
     dispose: vi.fn(),
   };
@@ -132,10 +133,8 @@ vi.mock("../../src/agents/usage.js", () => ({
 }));
 
 // Import after mocks are in place
-import {
-  executeAgentTool,
-  formatForegroundAgentResultContent,
-} from "../../src/agents/tool-execution.js";
+import { executeAgentTool } from "../../src/agents/tool-execution.js";
+import { formatForegroundAgentResultContent } from "../../src/agents/agent-tool-results.js";
 import { AGENT_RENDER_DETAILS_KEY } from "../../src/agents/agent-renderer.js";
 import * as agentTypes from "../../src/agents/agent-types.js";
 import * as utils from "../../src/utils.js";
@@ -196,7 +195,7 @@ describe("executeAgentTool — explicit agent type", () => {
       ctx,
     );
 
-    expect(mockDiscoverNewAgents).toHaveBeenCalledWith({ disableDefaultAgents: undefined });
+    expect(mockResolveProjectFreeAgentCatalog).toHaveBeenCalledWith({ disableDefaultAgents: undefined });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("Unknown agent type: unknown-agent");
     expect(mockSpawn).not.toHaveBeenCalled();
@@ -205,7 +204,9 @@ describe("executeAgentTool — explicit agent type", () => {
   it("does not spawn when cancellation wins an asynchronous discovery preflight", async () => {
     let releaseDiscovery!: () => void;
     const discovery = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
-    mockDiscoverNewAgents.mockReturnValueOnce(discovery);
+    mockResolveProjectFreeAgentCatalog.mockReturnValueOnce(
+      discovery.then(() => new Map([["general-purpose", { thinkingLevel: undefined }]])),
+    );
     (agentTypes.resolveType as any).mockReturnValueOnce(undefined);
     const controller = new AbortController();
 
@@ -216,7 +217,7 @@ describe("executeAgentTool — explicit agent type", () => {
       undefined,
       ctx,
     );
-    await vi.waitFor(() => expect(mockDiscoverNewAgents).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mockResolveProjectFreeAgentCatalog).toHaveBeenCalledOnce());
     controller.abort();
     releaseDiscovery();
 
@@ -227,9 +228,11 @@ describe("executeAgentTool — explicit agent type", () => {
 
   it("publishes resolved Markdown model and normalized thinking metadata", async () => {
     const model = { provider: "openai", id: "gpt-4o", reasoning: true };
-    (agentTypes.getAgentConfig as any).mockReturnValueOnce({
-      model: "openai/gpt-4o", thinkingLevel: "high", name: "general-purpose", description: "Test", systemPrompt: "",
-    });
+    mockResolveProjectFreeAgentCatalog.mockResolvedValueOnce(new Map([[
+      "general-purpose", {
+        model: "openai/gpt-4o", thinkingLevel: "high", name: "general-purpose", description: "Test", systemPrompt: "",
+      },
+    ]]));
     const record = {
       id: "agent-render-details", result: "done",
       display: { type: "general-purpose", description: "Test agent" },
@@ -309,10 +312,12 @@ describe("executeAgentTool — explicit agent type", () => {
 
   it("ignores non-schema model and thinking fields from the caller", async () => {
     const model = { provider: "markdown", id: "role-model", reasoning: true };
-    (agentTypes.getAgentConfig as any).mockReturnValueOnce({
-      name: "general-purpose", description: "Test", systemPrompt: "",
-      model: "markdown/role-model", thinkingLevel: "high",
-    });
+    mockResolveProjectFreeAgentCatalog.mockResolvedValueOnce(new Map([[
+      "general-purpose", {
+        name: "general-purpose", description: "Test", systemPrompt: "",
+        model: "markdown/role-model", thinkingLevel: "high",
+      },
+    ]]));
     (utils.findModelInRegistry as any).mockReturnValueOnce(model);
     mockGetRecord.mockReturnValueOnce({
       id: "agent-markdown-settings", result: "done",
@@ -859,9 +864,10 @@ describe("executeAgentTool — worktree_path discovery integration", () => {
     expect(mockDiscoverNewAgents).not.toHaveBeenCalled();
   });
 
-  it("refreshes discovery without a worktree dir before resolving the type", async () => {
-    const resolveTypeSpy = vi.spyOn(agentTypes, "resolveType");
-    resolveTypeSpy.mockReturnValueOnce(undefined).mockReturnValueOnce("feature-reviewer");
+  it("resolves the project-free catalog without consulting the global registry", async () => {
+    mockResolveProjectFreeAgentCatalog.mockResolvedValueOnce(new Map([[
+      "feature-reviewer", { thinkingLevel: undefined },
+    ]]));
 
     await executeAgentTool(
       "tc-disc-no-wt",
@@ -871,8 +877,7 @@ describe("executeAgentTool — worktree_path discovery integration", () => {
       ctx,
     );
 
-    // Non-worktree discovery refreshes the parent registry.
-    expect(mockDiscoverNewAgents).toHaveBeenCalledTimes(1);
-    expect(mockDiscoverNewAgents).toHaveBeenCalledWith({ disableDefaultAgents: undefined });
+    expect(mockResolveProjectFreeAgentCatalog).toHaveBeenCalledWith({ disableDefaultAgents: undefined });
+    expect(mockDiscoverNewAgents).not.toHaveBeenCalled();
   });
 });

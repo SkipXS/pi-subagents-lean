@@ -1,6 +1,10 @@
 import type { AgentManager } from "../agents/agent-manager.js";
 import type { AgentSettingsOverride, AgentSettingsOverrides, SubagentsConfig } from "./types.js";
-import { normalizeAgentEntries, normalizeAgentSettingsOverrides } from "./types.js";
+import {
+  normalizeAgentEntries,
+  normalizeAgentSettingsOverrides,
+  normalizeConcurrencyDefault,
+} from "./types.js";
 import {
   DEFAULT_CONCURRENCY,
   loadConfig,
@@ -96,7 +100,7 @@ export class ConfigStore {
   }
 
   get concurrency(): { default: number } {
-    return { default: this.config.concurrency.default };
+    return { default: normalizeConcurrencyDefault(this.config.concurrency?.default) };
   }
 
   /** Persisted per-agent overrides, normalized and detached from the config object. */
@@ -106,9 +110,10 @@ export class ConfigStore {
 
   /** Capture immutable settings at the accepted root spawn boundary. */
   createSubagentRuntimeSettings(): SubagentRuntimeSettings {
-    const agents = this.config.agents
+    const normalizedAgents = normalizeAgentSettingsOverrides(this.config.agents);
+    const agents = Object.keys(normalizedAgents).length > 0
       ? Object.fromEntries(
-        Object.entries(this.config.agents).map(([name, override]) => [name, Object.freeze({ ...override })]),
+        Object.entries(normalizedAgents).map(([name, override]) => [name, Object.freeze({ ...override })]),
       )
       : undefined;
     return Object.freeze({
@@ -136,7 +141,7 @@ export class ConfigStore {
     },
     concurrency: {
       setDefault: (n: number): void => {
-        this.config.concurrency.default = n;
+        this.config.concurrency.default = normalizeConcurrencyDefault(n);
         this.persist();
         this.applyConcurrency();
       },
@@ -229,7 +234,9 @@ export class ConfigStore {
   }
 
   private applyConcurrency(): void {
-    this.#manager?.setConcurrency(this.config.concurrency);
+    this.#manager?.setConcurrency({
+      default: normalizeConcurrencyDefault(this.config.concurrency?.default),
+    });
   }
 
   private syncAllDeps(): void {
@@ -243,15 +250,29 @@ function normalizeStoreConfig(raw: SubagentsConfig): SubagentsConfig {
   return {
     agent: { ...DEFAULT_AGENT_SETTINGS, ...agent },
     ...(Object.keys(agents).length > 0 ? { agents } : {}),
-    concurrency: { default: raw.concurrency?.default ?? DEFAULT_CONCURRENCY.default },
+    concurrency: { default: normalizeConcurrencyDefault(raw.concurrency?.default) },
   };
 }
 
 /** Apply only this store mutation's changed fields to a freshly locked snapshot. */
 function applyConfigDelta(latest: SubagentsConfig, before: SubagentsConfig, desired: SubagentsConfig): void {
-  latest.agent = normalizeAgentEntries(latest.agent as Record<string, unknown>) as SubagentsConfig["agent"];
-  applyObjectDelta(latest.agent as Record<string, unknown>, before.agent as Record<string, unknown>, desired.agent as Record<string, unknown>);
-  applyObjectDelta(latest.concurrency as Record<string, unknown>, before.concurrency as Record<string, unknown>, desired.concurrency as Record<string, unknown>);
+  latest.agent = normalizeAgentEntries((latest.agent ?? {}) as Record<string, unknown>) as SubagentsConfig["agent"];
+  applyObjectDelta(
+    latest.agent as Record<string, unknown>,
+    (before.agent ?? {}) as Record<string, unknown>,
+    (desired.agent ?? {}) as Record<string, unknown>,
+  );
+
+  latest.concurrency = {
+    default: normalizeConcurrencyDefault(latest.concurrency?.default),
+  };
+  const beforeConcurrency = {
+    default: normalizeConcurrencyDefault(before.concurrency?.default),
+  };
+  const desiredConcurrency = {
+    default: normalizeConcurrencyDefault(desired.concurrency?.default),
+  };
+  applyObjectDelta(latest.concurrency, beforeConcurrency, desiredConcurrency);
 
   // Per-agent overrides are host-edited configuration, not a ConfigStore
   // mutation. Keep the latest locked snapshot intact so an unrelated scalar

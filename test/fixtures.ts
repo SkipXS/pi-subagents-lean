@@ -17,6 +17,8 @@
  */
 
 import { vi } from "vitest";
+import { acceptResolvedSpawn, snapshotResolvedSpawn } from "../src/spawn/spawn-contract.js";
+import type { AcceptedSpawn, ResolvedSpawn } from "../src/spawn/spawn-contract.js";
 
 /* ================================================================== */
 /*  Shared mock factories                                             */
@@ -379,6 +381,74 @@ export function fakeCtx(): any {
  */
 export function fakePi(): any {
   return { exec: vi.fn() };
+}
+
+/** Build the immutable preflight contract used by manager/coordinator tests. */
+export function resolvedSpawnFixture(overrides: Partial<ResolvedSpawn> = {}): ResolvedSpawn {
+  const {
+    type = "test-agent",
+    prompt = "test task",
+    description = prompt.split("\n")[0]!.slice(0, 80),
+    runInBackground = false,
+    agentConfig = {
+      name: type,
+      description,
+      systemPrompt: "Test agent instructions.",
+    },
+    runtimeSettings = {
+      agent: {
+        includeContextFiles: true,
+        disableDefaultAgents: false,
+        orchestrationPrompt: true,
+      },
+    },
+    projectTrusted = false,
+    ...rest
+  } = overrides;
+  return snapshotResolvedSpawn({
+    type,
+    prompt,
+    description,
+    runInBackground,
+    agentConfig,
+    runtimeSettings,
+    projectTrusted,
+    ...rest,
+  });
+}
+
+/** Build the immutable contract carried from manager acceptance to the runner. */
+export function acceptedSpawnFixture(overrides: Partial<ResolvedSpawn> = {}): AcceptedSpawn {
+  return acceptResolvedSpawn(resolvedSpawnFixture(overrides));
+}
+
+/** Invoke the production manager with a real resolved contract fixture. */
+export function spawnWithResolvedFixture(
+  manager: { spawn: (pi: any, ctx: any, resolved: ResolvedSpawn) => string },
+  pi: any,
+  ctx: any,
+  typeOrResolved: string | ResolvedSpawn,
+  promptOrOptions?: string | Record<string, unknown>,
+  legacyOptions?: Record<string, unknown>,
+): string {
+  if (typeof typeOrResolved !== "string") return manager.spawn(pi, ctx, typeOrResolved);
+  const prompt = typeof promptOrOptions === "string" ? promptOrOptions : "test task";
+  const options = (legacyOptions ?? (typeof promptOrOptions === "object" ? promptOrOptions : {})) as Record<string, unknown>;
+  const {
+    isBackground,
+    runInBackground,
+    description,
+    ...contractFields
+  } = options;
+  return manager.spawn(pi, ctx, resolvedSpawnFixture({
+    ...(contractFields as Partial<ResolvedSpawn>),
+    type: typeOrResolved,
+    prompt,
+    description: typeof description === "string" ? description : undefined,
+    runInBackground: typeof runInBackground === "boolean"
+      ? runInBackground
+      : isBackground === true,
+  }));
 }
 
 /**

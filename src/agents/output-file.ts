@@ -1,17 +1,58 @@
 /**
  * output-file.ts — Human-readable output logging for agent transcripts.
  *
- * Path: <system temp dir>/pi-agent-outputs/<agentId>.log
+ * Path: <private system temp dir>/pi-subagents-outputs-<random>/<agentId>.log
  * Append-only, human-readable, and can be followed with `tail -f` where available.
  * Lines: [USER], [TOOL], [ASSISTANT], [DONE] with ISO timestamps.
  */
 
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { formatCost, formatTokens } from "./usage.js";
 import { summarizeToolArgs } from "../utils.js";
+import { resolveOutputFilePath } from "./output-log-store.js";
+import {
+  enqueueOutputDirectory,
+  enqueueOutputWrite,
+  whenOutputLogIdle,
+} from "./output-log-writer.js";
+
+// Keep the established facade exports available to existing callers.
+export type {
+  OutputPathCanonicalizer,
+  OutputRootCleanupOptions,
+  OutputRootCleanupResult,
+} from "./output-log-store.js";
+export {
+  assertWindowsOpenedFileIdentity,
+  cleanupOutputRoots,
+  createOutputRoot,
+  MAX_OUTPUT_ROOTS,
+  MAX_OUTPUT_ROOT_RETENTION_BYTES,
+  MAX_OUTPUT_ROOT_ENTRIES,
+  MAX_OUTPUT_ROOT_DEPTH,
+  MAX_OUTPUT_PARENT_ENTRIES,
+  MAX_OUTPUT_GLOBAL_PASS_ENTRIES,
+  MAX_OUTPUT_JANITOR_PASS_ENTRIES,
+  MAX_OUTPUT_GLOBAL_ENTRIES,
+  OUTPUT_ROOT_MAX_AGE_MS,
+  OUTPUT_ROOT_PREFIX,
+  releaseOutputRootIdentity,
+  releaseOutputFileIdentities,
+  scheduleOutputRootCleanup,
+} from "./output-log-store.js";
+export {
+  MAX_OUTPUT_LOG_BYTES,
+  MAX_OUTPUT_ROOT_BYTES,
+  OUTPUT_LOG_MAX_BYTES,
+  OUTPUT_ROOT_MAX_BYTES,
+  OUTPUT_TRUNCATION_MARKER,
+  getOutputLogAccounting,
+  releaseOutputLogResources,
+  releaseOutputRoot,
+  whenOutputLogsIdle,
+  whenOutputRootIdle,
+  whenIdle,
+} from "./output-log-writer.js";
 
 /** Format the [DONE] summary line with final usage stats. */
 function formatDoneLine(stats: { totalTokens: number; cost: number }): string {
@@ -29,126 +70,19 @@ function timestamp(): string {
 }
 
 /**
- * One append/write queue for one physical log path. Every operation catches its
- * own I/O failure so a broken log cannot poison later operations or the caller
- * that submitted them.
- */
-class SerialLogWriter {
-  private tail: Promise<void> = Promise.resolve();
-  private pending = 0;
-
-  constructor(private readonly onIdle: () => void) {}
-
-  enqueue(operation: () => Promise<void>): Promise<void> {
-    this.pending++;
-    const next = this.tail
-      .catch(() => undefined)
-      .then(async () => {
-        try {
-          await operation();
-        } catch {
-          // Output logs are optional best-effort telemetry.
-        } finally {
-          this.pending--;
-        }
-      });
-    this.tail = next;
-    // Retire only after this operation settles. A write queued before that
-    // point increments pending and therefore keeps this exact writer alive.
-    void next.then(() => this.retireIfIdle());
-    return next;
-  }
-
-  whenIdle(): Promise<void> {
-    return this.tail.catch(() => undefined);
-  }
-
-  isIdle(): boolean {
-    return this.pending === 0;
-  }
-
-  private retireIfIdle(): void {
-    if (this.pending === 0) this.onIdle();
-  }
-}
-
-/** Writers are shared by path so separate execution wrappers cannot race. */
-const writers = new Map<string, SerialLogWriter>();
-let writerGeneration = 0;
-
-function writerFor(path: string): SerialLogWriter {
-  const key = resolve(path);
-  let writer = writers.get(key);
-  if (!writer) {
-    let createdWriter: SerialLogWriter;
-    createdWriter = new SerialLogWriter(() => {
-      // Identity and idle checks prevent an old writer from deleting a newer
-      // writer created for the same path after the old queue drained.
-      if (createdWriter.isIdle() && writers.get(key) === createdWriter) {
-        writers.delete(key);
-      }
-    });
-    writer = createdWriter;
-    writers.set(key, writer);
-    writerGeneration++;
-  }
-  return writer;
-}
-
-/**
- * Queue one filesystem operation after creating the log directory. The promise
- * always resolves; callers can await it for deterministic tests without making
- * runtime logging failures observable to agent execution.
- */
-function enqueueFileOperation(
-  path: string,
-  operation: () => Promise<void>,
-): Promise<void> {
-  return writerFor(path).enqueue(async () => {
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    await operation();
-  });
-}
-
-/**
- * Wait for all output-log writes submitted so far. This is intentionally not
- * used by the agent manager's hot lifecycle paths; it exists for tests and
- * hosts that explicitly want to wait for best-effort telemetry.
- */
-export async function whenOutputLogsIdle(): Promise<void> {
-  // Capture currently queued writers, then re-check generation and pending
-  // state so retirement/recreation cannot hide a write submitted while waiting.
-  while (true) {
-    const generation = writerGeneration;
-    const snapshot = [...writers.values()];
-    await Promise.all(snapshot.map((writer) => writer.whenIdle()));
-    if (
-      generation === writerGeneration
-      && snapshot.every((writer) => writer.isIdle())
-      && [...writers.values()].every((writer) => writer.isIdle())
-    ) return;
-  }
-}
-
-/** Short alias for explicit test/shutdown flushing. */
-export function whenIdle(): Promise<void> {
-  return whenOutputLogsIdle();
-}
-
-/**
  * Create the output file path for an agent.
- * Default path: <system temp dir>/pi-agent-outputs/<agentId>.log
+ * Default path: <private system temp dir>/pi-subagents-outputs-<random>/<agentId>.log
  * Parent-directory creation is queued asynchronously and is best effort.
  *
- * @param baseDir - Optional base directory. Provided for testability;
- *                  production callers use the system temporary directory.
+ * @param baseDir - Optional already-selected root. Production callers pass the
+ *                  private root owned by the parent session; tests may provide
+ *                  an isolated fixture directory.
  */
 export function createOutputFilePath(agentId: string, baseDir?: string): string {
-  const dir = baseDir ?? join(tmpdir(), "pi-agent-outputs");
-  const path = join(dir, `${agentId}.log`);
-  // Keep path creation non-blocking while retaining the old directory-creation
+  const path = resolveOutputFilePath(agentId, baseDir);
+  // Keep path creation non-blocking while retaining the directory-creation
   // guarantee once the queue is allowed to drain.
-  void enqueueFileOperation(path, async () => undefined);
+  void enqueueOutputDirectory(path);
   return path;
 }
 
@@ -164,7 +98,7 @@ export function writeInitialEntry(
   prompt: string,
 ): Promise<void> {
   const line = `${timestamp()} [USER] ${prompt}\n`;
-  return enqueueFileOperation(path, () => writeFile(path, line, "utf-8"));
+  return enqueueOutputWrite(path, false, line);
 }
 
 /**
@@ -173,7 +107,7 @@ export function writeInitialEntry(
  */
 function safeAppend(path: string, content: string): void {
   if (!content) return;
-  void enqueueFileOperation(path, () => appendFile(path, content, "utf-8"));
+  void enqueueOutputWrite(path, true, content);
 }
 
 /** Split text into non-empty lines, prefixing each with a timestamp and role tag. */
@@ -405,6 +339,6 @@ export class AgentOutputLog {
 
   /** Wait for this path's queued writes without creating a retained idle writer. */
   whenIdle(): Promise<void> {
-    return writers.get(resolve(this.path))?.whenIdle() ?? Promise.resolve();
+    return whenOutputLogIdle(this.path);
   }
 }

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fakeCtx, fakePi, makeResolvablePromise } from "../fixtures.ts";
+import { fakeCtx, fakePi, makeResolvablePromise, resolvedSpawnFixture, spawnWithResolvedFixture } from "../fixtures.ts";
 
 let uuidCounter = 0;
 
@@ -16,20 +16,11 @@ const mockModules = vi.hoisted(() => ({
     return `agent-${String(uuidCounter).padStart(8, "0")}`;
   }),
   resetUuidCounter: () => { uuidCounter = 0; },
-  fsMock: {
-    writeFileSync: vi.fn(),
-    readFileSync: vi.fn(),
-    mkdirSync: vi.fn(),
-    appendFileSync: vi.fn(),
-    existsSync: vi.fn(),
-  },
 }));
 
 vi.mock("node:crypto", () => ({
   randomUUID: mockModules.mockRandomUUID,
 }));
-
-vi.mock("node:fs", () => mockModules.fsMock);
 
 vi.mock("../../src/agents/agent-runner.js", () => ({
   runAgent: mockModules.mockRunAgent,
@@ -54,7 +45,11 @@ function mockRunResult(overrides?: Partial<MockRunResult>): MockRunResult {
   };
 }
 
-import { AgentManager } from "../../src/agents/agent-manager.js";
+import {
+  AgentManager,
+  MAX_QUEUED_ROOT_EXECUTIONS,
+  QUEUE_QUOTA_ERROR,
+} from "../../src/agents/agent-manager.js";
 import type { ConcurrencyConfig, OnAgentComplete } from "../../src/agents/agent-manager.js";
 import { SpawnCoordinator } from "../../src/spawn/spawn-coordinator.js";
 import {
@@ -120,11 +115,31 @@ describe("AgentManager", () => {
       exitSubagentSpawn();
       expect(isInsideSubagentSpawn()).toBe(true);
       expect(() => getPiInstance()).toThrow("Root ExtensionAPI is unavailable");
-      expect(() => manager.spawn(pi, ctx, "scout", "bypass", { description: "bypass" }))
+      expect(() => spawnWithResolvedFixture(manager, pi, ctx, "scout", "bypass", { description: "bypass" }))
         .toThrow("Root agent spawning is unavailable from a child runtime");
     });
 
     expect(isInsideSubagentSpawn()).toBe(false);
+  });
+
+  it("covers the root coordinator acceptance boundary with a real foreground execution", async () => {
+    manager = new AgentManager(onComplete);
+    mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
+    const coordinator = new SpawnCoordinator(manager);
+    const observer = vi.fn();
+    const unsubscribe = coordinator.subscribeDeliveryActivity(observer);
+
+    const result = await coordinator.spawn(fakePi(), fakeCtx(), resolvedSpawnFixture({
+      type: "scout",
+      prompt: "coordinator boundary",
+      description: "coordinator boundary",
+      runInBackground: false,
+    }));
+
+    expect(result.record.lifecycle.status).toBe("completed");
+    expect(observer).toHaveBeenCalledWith([]);
+    unsubscribe();
+    coordinator.dispose();
   });
 
   it("rejects direct root manager and coordinator spawns inside a child runtime", async () => {
@@ -134,11 +149,11 @@ describe("AgentManager", () => {
     const ctx = fakeCtx();
 
     await runWithSubagentRuntime(createSubagentRuntimeContext(), async () => {
-      expect(() => manager.spawn(pi, ctx, "scout", "bypass", { description: "bypass" }))
+      expect(() => spawnWithResolvedFixture(manager, pi, ctx, "scout", "bypass", { description: "bypass" }))
         .toThrow("Root agent spawning is unavailable from a child runtime");
-      await expect(coordinator.spawn(pi, ctx, {
+      await expect(coordinator.spawn(pi, ctx, resolvedSpawnFixture({
         type: "scout", prompt: "bypass", description: "bypass", runInBackground: false,
-      })).rejects.toThrow("Root agent spawning is unavailable from a child runtime");
+      }))).rejects.toThrow("Root agent spawning is unavailable from a child runtime");
     });
 
     expect(manager.listAgents()).toHaveLength(0);
@@ -166,11 +181,11 @@ describe("AgentManager", () => {
       expect(() => setSessionCtx({} as any)).toThrow("Root session context setter is unavailable");
       expect(() => setManager(null)).toThrow("Root manager setter is unavailable");
       expect(() => setCoordinator(null)).toThrow("Root coordinator setter is unavailable");
-      expect(() => manager.spawn(pi, ctx, "scout", "bypass", { description: "bypass" }))
+      expect(() => spawnWithResolvedFixture(manager, pi, ctx, "scout", "bypass", { description: "bypass" }))
         .toThrow("Root agent spawning is unavailable from a child runtime");
-      await expect(coordinator.spawn(pi, ctx, {
+      await expect(coordinator.spawn(pi, ctx, resolvedSpawnFixture({
         type: "scout", prompt: "bypass", description: "bypass", runInBackground: false,
-      })).rejects.toThrow("Root agent spawning is unavailable from a child runtime");
+      }))).rejects.toThrow("Root agent spawning is unavailable from a child runtime");
     };
 
     try {
@@ -202,17 +217,57 @@ describe("AgentManager", () => {
   // ── Concurrency ──
 
   describe("concurrency", () => {
+    it("rejects the first execution beyond the hard global queue quota before retaining it", () => {
+      manager = new AgentManager(onComplete, { default: 1 });
+      const blocker = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValue(blocker.promise);
+
+      const runningId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "running", {
+        description: "running", isBackground: true,
+      });
+      const queuedIds = Array.from({ length: MAX_QUEUED_ROOT_EXECUTIONS }, (_, index) =>
+        spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", `queued-${index}`, {
+          description: `queued-${index}`, isBackground: true,
+        }));
+
+      expect(manager.getRecord(runningId)?.lifecycle.status).toBe("running");
+      expect(queuedIds).toHaveLength(MAX_QUEUED_ROOT_EXECUTIONS);
+      expect(manager.listAgents()).toHaveLength(MAX_QUEUED_ROOT_EXECUTIONS + 1);
+      expect((manager as any).executionService.pendingCount).toBe(MAX_QUEUED_ROOT_EXECUTIONS);
+      const retainedIds = manager.listAgents().map((record) => record.id).sort();
+
+      expect(() => spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "over-quota", {
+        description: "over-quota", isBackground: true,
+      })).toThrow(QUEUE_QUOTA_ERROR);
+
+      expect(manager.listAgents().map((record) => record.id).sort()).toEqual(retainedIds);
+      expect(manager.getTotalAgentCount()).toBe(MAX_QUEUED_ROOT_EXECUTIONS + 1);
+      expect((manager as any).executionService.pendingCount).toBe(MAX_QUEUED_ROOT_EXECUTIONS);
+
+      // Abort frees one queue position without changing the running task or FIFO
+      // ownership of the remaining accepted work.
+      expect(manager.abort(queuedIds[0]!, "user")).toBe(true);
+      expect((manager as any).executionService.pendingCount).toBe(MAX_QUEUED_ROOT_EXECUTIONS - 1);
+      const admittedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "admitted", {
+        description: "admitted", isBackground: true,
+      });
+      expect(manager.getRecord(admittedId)?.lifecycle.status).toBe("queued");
+      expect((manager as any).executionService.pendingCount).toBe(MAX_QUEUED_ROOT_EXECUTIONS);
+      expect(manager.getRecord(runningId)?.lifecycle.status).toBe("running");
+      blocker.resolve(mockRunResult());
+    });
+
     it("retains the resolved model key in invocation metadata for queued controls", () => {
       manager = new AgentManager(onComplete, { default: 1 });
       const first = makeResolvablePromise();
       mockModules.mockRunAgent.mockReturnValue(first.promise);
 
-      const active = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "active", {
+      const active = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "active", {
         description: "active",
         modelKey: "provider/active",
         isBackground: true,
       });
-      const queued = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "queued", {
+      const queued = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "queued", {
         description: "queued",
         modelKey: "provider/queued",
         isBackground: true,
@@ -231,9 +286,9 @@ describe("AgentManager", () => {
 
       const pi = fakePi();
       const ctx = fakeCtx();
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "one", { description: "one", modelKey: "llamacpp/4b", isBackground: true });
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "two", { description: "two", modelKey: "anthropic/claude", isBackground: true });
-      const id3 = manager.spawn(pi, ctx, "general-purpose", "three", { description: "three", isBackground: false });
+      const id1 = spawnWithResolvedFixture(manager, pi, ctx, "general-purpose", "one", { description: "one", modelKey: "llamacpp/4b", isBackground: true });
+      const id2 = spawnWithResolvedFixture(manager, pi, ctx, "general-purpose", "two", { description: "two", modelKey: "anthropic/claude", isBackground: true });
+      const id3 = spawnWithResolvedFixture(manager, pi, ctx, "general-purpose", "three", { description: "three", isBackground: false });
 
       expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
       expect(manager.getRecord(id2)?.lifecycle.status).toBe("running");
@@ -242,14 +297,43 @@ describe("AgentManager", () => {
       first.resolve(mockRunResult());
     });
 
+    it("normalizes extreme manager limits to four and drains the FIFO queue", async () => {
+      manager = new AgentManager(onComplete, { default: Number.MAX_SAFE_INTEGER });
+      const runs = Array.from({ length: 5 }, () => makeResolvablePromise());
+      runs.forEach((run) => mockModules.mockRunAgent.mockReturnValueOnce(run.promise));
+
+      const ids = Array.from({ length: 5 }, (_, index) => spawnWithResolvedFixture(
+        manager,
+        fakePi(),
+        fakeCtx(),
+        "general-purpose",
+        `bounded-${index}`,
+        { description: `bounded-${index}`, isBackground: true },
+      ));
+
+      expect((manager as any).executionService.scheduler.limitCount).toBe(4);
+      manager.setConcurrency({ default: 1e100 });
+      expect((manager as any).executionService.scheduler.limitCount).toBe(4);
+      expect((manager as any).executionService.scheduler.runningCount).toBe(4);
+      expect(ids.slice(0, 4).every((id) => manager.getRecord(id)?.lifecycle.status === "running")).toBe(true);
+      expect(manager.getRecord(ids[4]!)?.lifecycle.status).toBe("queued");
+      expect(mockModules.mockRunAgent.mock.calls).toHaveLength(4);
+
+      runs[0]!.resolve(mockRunResult({ responseText: "first" }));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockModules.mockRunAgent.mock.calls[4]![2]).toBe("bounded-4");
+      expect((manager as any).executionService.scheduler.runningCount).toBe(4);
+    });
+
     it("starts queued agents when a global slot frees", async () => {
       manager = new AgentManager(onComplete, { default: 1 });
       const first = makeResolvablePromise();
       const second = makeResolvablePromise();
       mockModules.mockRunAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 
-      const id1 = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", modelKey: "provider/first", isBackground: true });
-      const id2 = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", modelKey: "other/second", isBackground: true });
+      const id1 = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", modelKey: "provider/first", isBackground: true });
+      const id2 = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", modelKey: "other/second", isBackground: true });
       expect(manager.getRecord(id1)?.lifecycle.status).toBe("running");
       expect(manager.getRecord(id2)?.lifecycle.status).toBe("queued");
 
@@ -265,10 +349,10 @@ describe("AgentManager", () => {
         .mockRejectedValueOnce(new Error("runner setup failed"))
         .mockReturnValueOnce(continuation.promise);
 
-      const failedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "failed", {
+      const failedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "failed", {
         description: "failed", isBackground: true,
       });
-      const continuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "continued", {
+      const continuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "continued", {
         description: "continued", isBackground: true,
       });
 
@@ -290,13 +374,13 @@ describe("AgentManager", () => {
         .mockImplementationOnce(() => { throw new Error("queued startup failed"); })
         .mockReturnValueOnce(continuation.promise);
 
-      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", {
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "first", {
         description: "first", isBackground: true,
       });
-      const failedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "failed", {
+      const failedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "failed", {
         description: "failed", isBackground: false,
       });
-      const continuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "continued", {
+      const continuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "continued", {
         description: "continued", isBackground: true,
       });
       const failedRecord = manager.getRecord(failedId)!;
@@ -324,10 +408,10 @@ describe("AgentManager", () => {
       mockModules.mockRunAgent
         .mockReturnValueOnce(first.promise)
         .mockReturnValueOnce(queued.promise);
-      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", {
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "first", {
         description: "first", isBackground: true,
       });
-      const queuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "queued", {
+      const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "queued", {
         description: "queued", isBackground: false,
       });
       const queuedRecord = manager.getRecord(queuedId)!;
@@ -351,8 +435,8 @@ describe("AgentManager", () => {
       const second = makeResolvablePromise();
       mockModules.mockRunAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 
-      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", isBackground: true });
-      const queuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", isBackground: false });
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", isBackground: true });
+      const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", isBackground: false });
       const queuedPromise = manager.getRecord(queuedId)!.execution.promise!;
       let settled = false;
       void queuedPromise.then(() => { settled = true; });
@@ -372,8 +456,8 @@ describe("AgentManager", () => {
       const first = makeResolvablePromise();
       mockModules.mockRunAgent.mockReturnValue(first.promise);
 
-      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", isBackground: true });
-      const queuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", isBackground: true });
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", isBackground: true });
+      const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", isBackground: true });
       const queuedRecord = manager.getRecord(queuedId)!;
 
       expect(manager.abort(queuedId, "user")).toBe(true);
@@ -390,7 +474,7 @@ describe("AgentManager", () => {
       const removeListener = vi.spyOn(parent.signal, "removeEventListener");
       parent.abort();
 
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+      const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", {
         description: "task", signal: parent.signal,
       });
       const record = manager.getRecord(id)!;
@@ -410,10 +494,10 @@ describe("AgentManager", () => {
       mockModules.mockRunAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
       const parent = new AbortController();
 
-      const firstId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", {
+      const firstId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "first", {
         description: "first", signal: parent.signal,
       });
-      const queuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "queued", {
+      const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "queued", {
         description: "queued",
       });
       const firstRecord = manager.getRecord(firstId)!;
@@ -438,10 +522,10 @@ describe("AgentManager", () => {
       const parent = new AbortController();
       const removeListener = vi.spyOn(parent.signal, "removeEventListener");
 
-      const firstId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", {
+      const firstId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "first", {
         description: "first", isBackground: true,
       });
-      const queuedId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "queued", {
+      const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "queued", {
         description: "queued", signal: parent.signal,
       });
       const queuedRecord = manager.getRecord(queuedId)!;
@@ -463,8 +547,8 @@ describe("AgentManager", () => {
       const deferred = makeResolvablePromise();
       mockModules.mockRunAgent.mockReturnValue(deferred.promise);
 
-      manager.spawn(fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", modelKey: "provider/one", isBackground: true });
-      const queued = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", modelKey: "other/two", isBackground: true });
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "one", { description: "one", modelKey: "provider/one", isBackground: true });
+      const queued = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "two", { description: "two", modelKey: "other/two", isBackground: true });
       manager.setConcurrency({ default: 2 });
 
       expect(manager.getRecord(queued)?.lifecycle.status).toBe("running");
@@ -478,13 +562,13 @@ describe("AgentManager", () => {
       const second = makeResolvablePromise();
       mockModules.mockRunAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
       const config = { name: "review", description: "worktree", systemPrompt: "frozen prompt", tools: ["read"] };
-      manager.spawn(fakePi(), fakeCtx(), "review", "first", { description: "first", modelKey: "test/model", isBackground: true });
-      manager.spawn(fakePi(), fakeCtx(), "review", "queued", { description: "queued", agentConfig: config, isBackground: true });
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "review", "first", { description: "first", modelKey: "test/model", isBackground: true });
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "review", "queued", { description: "queued", agentConfig: config, isBackground: true });
       config.systemPrompt = "refreshed parent prompt";
       config.tools[0] = "bash";
       first.resolve(mockRunResult());
       await vi.waitFor(() => expect(mockModules.mockRunAgent).toHaveBeenCalledTimes(2));
-      expect(mockModules.mockRunAgent.mock.calls[1]?.[3].agentConfig).toMatchObject({ systemPrompt: "frozen prompt", tools: ["read"] });
+      expect(mockModules.mockRunAgent.mock.calls[1]?.[3].acceptedSpawn.agentConfig).toMatchObject({ systemPrompt: "frozen prompt", tools: ["read"] });
       second.resolve(mockRunResult());
     });
 
@@ -515,13 +599,14 @@ describe("AgentManager", () => {
         model,
         modelKey: "accepted/model",
         thinkingLevel: "high",
+        projectTrusted: false,
       });
 
-      manager.spawn(fakePi(), fakeCtx(), "blocker", "blocker", {
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "blocker", "blocker", {
         description: "blocker",
         isBackground: true,
       });
-      const acceptedId = manager.spawn(fakePi(), fakeCtx(), resolvedSpawn);
+      const acceptedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), resolvedSpawn);
       const acceptedRecord = manager.getRecord(acceptedId)!;
       expect(acceptedRecord.lifecycle.status).toBe("queued");
       expect(acceptedRecord.display).toMatchObject({
@@ -541,16 +626,16 @@ describe("AgentManager", () => {
       const call = mockModules.mockRunAgent.mock.calls[1]!;
       expect(call[1]).toBe("accepted");
       expect(call[2]).toBe("accepted prompt");
-      expect(call[3].agentConfig).toMatchObject({
+      expect(call[3].acceptedSpawn.agentConfig).toMatchObject({
         name: "accepted",
         description: "Accepted definition",
         systemPrompt: "Frozen instructions",
         tools: ["read"],
       });
-      expect(call[3].runtimeSettings.agents).toEqual({ accepted: { model: "settings/model" } });
-      expect(call[3].model).toBe(model);
+      expect(call[3].acceptedSpawn.runtimeSettings.agents).toEqual({ accepted: { model: "settings/model" } });
+      expect(call[3].acceptedSpawn.model).toBe(model);
       expect(call[3].acceptedSpawn.modelKey).toBe("accepted/model");
-      expect(call[3].thinkingLevel).toBe("high");
+      expect(call[3].acceptedSpawn.thinkingLevel).toBe("high");
       expect(call[3].acceptedSpawn.accepted).toBe(true);
 
       acceptedRun.resolve(mockRunResult());
@@ -573,7 +658,7 @@ describe("AgentManager", () => {
       const ctx = fakeCtx();
       const pi = fakePi();
 
-      const id = manager.spawn(pi, ctx, "general-purpose", "task", { description: "test task", modelKey: "test/model" });
+      const id = spawnWithResolvedFixture(manager, pi, ctx, "general-purpose", "task", { description: "test task", modelKey: "test/model" });
       manager.getRecord(id)!.stats.lifetimeUsage.cost = 0.05;
       await manager.getRecord(id)!.execution.promise;
 
@@ -587,7 +672,7 @@ describe("AgentManager", () => {
       const ctx = fakeCtx();
       const pi = fakePi();
 
-      const id = manager.spawn(pi, ctx, "general-purpose", "task", { description: "test task", modelKey: "test/model" });
+      const id = spawnWithResolvedFixture(manager, pi, ctx, "general-purpose", "task", { description: "test task", modelKey: "test/model" });
       const record = manager.getRecord(id)!;
       record.stats.lifetimeUsage.cost = 0.03;
       await record.execution.promise;
@@ -606,13 +691,13 @@ describe("AgentManager", () => {
       const ctx = fakeCtx();
       const pi = fakePi();
 
-      const id1 = manager.spawn(pi, ctx, "general-purpose", "task 1", { description: "first", modelKey: "test/model" });
+      const id1 = spawnWithResolvedFixture(manager, pi, ctx, "general-purpose", "task 1", { description: "first", modelKey: "test/model" });
       manager.getRecord(id1)!.stats.lifetimeUsage.cost = 0.02;
       await manager.getRecord(id1)!.execution.promise;
       expect(manager.getTotalAgentCost()).toBe(0.02);
 
       mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-      const id2 = manager.spawn(pi, ctx, "general-purpose", "task 2", { description: "second", modelKey: "test/model" });
+      const id2 = spawnWithResolvedFixture(manager, pi, ctx, "general-purpose", "task 2", { description: "second", modelKey: "test/model" });
       manager.getRecord(id2)!.stats.lifetimeUsage.cost = 0.05;
       await manager.getRecord(id2)!.execution.promise;
       expect(manager.getTotalAgentCost()).toBe(0.07);
@@ -625,7 +710,7 @@ describe("AgentManager", () => {
       const ctx = fakeCtx();
       const pi = fakePi();
 
-      const id = manager.spawn(pi, ctx, "general-purpose", "task", { description: "failing", modelKey: "test/model" });
+      const id = spawnWithResolvedFixture(manager, pi, ctx, "general-purpose", "task", { description: "failing", modelKey: "test/model" });
       manager.getRecord(id)!.stats.lifetimeUsage.cost = 0.01;
       await manager.getRecord(id)!.execution.promise;
 
@@ -641,7 +726,7 @@ describe("AgentManager", () => {
       const ctx = fakeCtx();
       const pi = fakePi();
 
-      const id = manager.spawn(pi, ctx, "general-purpose", "task", { description: "stoppable", modelKey: "test/model" });
+      const id = spawnWithResolvedFixture(manager, pi, ctx, "general-purpose", "task", { description: "stoppable", modelKey: "test/model" });
       manager.getRecord(id)!.stats.lifetimeUsage.cost = 0.04;
 
       manager.abort(id, "agent");
@@ -670,8 +755,8 @@ describe("AgentManager", () => {
         .mockReturnValueOnce(first.promise)
         .mockReturnValueOnce(second.promise);
 
-      const id1 = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "first", { description: "first", modelKey: "test/model" });
-      const id2 = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "second", { description: "second", modelKey: "test/model" });
+      const id1 = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "first", { description: "first", modelKey: "test/model" });
+      const id2 = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "second", { description: "second", modelKey: "test/model" });
 
       expect(manager.getRecord(id2)?.lifecycle.status).toBe("queued");
       expect(manager.getTotalAgentCount()).toBe(2);
@@ -692,11 +777,11 @@ describe("AgentManager", () => {
         .mockImplementationOnce(() => { throw new Error("start failed"); })
         .mockResolvedValueOnce(mockRunResult());
 
-      expect(() => manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" })).toThrow("start failed");
+      expect(() => spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" })).toThrow("start failed");
       expect(manager.getTotalAgentCount()).toBe(0);
       expect(manager.listAgents()).toHaveLength(0);
 
-      const nextId = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "next", { description: "next" });
+      const nextId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "next", { description: "next" });
       expect(manager.getRecord(nextId)?.lifecycle.status).toBe("running");
       await manager.getRecord(nextId)!.execution.promise;
     });
@@ -705,7 +790,7 @@ describe("AgentManager", () => {
       manager = new AgentManager(onComplete, { default: 1 });
       mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult({ responseText: "done without log" }));
 
-      const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+      const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", {
         description: "task", modelKey: "test/model",
       });
       const record = manager.getRecord(id)!;
@@ -725,7 +810,7 @@ describe("AgentManager", () => {
         const session = mockAgentSession();
         mockModules.mockRunAgent.mockResolvedValue(mockRunResult({ session }));
 
-        const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
+        const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
         const record = manager.getRecord(id)!;
         await record.execution.promise;
         record.lifecycle.completedAt = Date.now() - 70 * 60_000;
@@ -739,6 +824,68 @@ describe("AgentManager", () => {
         manager?.dispose();
         vi.useRealTimers();
       }
+    });
+
+    it("evicts the oldest settled record and disposes its retained session", async () => {
+      manager = new AgentManager(onComplete);
+      const sessions = Array.from({ length: 65 }, () => mockAgentSession());
+      let sessionIndex = 0;
+      mockModules.mockRunAgent.mockImplementation(() => Promise.resolve(mockRunResult({
+        session: sessions[sessionIndex++]!,
+      })));
+
+      const ids: string[] = [];
+      const records = [] as ReturnType<AgentManager["getRecord"]>[];
+      for (let index = 0; index < sessions.length; index++) {
+        const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", `task-${index}`, {
+          description: `task-${index}`,
+        });
+        ids.push(id);
+        records.push(manager.getRecord(id));
+      }
+      await Promise.all(records.map((record) => record!.execution.promise));
+      await Promise.resolve();
+
+      expect(manager.listAgents()).toHaveLength(64);
+      expect(manager.getRecord(ids[0]!)).toBeUndefined();
+      expect(() => manager.continueAgent(ids[0]!, "too late")).toThrow("not found");
+      expect(manager.listAgents().some((record) => record.id === ids[0])).toBe(false);
+      expect(sessions[0]!.dispose).toHaveBeenCalledOnce();
+      expect(manager.getRecord(ids[64]!)).toBeDefined();
+      expect(sessions[64]!.dispose).not.toHaveBeenCalled();
+    });
+
+    it("protects active and pending records while evicting the oldest safe record", () => {
+      manager = new AgentManager(onComplete, { default: 100 });
+      const blocker = makeResolvablePromise();
+      mockModules.mockRunAgent.mockReturnValue(blocker.promise);
+      const sessions = Array.from({ length: 66 }, () => mockAgentSession());
+      const records = sessions.map((session, index) => {
+        const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", `task-${index}`, {
+          description: `task-${index}`,
+        });
+        const record = manager.getRecord(id)!;
+        record.execution.session = session;
+        record.lifecycle.status = "completed";
+        record.lifecycle.settled = true;
+        record.lifecycle.completedAt = index + 1;
+        record.stats.executions![0]!.status = "completed";
+        record.stats.executions![0]!.completedAt = index + 1;
+        return record;
+      });
+
+      records[0]!.lifecycle.status = "running";
+      records[0]!.lifecycle.settled = false;
+      records[1]!.delivery = { state: "pending", attempts: 0 };
+      const evicted = manager.pruneRetainedRecords();
+
+      expect(evicted).toEqual([records[2]!.id]);
+      expect(manager.getRecord(records[0]!.id)).toBe(records[0]);
+      expect(manager.getRecord(records[1]!.id)).toBe(records[1]);
+      expect(manager.getRecord(records[2]!.id)).toBeUndefined();
+      expect(sessions[2]!.dispose).toHaveBeenCalledOnce();
+      // The unresolved runner is deliberately left for manager.dispose(), so
+      // no lifecycle completion can race this deterministic retention check.
     });
   });
 
@@ -763,7 +910,7 @@ describe("usage accounting", () => {
     manager = new AgentManager(onComplete);
     mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
 
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
     const record = manager.getRecord(id)!;
     const onUsage = getOnAssistantUsage();
 
@@ -777,7 +924,7 @@ describe("usage accounting", () => {
   it("retains the cumulative cache-hit rate after a high-hit request is followed by a miss", () => {
     manager = new AgentManager(onComplete);
     mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
     const onUsage = getOnAssistantUsage();
 
     onUsage({ input: 20, output: 10, cacheRead: 80, cacheWrite: 0, cost: 0 });
@@ -792,7 +939,7 @@ describe("usage accounting", () => {
   it("updates the cumulative cache-hit rate for supplemental usage", () => {
     manager = new AgentManager(onComplete);
     mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
     const onAssistantUsage = getOnAssistantUsage();
     const onSupplementalUsage = getOnSupplementalUsage();
 
@@ -819,7 +966,7 @@ describe("usage accounting", () => {
     };
     mockModules.mockRunAgent.mockResolvedValue(mockRunResult({ session }));
 
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     await manager.getRecord(id)!.execution.promise;
 
     expect(manager.getRecord(id)?.lifecycle.status).toBe("completed");
@@ -835,7 +982,7 @@ describe("usage accounting", () => {
       model: { provider: "kimi-coding" },
     };
     mockModules.mockRunAgent.mockResolvedValue(mockRunResult({ session }));
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task", modelKey: "test/model" });
     await manager.getRecord(id)!.execution.promise;
 
     expect(manager.getRecord(id)!.stats).toMatchObject({
@@ -850,7 +997,7 @@ describe("usage accounting", () => {
     manager = new AgentManager(onComplete);
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     const onSessionCreated = mockModules.mockRunAgent.mock.calls[0]![3].onSessionCreated;
 
     manager.dispose();
@@ -869,7 +1016,7 @@ describe("usage accounting", () => {
     };
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     const record = manager.getRecord(id)!;
     mockModules.mockRunAgent.mock.calls[0]![3].onSessionCreated(session);
     const runnerPromise = record.execution.promise!;
@@ -897,7 +1044,7 @@ describe("usage accounting", () => {
     };
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     const record = manager.getRecord(id)!;
     record.execution.session = session;
     const onUsage = mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage;
@@ -932,7 +1079,7 @@ describe("usage accounting", () => {
     };
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     const record = manager.getRecord(id)!;
     record.execution.session = session;
     const onUsage = mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage;
@@ -965,7 +1112,7 @@ describe("usage accounting", () => {
     };
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     const record = manager.getRecord(id)!;
     record.execution.session = session;
     mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage({ input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
@@ -987,7 +1134,7 @@ describe("usage accounting", () => {
     };
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     const record = manager.getRecord(id)!;
     record.execution.session = session;
     mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage({ input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
@@ -1014,7 +1161,7 @@ describe("usage accounting", () => {
     };
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     const record = manager.getRecord(id)!;
     record.execution.session = session;
     mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage({ input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
@@ -1038,7 +1185,7 @@ describe("usage accounting", () => {
     };
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     const record = manager.getRecord(id)!;
     record.execution.session = session;
     mockModules.mockRunAgent.mock.calls[0]![3].onAssistantUsage({ input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
@@ -1077,7 +1224,7 @@ describe("usage accounting", () => {
     };
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", { description: "task" });
     const record = manager.getRecord(id)!;
     record.execution.session = session;
 
@@ -1128,7 +1275,7 @@ describe("AgentManager steering and shutdown", () => {
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
     manager = new AgentManager(undefined, { default: 1 });
 
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", {
       description: "task", signal: parent.signal,
     });
     await manager.getRecord(id)!.execution.promise;
@@ -1144,7 +1291,7 @@ describe("AgentManager steering and shutdown", () => {
     mockModules.mockRunAgent.mockReturnValueOnce(deferred.promise);
     manager = new AgentManager(undefined, { default: 1 });
 
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", {
       description: "task", signal: parent.signal,
     });
     const signal = mockModules.mockRunAgent.mock.calls[0][3].signal as AbortSignal;
@@ -1166,7 +1313,7 @@ describe("AgentManager steering and shutdown", () => {
     });
     manager = new AgentManager(undefined, { default: 1 });
 
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", {
       description: "task", signal: parent.signal,
     });
     const record = manager.getRecord(id)!;
@@ -1190,8 +1337,8 @@ describe("AgentManager steering and shutdown", () => {
     const secondRun = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(firstRun.promise).mockReturnValueOnce(secondRun.promise);
     manager = new AgentManager(undefined, { default: 2 });
-    manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
-    manager.spawn(fakePi(), fakeCtx(), "reviewer", "second", { description: "second" });
+    spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "reviewer", "second", { description: "second" });
     const firstSession = mockAgentSession();
     firstSession.dispose.mockImplementation(() => { throw new Error("dispose failed"); });
     const secondSession = mockAgentSession();
@@ -1213,17 +1360,17 @@ describe("AgentManager steering and shutdown", () => {
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult({ session: firstSession }));
     manager = new AgentManager(undefined, { default: 1 });
 
-    const completedId = manager.spawn(fakePi(), fakeCtx(), "scout", "completed", { description: "completed" });
+    const completedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "completed", { description: "completed" });
     await manager.getRecord(completedId)!.execution.promise;
 
     const activeRun = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(activeRun.promise);
-    const activeId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "active", { description: "active" });
+    const activeId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "reviewer", "active", { description: "active" });
     const activeRecord = manager.getRecord(activeId)!;
     const activeSession = mockAgentSession();
     mockModules.mockRunAgent.mock.calls[1]![3].onSessionCreated(activeSession);
 
-    const queuedId = manager.spawn(fakePi(), fakeCtx(), "scout", "queued", { description: "queued" });
+    const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "queued", { description: "queued" });
     const queuedRecord = manager.getRecord(queuedId)!;
     const queuedPromise = queuedRecord.execution.promise!;
     const activePromise = activeRecord.execution.promise!;
@@ -1253,10 +1400,10 @@ describe("AgentManager steering and shutdown", () => {
     manager.subscribeActivity(() => { throw new Error("observer failure"); });
     const unsubscribe = manager.subscribeActivity((snapshot) => snapshots.push(snapshot));
 
-    const runningId = manager.spawn(fakePi(), fakeCtx(), "scout", "running", {
+    const runningId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "running", {
       description: "running", isBackground: true,
     });
-    const queuedId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "queued", {
+    const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "reviewer", "queued", {
       description: "queued", isBackground: false,
     });
     const active = snapshots.at(-1)!;
@@ -1297,24 +1444,18 @@ describe("AgentManager steering and shutdown", () => {
     expect(snapshots).toHaveLength(countAfterUnsubscribe);
   });
 
-  it("forwards record callbacks and aborts an active controller on dispose", async () => {
+  it("wires manager telemetry and aborts an active controller on dispose", async () => {
     const deferred = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValue(deferred.promise);
-    const onToolActivity = vi.fn();
-    const onAssistantUsage = vi.fn();
-    const onCompaction = vi.fn();
     manager = new AgentManager(undefined, { default: 1 });
-    const id = manager.spawn(fakePi(), fakeCtx(), "general-purpose", "task", {
-      description: "task", onToolActivity, onAssistantUsage, onCompaction,
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "general-purpose", "task", {
+      description: "task",
     });
     const callbacks = mockModules.mockRunAgent.mock.calls[0][3];
 
     callbacks.onToolActivity({ type: "end", toolName: "read" });
     callbacks.onAssistantUsage({ input: 2, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.01 });
     callbacks.onCompaction({ reason: "threshold", tokensBefore: 10 });
-    expect(onToolActivity).toHaveBeenCalledWith({ type: "end", toolName: "read" });
-    expect(onAssistantUsage).toHaveBeenCalledOnce();
-    expect(onCompaction).toHaveBeenCalledOnce();
     expect(manager.getRecord(id)!.stats).toMatchObject({ compactionCount: 1 });
 
     const signal = callbacks.signal as AbortSignal;

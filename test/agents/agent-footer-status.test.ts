@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fakeCtx, fakePi, makeResolvablePromise } from "../fixtures.ts";
+import { fakeCtx, fakePi, makeResolvablePromise, spawnWithResolvedFixture } from "../fixtures.ts";
 
 const managerFooterMocks = vi.hoisted(() => ({
   runAgent: vi.fn(),
@@ -80,10 +80,10 @@ describe("agent footer activity status", () => {
       const snapshots: AgentActivitySnapshot[] = [];
       manager.subscribeActivity((snapshot) => snapshots.push(snapshot));
 
-      const runningId = manager.spawn(fakePi(), fakeCtx(), "scout", "running", {
+      const runningId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "running", {
         description: "running", isBackground: true,
       });
-      const queuedId = manager.spawn(fakePi(), fakeCtx(), "reviewer", "queued", {
+      const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "reviewer", "queued", {
         description: "queued", isBackground: false,
       });
       expect(snapshots.at(-1)).toEqual(expect.arrayContaining([
@@ -114,14 +114,14 @@ describe("agent footer activity status", () => {
         aborted: false,
       });
       manager = new AgentManager(undefined, { default: 1 });
-      const completedId = manager.spawn(fakePi(), fakeCtx(), "scout", "initial", { description: "initial" });
+      const completedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "initial", { description: "initial" });
       await manager.getRecord(completedId)!.execution.promise;
 
       const blocker = makeResolvablePromise();
       managerFooterMocks.runAgent.mockReturnValueOnce(blocker.promise);
-      manager.spawn(fakePi(), fakeCtx(), "reviewer", "blocker", { description: "blocker" });
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "reviewer", "blocker", { description: "blocker" });
       const continuation = manager.continueAgent(completedId, "queued follow-up", {});
-      (manager as any).releaseExecution(manager.getRecord(completedId));
+      manager.getRecord(completedId)!.execution.session = undefined;
 
       blocker.resolve({
         responseText: "",
