@@ -3,13 +3,14 @@ import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Skill } from "@earendil-works/pi-coding-agent";
-const { mockWorkerRun, mockWorkerClose } = vi.hoisted(() => ({
+const { mockWorkerRun, mockWorkerClose, mockWorkerCreate } = vi.hoisted(() => ({
   mockWorkerRun: vi.fn(),
   mockWorkerClose: vi.fn(async () => undefined),
+  mockWorkerCreate: vi.fn(),
 }));
 
 vi.mock("../../src/prompt/skill-loader-worker.ts", () => ({
-  createPiSkillLoaderWorkerAdapter: () => ({ run: mockWorkerRun, close: mockWorkerClose }),
+  createPiSkillLoaderWorkerAdapter: mockWorkerCreate,
 }));
 
 import {
@@ -51,11 +52,14 @@ beforeEach(() => {
   mockLoadSkillsFromDir.mockReturnValue({ skills: [], diagnostics: [] });
   mockWorkerRun.mockResolvedValue([]);
   mockWorkerClose.mockClear();
+  mockWorkerCreate.mockClear();
+  mockWorkerCreate.mockImplementation(() => ({ run: mockWorkerRun, close: mockWorkerClose }));
   mockGetAgentDir.mockReturnValue("C:\\Users\\Pi User\\.pi\\agent");
 });
 
 afterEach(() => {
   try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  vi.unstubAllEnvs();
   vi.clearAllMocks();
 });
 
@@ -171,6 +175,116 @@ describe("skill catalog composition", () => {
 
     await expect(loadAllSkillsAsync(tmpDir, false)).resolves.toEqual([global]);
     expect(mockWorkerRun).not.toHaveBeenCalledWith("loadSkills", expect.anything());
+  });
+
+  it("deduplicates identical in-flight catalogs while cloning each caller result", async () => {
+    mkdirSync(join(tmpDir, ".git"));
+    const agentDir = join(tmpDir, "agent");
+    mkdirSync(join(agentDir, "skills"), { recursive: true });
+    mockGetAgentDir.mockReturnValue(agentDir);
+    const sourceInfo = { scope: "project", path: "project-skill" } as Skill["sourceInfo"];
+    const skill = {
+      ...makeSkill("shared", "Shared skill", join(agentDir, "skills", "shared", "SKILL.md")),
+      sourceInfo,
+    };
+    let release!: () => void;
+    const blocked = new Promise<void>((resolveBlocked) => { release = resolveBlocked; });
+    mockWorkerRun.mockImplementation(async (operation: string) => {
+      await blocked;
+      return operation === "loadSkills" ? [skill] : [];
+    });
+
+    const requests = Array.from({ length: 64 }, () => loadAllSkillsAsync(tmpDir, true));
+    expect(mockWorkerCreate).toHaveBeenCalledOnce();
+    expect(mockWorkerClose).not.toHaveBeenCalled();
+    release();
+    const results = await Promise.all(requests);
+
+    expect(mockWorkerCreate).toHaveBeenCalledOnce();
+    expect(mockWorkerClose).toHaveBeenCalledOnce();
+    expect(results.every((result) => result.length === 1 && result[0]?.name === "shared")).toBe(true);
+    expect(new Set(results.map((result) => result)).size).toBe(64);
+    expect(new Set(results.map((result) => result[0])).size).toBe(64);
+    expect(new Set(results.map((result) => result[0]?.sourceInfo)).size).toBe(64);
+    const followUp = await loadAllSkillsAsync(tmpDir, true);
+    expect(followUp).toEqual(results[1]);
+    expect(followUp).not.toBe(results[1]);
+    expect(followUp[0]).not.toBe(results[1]![0]);
+    expect(followUp[0]?.sourceInfo).not.toBe(results[1]![0]?.sourceInfo);
+    expect(mockWorkerCreate).toHaveBeenCalledTimes(2);
+    expect(mockWorkerClose).toHaveBeenCalledTimes(2);
+
+    results[0]![0]!.sourceInfo.path = "caller mutation";
+    expect(results[1]![0]!.sourceInfo.path).toBe("project-skill");
+  });
+
+  it("propagates one in-flight failure, removes it, and retries successfully", async () => {
+    mkdirSync(join(tmpDir, ".git"));
+    const agentDir = join(tmpDir, "agent");
+    mkdirSync(join(agentDir, "skills"), { recursive: true });
+    mockGetAgentDir.mockReturnValue(agentDir);
+    const failure = new Error("catalog worker failed");
+    let rejectFirst!: (error: Error) => void;
+    const blockedFailure = new Promise<never>((_, reject) => { rejectFirst = reject; });
+    void blockedFailure.catch(() => undefined);
+    mockWorkerRun.mockImplementationOnce(async () => blockedFailure);
+
+    const requests = Array.from({ length: 64 }, () => loadAllSkillsAsync(tmpDir, true));
+    const settled = Promise.all(requests.map((request) => request.catch((error: unknown) => error)));
+    await Promise.resolve();
+    rejectFirst(failure);
+    const errors = await settled;
+    expect(errors.every((error) => error === failure)).toBe(true);
+    expect(mockWorkerCreate).toHaveBeenCalledOnce();
+    expect(mockWorkerClose).toHaveBeenCalledOnce();
+
+    mockWorkerRun.mockResolvedValue([]);
+    await expect(loadAllSkillsAsync(tmpDir, true)).resolves.toEqual([]);
+    expect(mockWorkerCreate).toHaveBeenCalledTimes(2);
+    expect(mockWorkerClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("separates cwd, dynamic agent/home roots, and trust snapshots", async () => {
+    const cwd = join(tmpDir, "repo");
+    const otherCwd = join(tmpDir, "other-repo");
+    const agentA = join(tmpDir, "agent-a");
+    const agentB = join(tmpDir, "agent-b");
+    const homeA = join(tmpDir, "home-a");
+    const homeB = join(tmpDir, "home-b");
+    for (const directory of [cwd, otherCwd, agentA, agentB, homeA, homeB]) mkdirSync(directory, { recursive: true });
+    mkdirSync(join(cwd, ".git"));
+    mkdirSync(join(otherCwd, ".git"));
+    mockGetAgentDir.mockImplementation(() => process.env.PI_CODING_AGENT_DIR ?? agentA);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolveBlocked) => { release = resolveBlocked; });
+    mockWorkerRun.mockImplementation(async () => {
+      await blocked;
+      return [];
+    });
+
+    vi.stubEnv("HOME", homeA);
+    vi.stubEnv("USERPROFILE", homeA);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentA);
+    const first = loadAllSkillsAsync(cwd, true);
+    const equivalentCwd = loadAllSkillsAsync(join(cwd, "."), true);
+    vi.stubEnv("HOME", homeB);
+    vi.stubEnv("USERPROFILE", homeB);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentA);
+    const differentHome = loadAllSkillsAsync(cwd, true);
+    vi.stubEnv("HOME", homeA);
+    vi.stubEnv("USERPROFILE", homeA);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentB);
+    const differentAgent = loadAllSkillsAsync(cwd, true);
+    vi.stubEnv("HOME", homeA);
+    vi.stubEnv("USERPROFILE", homeA);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentA);
+    const differentCwd = loadAllSkillsAsync(otherCwd, true);
+    const differentTrust = loadAllSkillsAsync(cwd, false);
+
+    expect(mockWorkerCreate).toHaveBeenCalledTimes(5);
+    release();
+    await Promise.all([first, equivalentCwd, differentHome, differentAgent, differentCwd, differentTrust]);
+    expect(mockWorkerClose).toHaveBeenCalledTimes(5);
   });
 
   it("rejects an aggregate async catalog above the merged skill limit", async () => {

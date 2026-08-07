@@ -120,6 +120,40 @@ describe("skill discovery through Pi's real loaders", () => {
     expect(untrusted).toEqual(new Set(["home-user", "pi-user"]));
   });
 
+  it("loads 64 identical async catalogs through the real Pi loader with detached results", { timeout: 30_000 }, async () => {
+    const root = tempRoot();
+    const isolatedHome = join(root, "os-home");
+    const agentDir = join(root, "agent-home");
+    const repo = join(root, "repo");
+    const cwd = join(repo, "packages", "app");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(isolatedHome, { recursive: true });
+    mkdirSync(cwd, { recursive: true });
+    skill(join(cwd, ".pi", "skills"), "deduped", "real worker catalog");
+    skill(join(agentDir, "skills"), "user", "real worker user catalog");
+
+    vi.stubEnv("HOME", isolatedHome);
+    vi.stubEnv("USERPROFILE", isolatedHome);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.resetModules();
+    const { loadAllSkillsAsync } = await import("../../src/prompt/skill-loader.ts");
+
+    const startedAt = performance.now();
+    const results = await Promise.all(
+      Array.from({ length: 64 }, () => loadAllSkillsAsync(cwd, true)),
+    );
+    const elapsedMs = performance.now() - startedAt;
+    const names = new Set(results[0]!.map(({ name }) => name));
+
+    expect(elapsedMs).toBeLessThan(30_000);
+    expect(results).toHaveLength(64);
+    expect(results.every((result) => new Set(result.map(({ name }) => name)).size === names.size)).toBe(true);
+    expect(names).toEqual(new Set(["deduped", "user"]));
+    expect(new Set(results.map((result) => result)).size).toBe(64);
+    expect(new Set(results.map((result) => result[0])).size).toBe(64);
+    expect(new Set(results.map((result) => result[0]?.sourceInfo)).size).toBe(64);
+  });
+
   it("keeps setImmediate live during blocking Pi discovery in the worker", async () => {
     const root = tempRoot();
     const isolatedHome = join(root, "os-home");

@@ -26,6 +26,16 @@ import { MAX_SKILLS_TOTAL } from "./skill-limits.js";
 /** Maximum ancestor `.agents/skills` roots included in one catalog. */
 export const MAX_ANCESTOR_SKILL_ROOTS = 64;
 
+interface SkillCatalogSnapshot {
+  resolvedCwd: string;
+  agentDir: string;
+  resolvedAgentDir: string;
+  homeAgentsDir: string;
+  projectTrusted: boolean;
+}
+
+const inFlightSkillCatalogLoads = new Map<string, Promise<Skill[]>>();
+
 function isDirectoryAlreadyClosed(error: unknown): boolean {
   return (error as NodeJS.ErrnoException)?.code === "ERR_DIR_CLOSED";
 }
@@ -59,22 +69,60 @@ export async function loadAllSkillsAsync(
   cwd: string,
   projectTrusted = true,
 ): Promise<Skill[]> {
+  const snapshot = captureSkillCatalogSnapshot(cwd, projectTrusted);
+  const key = skillCatalogSnapshotKey(snapshot);
+  const existing = inFlightSkillCatalogLoads.get(key);
+  if (existing) return existing.then(cloneSkills);
+
+  const loading = loadAllSkillsAsyncUncached(snapshot);
+  inFlightSkillCatalogLoads.set(key, loading);
+  const clearIfCurrent = (): void => {
+    if (inFlightSkillCatalogLoads.get(key) === loading) inFlightSkillCatalogLoads.delete(key);
+  };
+  void loading.then(clearIfCurrent, clearIfCurrent);
+  return loading.then(cloneSkills);
+}
+
+function captureSkillCatalogSnapshot(cwd: string, projectTrusted: boolean): SkillCatalogSnapshot {
+  const agentDir = getAgentDir();
+  return {
+    resolvedCwd: resolve(cwd),
+    agentDir,
+    resolvedAgentDir: resolve(agentDir),
+    homeAgentsDir: resolve(join(homedir(), ".agents", "skills")),
+    projectTrusted,
+  };
+}
+
+function skillCatalogSnapshotKey(snapshot: SkillCatalogSnapshot): string {
+  return JSON.stringify([
+    snapshot.resolvedCwd,
+    snapshot.agentDir,
+    snapshot.resolvedAgentDir,
+    snapshot.homeAgentsDir,
+    snapshot.projectTrusted,
+  ]);
+}
+
+function cloneSkills(skills: readonly Skill[]): Skill[] {
+  return skills.map(cloneSkill);
+}
+
+async function loadAllSkillsAsyncUncached(snapshot: SkillCatalogSnapshot): Promise<Skill[]> {
   const workerAdapter = createPiSkillLoaderWorkerAdapter();
   try {
-    const resolvedCwd = resolve(cwd);
     const skillBudget = createSkillCatalogBudget();
-    const ancestorsSkills = projectTrusted
-      ? await loadAncestorAgentsSkillsAsync(resolvedCwd, workerAdapter.run, skillBudget)
+    const ancestorsSkills = snapshot.projectTrusted
+      ? await loadAncestorAgentsSkillsAsync(snapshot.resolvedCwd, workerAdapter.run, skillBudget)
       : [];
-    const homeAgentsDir = join(homedir(), ".agents", "skills");
     const homeAgentsSkills = filterRootMdFiles(
-      await loadSkillsFromDirCachedAsync(homeAgentsDir, "agents", workerAdapter.run, skillBudget),
-      homeAgentsDir,
+      await loadSkillsFromDirCachedAsync(snapshot.homeAgentsDir, "agents", workerAdapter.run, skillBudget),
+      snapshot.homeAgentsDir,
     );
     const defaultsSkills = await loadPiDefaultSkillsCachedAsync(
-      resolvedCwd,
-      getAgentDir(),
-      projectTrusted,
+      snapshot.resolvedCwd,
+      snapshot.agentDir,
+      snapshot.projectTrusted,
       workerAdapter.run,
       skillBudget,
     );
