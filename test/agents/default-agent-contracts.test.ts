@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_AGENTS, DEFAULT_AGENT_NAMES } from "../../src/agents/default-agents.ts";
-import { parseAgentFile, toAgentConfig } from "../../src/agents/agent-discovery.ts";
+import { parseAgentFile, toAgentConfig } from "../../src/agents/agent-discovery.js";
 import { CONFIG_AGENT_KEYS } from "../../src/config/types.ts";
 
 const expectedAgentKeys = ["includeContextFiles", "disableDefaultAgents", "orchestrationPrompt"];

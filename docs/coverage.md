@@ -18,6 +18,14 @@ bun run pack:check
 Coverage uses Vitest's V8 provider over `src/**/*.ts`. Reports are written to
 `coverage/` as text, JSON summary, and LCOV; CI uploads the directory.
 
+The instrumented coverage run excludes `test/pi-contract-smoke.test.ts`. Pi's
+public loader uses Jiti to load a second, uninstrumented copy of the extension
+module graph; merging that graph into V8 coverage produces incorrect function
+counts even when the corresponding lines execute. `bun run test` still runs
+this contract test, and `bun run package:smoke` independently loads the
+installed tarball through Pi. Both checks are mandatory and must not be
+replaced by the coverage run.
+
 ## Minimum coverage
 
 Global thresholds in `vitest.config.ts` are 79% statements, 74% branches, 75%

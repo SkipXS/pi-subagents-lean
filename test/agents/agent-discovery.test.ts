@@ -11,8 +11,8 @@ import {
   parseAgentFile,
   mergeAgents,
   toAgentConfig,
-} from "../../src/agents/agent-discovery.ts";
-import type { AgentConfigFromMd } from "../../src/agents/agent-discovery.ts";
+} from "../../src/agents/agent-discovery.js";
+import type { AgentConfigFromMd } from "../../src/agents/agent-discovery.js";
 import { DEFAULT_AGENTS } from "../../src/agents/default-agents.ts";
 
 describe("mergeAgents", () => {

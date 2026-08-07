@@ -1,6 +1,6 @@
 {
   "name": "pi-subagents-lean",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lightweight sub-agents for pi — spawn specialized agents with isolated sessions, tools, and models.",
   "keywords": [
     "pi-package",
@@ -53,7 +53,7 @@
     "npm:production:smoke": "bun scripts/npm-production-smoke.ts",
     "release:validate": "bun scripts/release-validate.ts",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage --maxWorkers=2",
+    "test:coverage": "vitest run --coverage --maxWorkers=2 --exclude=test/pi-contract-smoke.test.ts",
     "test:watch": "vitest"
   },
   "pi": {

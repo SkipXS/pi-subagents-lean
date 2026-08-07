@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-07
+
 ### Added
 - **Persistent per-agent model/thinking settings.** `agents.<name>.model` and `agents.<name>.thinking` in `~/.pi/agent/subagents-lean.json` apply to bundled and discovered agents with case-insensitive names. Each field resolves as settings > effective Agent Markdown > parent session, using registry fallback and model-capability thinking normalization.
 - **Agent control-call renderer.** Interactive `Agent` rows retain their canonical role/model/thinking/prompt display; `AgentContinue` and `StopAgent` now show the canonical full ID, role, resolved `provider/model-id`, normalized thinking, and (for `AgentContinue`) the complete prompt.
