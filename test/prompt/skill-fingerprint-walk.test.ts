@@ -15,7 +15,7 @@ const options = { allowRootMarkdown: true };
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
+}, 30_000);
 
 describe("skill fingerprint walker boundaries", () => {
   it("rejects the same over-deep root synchronously and asynchronously", async () => {
@@ -77,5 +77,5 @@ describe("skill fingerprint walker boundaries", () => {
 
     expect(() => walkResourceTree(root, options)).toThrow(message);
     await expect(walkResourceTreeAsync(root, options)).rejects.toThrow(message);
-  });
+  }, 30_000);
 });

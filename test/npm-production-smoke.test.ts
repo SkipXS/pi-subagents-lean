@@ -31,10 +31,40 @@ describe("productionManifest", () => {
     });
   });
 
-  it("publishes the source entrypoint, documentation, and all canonical default agents", () => {
+  it("keeps the Pi manifest and package compatibility boundary", () => {
     const manifest = JSON.parse(readFileSync("package.json", "utf8"));
+
     expect(manifest.pi).toEqual({ extensions: ["./src/index.ts"] });
-    expect(manifest.files).toEqual(expect.arrayContaining(["src/", "README.md", "LICENSE", "docs/coverage.md"]));
+    expect(manifest).not.toHaveProperty("main");
+    expect(manifest).not.toHaveProperty("types");
+    expect(manifest).not.toHaveProperty("exports");
+    expect(manifest.files).toEqual([
+      "src/",
+      "docs/coverage.md",
+      "docs/releasing.md",
+      "CHANGELOG.md",
+      "README.md",
+      "LICENSE",
+    ]);
+    expect({
+      name: manifest.name,
+      license: manifest.license,
+      packageManager: manifest.packageManager,
+      engines: manifest.engines,
+      dependencies: manifest.dependencies,
+      peerDependencies: manifest.peerDependencies,
+    }).toEqual({
+      name: "pi-subagents-lean",
+      license: "MIT",
+      packageManager: "bun@1",
+      engines: { bun: ">=1.0.0", node: ">=18" },
+      dependencies: { "@sinclair/typebox": "^0.34.49" },
+      peerDependencies: {
+        "@earendil-works/pi-ai": "^0.82.0",
+        "@earendil-works/pi-coding-agent": "^0.82.0",
+      },
+    });
+
     for (const name of ["architect", "scout", "implementer", "reviewer", "verifier"]) {
       expect(existsSync(join("src", "agents", "defaults", `${name}.md`))).toBe(true);
     }

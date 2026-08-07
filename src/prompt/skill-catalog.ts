@@ -220,26 +220,6 @@ async function directoryContainsGitAsync(directoryPath: string): Promise<boolean
   }
 }
 
-function findGitRoot(dir: string): string {
-  let current = resolve(dir);
-  while (true) {
-    if (directoryContainsGitSync(current)) return current;
-    const parent = resolve(current, "..");
-    if (parent === current) return current;
-    current = parent;
-  }
-}
-
-async function findGitRootAsync(dir: string): Promise<string> {
-  let current = resolve(dir);
-  while (true) {
-    if (await directoryContainsGitAsync(current)) return current;
-    const parent = resolve(current, "..");
-    if (parent === current) return current;
-    current = parent;
-  }
-}
-
 function canonicalizePath(filePath: string): string {
   try {
     return realpathSync(filePath);

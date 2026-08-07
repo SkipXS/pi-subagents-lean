@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentActivitySnapshot } from "./agent-manager.js";
+import type { AgentActivitySnapshot } from "./agent-record-store.js";
 import type { DeliveryActivitySnapshot } from "../spawn/background-delivery.js";
 import { SHORT_ID_LENGTH } from "../types.js";
 

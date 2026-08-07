@@ -27,9 +27,11 @@ GitHub release. Publishing and releasing require separate, explicit approval.
 
    `package:smoke` packs the allowlisted files, installs the tarball in an
    isolated project, and loads the installed extension through Pi's public
-   extension loader. `release:validate` checks the changelog metadata without
-   making network or registry changes; CI also checks a release tag when one is
-   pushed.
+   extension loader. The ordinary `test` run also contains the Pi/Jiti contract
+   smoke and must not be replaced by `test:coverage`, whose instrumented module
+   graph intentionally excludes that loader test. `release:validate` checks the
+   changelog metadata without making network or registry changes; CI also
+   checks a release tag when one is pushed.
 5. Open and merge a pull request. Wait for every required `main` check to pass.
 
 ## Tag validation

@@ -7,7 +7,7 @@ import {
   createAgentRenderMetadataBridge,
   type AgentRenderMetadataBridge,
 } from "./agents/agent-render-bridge.js";
-import { stopAgentRendererTimers } from "./agents/agent-renderer.js";
+import { stopAgentRendererTimers } from "./agents/agent-render-runtime.js";
 import {
   AgentFooterStatusController,
   supportsAgentFooterStatus,

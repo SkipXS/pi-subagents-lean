@@ -279,6 +279,66 @@ describe("scanAgentFilesInDir", () => {
     }
   });
 
+  it("detaches mutable array fields from cached scan results", async () => {
+    const { dir, cleanup } = tempDirWithFiles([
+      {
+        name: "arrays.md",
+        content: makeAgentMd({
+          name: "arrays",
+          tools: "read, bash",
+          exclude_tools: "bash",
+          extensions: "quality-monitor, telemetry",
+          exclude_extensions: "telemetry",
+          skills: "tdd, debug",
+          exclude_skills: "debug",
+        }),
+      },
+    ], "agent-discovery-cache-detached");
+    const readFile = vi.spyOn(fs.promises, "readFile");
+    const arrayFields = [
+      "tools",
+      "exclude_tools",
+      "extensions",
+      "exclude_extensions",
+      "skills",
+      "exclude_skills",
+    ] as const;
+
+    try {
+      const first = await scanAgentFilesInDir(dir, "user");
+      const firstAgent = first[0]!;
+      expect(firstAgent).toMatchObject({
+        tools: ["read", "bash"],
+        exclude_tools: ["bash"],
+        extensions: ["quality-monitor", "telemetry"],
+        exclude_extensions: ["telemetry"],
+        skills: ["tdd", "debug"],
+        exclude_skills: ["debug"],
+      });
+
+      for (const field of arrayFields) {
+        const value = firstAgent[field];
+        expect(Array.isArray(value)).toBe(true);
+        if (Array.isArray(value)) value.push("mutated");
+      }
+      expect(firstAgent.tools).toEqual(["read", "bash", "mutated"]);
+
+      const second = await scanAgentFilesInDir(dir, "user");
+      expect(readFile).toHaveBeenCalledTimes(1);
+      expect(second[0]).toMatchObject({
+        tools: ["read", "bash"],
+        exclude_tools: ["bash"],
+        extensions: ["quality-monitor", "telemetry"],
+        exclude_extensions: ["telemetry"],
+        skills: ["tdd", "debug"],
+        exclude_skills: ["debug"],
+      });
+    } finally {
+      readFile.mockRestore();
+      cleanup();
+    }
+  });
+
   it("reuses unchanged files and notices create, change, delete, and rename", async () => {
     const { dir, cleanup } = tempDirWithFiles([], "agent-discovery-cache");
     const readFile = vi.spyOn(fs.promises, "readFile");

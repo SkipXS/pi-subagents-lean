@@ -9,10 +9,12 @@ const state = vi.hoisted(() => ({
 
 vi.mock("../src/agents/tool-execution.js", () => ({
   executeAgentTool: state.executeAgentTool,
+}));
+vi.mock("../src/agents/agent-control-execution.js", () => ({
+  executeAgentStatusTool: state.executeAgentStatusTool,
   executeContinueAgentTool: state.executeContinueAgentTool,
   executeStopAgentTool: state.executeStopAgentTool,
 }));
-vi.mock("../src/agents/agent-status.js", () => ({ executeAgentStatusTool: state.executeAgentStatusTool }));
 
 import { registerTools } from "../src/registration.js";
 

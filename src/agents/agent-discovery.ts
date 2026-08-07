@@ -56,7 +56,7 @@ export function mergeAgents(
   // registry, so never let a caller mutate the source map through an array
   // field on the merged config.
   for (const [name, config] of defaults) {
-    result.set(name, cloneAgentConfig(config));
+    result.set(name, snapshotAgentConfig(config));
   }
 
   // Apply overrides in precedence order: user, then shared, then project.
@@ -70,7 +70,7 @@ export function mergeAgents(
   // have been merged. This preserves inherited explicit values while making a
   // new/minimal definition deterministic without global implicit settings.
   for (const [name, config] of result) {
-    result.set(name, cloneAgentConfig({
+    result.set(name, snapshotAgentConfig({
       ...config,
       skills: config.skills ?? false,
       extensions: config.extensions ?? false,
@@ -90,9 +90,9 @@ function mergeAgentOverrides(
     const existingKey = [...result.keys()].find((key) => key.toLowerCase() === md.name!.toLowerCase());
     if (existingKey !== undefined) {
       const existing = result.get(existingKey)!;
-      result.set(existingKey, cloneAgentConfig({ ...existing, ...fromMd(md) }));
+      result.set(existingKey, snapshotAgentConfig({ ...existing, ...fromMd(md) }));
     } else {
-      result.set(md.name, cloneAgentConfig({ ...BASE_DEFAULTS, ...fromMd(md) }));
+      result.set(md.name, snapshotAgentConfig({ ...BASE_DEFAULTS, ...fromMd(md) }));
     }
   }
 }
@@ -150,8 +150,8 @@ function fromMd(md: AgentConfigFromMd): Partial<AgentConfig> {
   return compactDefined(obj) as Partial<AgentConfig>;
 }
 
-/** Keep every mutable selection field detached from the source config. */
-function cloneAgentConfig(config: AgentConfig): AgentConfig {
+/** Return a detached AgentConfig snapshot for catalog and registry boundaries. */
+export function snapshotAgentConfig(config: AgentConfig): AgentConfig {
   return {
     ...config,
     description: retainAgentDescription(config.description),
@@ -183,5 +183,5 @@ const BASE_DEFAULTS: AgentConfig = {
 
 /** Convert a parsed Markdown agent into a complete standalone config. */
 export function toAgentConfig(md: AgentConfigFromMd): AgentConfig {
-  return cloneAgentConfig({ ...BASE_DEFAULTS, ...fromMd(md) } as AgentConfig);
+  return snapshotAgentConfig({ ...BASE_DEFAULTS, ...fromMd(md) } as AgentConfig);
 }

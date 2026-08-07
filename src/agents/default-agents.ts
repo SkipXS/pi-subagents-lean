@@ -8,7 +8,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseAgentFile, toAgentConfig } from "./agent-discovery.js";
+import { parseAgentFile } from "./agent-frontmatter.js";
+import { toAgentConfig } from "./agent-discovery.js";
 import type { AgentConfig } from "./types.js";
 
 export const DEFAULT_AGENT_NAMES = ["architect", "scout", "implementer", "reviewer", "verifier"] as const;

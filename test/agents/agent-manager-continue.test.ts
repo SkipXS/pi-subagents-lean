@@ -29,6 +29,8 @@ vi.mock("node:crypto", () => ({
 
 vi.mock("../../src/agents/agent-runner.js", () => ({
   runAgent: mockModules.mockRunAgent,
+}));
+vi.mock("../../src/agents/agent-session-runtime.js", () => ({
   executeAgentTurn: mockModules.mockExecuteAgentTurn,
 }));
 
