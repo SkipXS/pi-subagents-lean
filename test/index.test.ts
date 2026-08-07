@@ -351,7 +351,7 @@ describe("constrained sampling", () => {
     const tool = findTool(api, "AgentContinue");
     expect(tool!.parameters.required).toEqual(["agent_id", "prompt", "run_in_background"]);
     expect(tool!.parameters.properties).toMatchObject({
-      agent_id: { type: "string" },
+      agent_id: { type: "string", maxLength: 128 },
       prompt: { type: "string" },
       run_in_background: { type: "boolean" },
     });

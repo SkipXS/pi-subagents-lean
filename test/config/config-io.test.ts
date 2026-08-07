@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { join } from "node:path";
+import { MAX_SUBAGENTS_CONFIG_BYTES } from "../../src/config/types.ts";
 
 const { mockGetAgentDir, mockMkdirSync, mockWriteFileSync, mockRenameSync, mockUnlinkSync, mockReadFileSync, mockRmSync, mockOpenSync, mockFsyncSync, mockCloseSync } = vi.hoisted(() => ({
   mockGetAgentDir: vi.fn(),
@@ -47,6 +48,61 @@ describe("config I/O paths", () => {
   it("defaults global concurrency to four", async () => {
     mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
     mockReadFileSync.mockReturnValue(JSON.stringify({ agent: { default: null } }));
+    vi.resetModules();
+
+    const { loadConfig } = await import("../../src/config/config-io.ts");
+    expect(loadConfig().config.concurrency).toEqual({ default: 4 });
+  });
+
+  it("rejects an oversized config before JSON.parse", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(Buffer.alloc(MAX_SUBAGENTS_CONFIG_BYTES + 1, 0x7b));
+    const parse = vi.spyOn(JSON, "parse");
+    vi.resetModules();
+
+    try {
+      const { loadConfig } = await import("../../src/config/config-io.ts");
+      const loaded = loadConfig();
+      expect(loaded.config).toMatchObject({
+        agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+        concurrency: { default: 4 },
+      });
+      expect(loaded.health).toBe("unrecoverable");
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it("does not offer repair for an oversized primary even with a valid backup", async () => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockImplementation((file) => String(file).endsWith(".bak")
+      ? JSON.stringify({ agent: {}, concurrency: { default: 3 } })
+      : Buffer.alloc(MAX_SUBAGENTS_CONFIG_BYTES + 1, 0x7b));
+    vi.resetModules();
+
+    const { loadConfig } = await import("../../src/config/config-io.ts");
+    expect(loadConfig()).toMatchObject({
+      health: "using-backup",
+      canRepair: false,
+      config: { concurrency: { default: 3 } },
+    });
+  });
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "2",
+    { value: 2 },
+    1.5,
+    0,
+    -1,
+    65,
+    Number.MAX_SAFE_INTEGER,
+    1e100,
+  ] as unknown[]) ("falls back to four for invalid persisted concurrency %p", async (value) => {
+    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
+    mockReadFileSync.mockReturnValue(JSON.stringify({ concurrency: { default: value } }));
     vi.resetModules();
 
     const { loadConfig } = await import("../../src/config/config-io.ts");

@@ -7,35 +7,16 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { resolvedSpawnFixture, spawnWithResolvedFixture } from "../fixtures.ts";
 import type { AgentRecord } from "../../src/types.js";
 import { snapshotResolvedSpawn } from "../../src/spawn/spawn-contract.js";
 import { AgentManager } from "../../src/agents/agent-manager.js";
-import { ConfigStore } from "../../src/config/config-store.js";
-import type { SubagentsConfig } from "../../src/config/types.js";
 
 // --- Mock modules ---
 
-const { mockAgentConfig, mockResolveType, mockRunAgent, mockExecuteAgentTurn, mockFindModelInRegistry, mockCreateRuntimeSettings } = vi.hoisted(() => ({
-  mockAgentConfig: vi.fn(() => undefined),
-  mockResolveType: vi.fn((name: string) => name),
+const { mockRunAgent, mockExecuteAgentTurn } = vi.hoisted(() => ({
   mockRunAgent: vi.fn(),
   mockExecuteAgentTurn: vi.fn(),
-  mockFindModelInRegistry: vi.fn((_key: unknown, _registry: unknown, fallback: unknown) => fallback),
-  mockCreateRuntimeSettings: vi.fn(() => ({ agent: {} })),
-}));
-
-vi.mock("../../src/agents/agent-types.js", () => ({
-  resolveType: mockResolveType,
-  snapshotAgentConfig: vi.fn((config: any) => ({
-    ...config,
-    registeredTools: config.registeredTools && [...config.registeredTools],
-    tools: Array.isArray(config.tools) ? [...config.tools] : config.tools,
-    extensions: Array.isArray(config.extensions) ? [...config.extensions] : config.extensions,
-    skills: Array.isArray(config.skills) ? [...config.skills] : config.skills,
-    excludeSkills: config.excludeSkills && [...config.excludeSkills],
-  })),
-  getAgentConfig: mockAgentConfig,
-  discoverNewAgents: vi.fn(async () => 0),
 }));
 
 vi.mock("../../src/spawn/worktree-validator.js", () => ({
@@ -45,14 +26,6 @@ vi.mock("../../src/spawn/worktree-validator.js", () => ({
 vi.mock("../../src/agents/agent-runner.js", () => ({
   runAgent: mockRunAgent,
   executeAgentTurn: mockExecuteAgentTurn,
-}));
-
-vi.mock("../../src/utils.js", () => ({
-  findModelInRegistry: mockFindModelInRegistry,
-  parseThinkingLevel: (value: unknown) => ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value as string)
-    ? value
-    : undefined,
-  errorMessage: (error: unknown) => error instanceof Error ? error.message : String(error),
 }));
 
 vi.mock("../../src/config/config-io.js", () => ({
@@ -73,9 +46,6 @@ const { mockPi, mockGetPiInstance, mockIsIdle } = vi.hoisted(() => ({
 
 vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
-  getStore: () => ({
-    createSubagentRuntimeSettings: mockCreateRuntimeSettings,
-  }),
   getPiInstance: () => mockGetPiInstance(),
   getSessionCtx: () => ({ isIdle: mockIsIdle }),
 }));
@@ -83,18 +53,15 @@ vi.mock("../../src/shell.js", () => ({
 function makeMockManager() {
   const records = new Map<string, any>();
   return {
-    spawn: vi.fn((pi: any, ctx: any, typeOrResolved: any, promptOrOptions: any, legacyOptions?: any) => {
-      const resolved = typeof typeOrResolved === "object" ? typeOrResolved : undefined;
-      const type = resolved?.type ?? typeOrResolved;
-      const prompt = resolved?.prompt ?? promptOrOptions;
-      const options = resolved
-        ? {
-          description: resolved.description,
-          isBackground: resolved.runInBackground,
-          signal: resolved.signal,
-          projectTrusted: resolved.projectTrusted,
-        }
-        : legacyOptions ?? promptOrOptions;
+    spawn: vi.fn((_pi: any, _ctx: any, resolved: any) => {
+      const type = resolved.type;
+      const prompt = resolved.prompt;
+      const options = {
+        description: resolved.description,
+        isBackground: resolved.runInBackground,
+        signal: resolved.signal,
+        projectTrusted: resolved.projectTrusted,
+      };
       const id = `agent-${records.size}`;
       const record: any = {
         id,
@@ -125,6 +92,8 @@ function makeMockManager() {
     continueAgent: vi.fn(),
     getTotalAgentCost: vi.fn(() => 0),
     getTotalAgentCount: vi.fn(() => 0),
+    pruneRetainedRecords: vi.fn(() => []),
+    setRetentionProtection: vi.fn(),
     dispose: vi.fn(),
     onComplete: undefined as any,
     onStart: undefined as any,
@@ -135,9 +104,19 @@ function makeMockCtx() {
   return { cwd: "/test", model: undefined, modelRegistry: {} } as unknown as ExtensionContext;
 }
 
-/** Current per-execution delivery entries (test introspection). */
+/** Current per-execution delivery entries (service-boundary introspection). */
 function deliveryEntries(coordinator: any): any[] {
-  return [...coordinator.backgroundDeliveries.values()];
+  return [...coordinator.deliveryService.backgroundDeliveries.values()];
+}
+
+/** Normalize compact test inputs into the real preflight contract fixture. */
+function toResolvedSpawn(input: Record<string, unknown>): ReturnType<typeof resolvedSpawnFixture> {
+  if (
+    input.agentConfig
+    && input.runtimeSettings
+    && typeof input.projectTrusted === "boolean"
+  ) return input as unknown as ReturnType<typeof resolvedSpawnFixture>;
+  return resolvedSpawnFixture(input as any);
 }
 
 /** The real manager always supplies the completed execution summary. */
@@ -151,7 +130,8 @@ function notifyCompletion(coordinator: any, record: any): void {
 
 describe("SpawnCoordinator", () => {
   // Dynamically import after mocks are set up
-  let SpawnCoordinator: typeof import("../../src/spawn/spawn-coordinator.js").SpawnCoordinator;
+  let SpawnCoordinator: any;
+  let ProductionSpawnCoordinator: any;
   let manager: ReturnType<typeof makeMockManager>;
   let ctx: ExtensionContext;
 
@@ -162,16 +142,48 @@ describe("SpawnCoordinator", () => {
     mockPi.sendMessage.mockClear();
     mockRunAgent.mockReset();
     mockExecuteAgentTurn.mockReset();
-    mockFindModelInRegistry.mockReset().mockImplementation((_key: unknown, _registry: unknown, fallback: unknown) => fallback);
-    mockResolveType.mockReset().mockImplementation((name: string) => name);
-    mockCreateRuntimeSettings.mockReset().mockReturnValue({ agent: {} });
-    mockAgentConfig.mockReset().mockReturnValue(undefined);
     mockGetPiInstance.mockReturnValue(mockPi);
     mockIsIdle.mockReturnValue(true);
     const mod = await import("../../src/spawn/spawn-coordinator.js");
-    SpawnCoordinator = mod.SpawnCoordinator;
+    ProductionSpawnCoordinator = mod.SpawnCoordinator;
+    SpawnCoordinator = class extends ProductionSpawnCoordinator {
+      spawn(pi: ExtensionAPI, context: ExtensionContext, intent: any, onAccepted?: (record: AgentRecord) => void) {
+        return super.spawn(pi, context, toResolvedSpawn(intent), onAccepted);
+      }
+    };
   });
 
+
+  it("subscribes delivery observers and detaches them deterministically", () => {
+    const coordinator = new ProductionSpawnCoordinator(manager as any);
+    const observer = vi.fn();
+    const unsubscribe = coordinator.subscribeDeliveryActivity(observer);
+
+    expect(observer).toHaveBeenCalledWith([]);
+    unsubscribe();
+    unsubscribe();
+    coordinator.dispose();
+  });
+
+  it("uses the authoritative production spawn boundary and isolates accepted observers", async () => {
+    const coordinator = new ProductionSpawnCoordinator(manager as any);
+    const resolved = resolvedSpawnFixture({
+      type: "builder",
+      prompt: "direct production spawn",
+      description: "direct",
+      runInBackground: false,
+    });
+    const onAccepted = vi.fn(() => { throw new Error("renderer detached"); });
+
+    const result = await coordinator.spawn(mockPi, ctx, resolved, onAccepted);
+
+    expect(result.record).toBe(manager.getRecord(result.agentId));
+    expect(onAccepted).toHaveBeenCalledWith(result.record);
+    expect(manager.setRetentionProtection).toHaveBeenCalledOnce();
+    const protection = manager.setRetentionProtection.mock.calls[0]![0];
+    expect(protection(result.record)).toBe(false);
+    coordinator.dispose();
+  });
 
   it("spawns a background agent and returns result", async () => {
     const coordinator = new SpawnCoordinator(manager as any);
@@ -185,9 +197,11 @@ describe("SpawnCoordinator", () => {
 
     expect(result.agentId).toBeTruthy();
     expect(manager.spawn).toHaveBeenCalledTimes(1);
-    expect(manager.spawn.mock.calls[0][2]).toBe("builder");
-    expect(manager.spawn.mock.calls[0][3]).toBe("do something");
-    expect(manager.spawn.mock.calls[0][4].isBackground).toBe(true);
+    expect(manager.spawn.mock.calls[0][2]).toMatchObject({
+      type: "builder",
+      prompt: "do something",
+      runInBackground: true,
+    });
   });
 
   it("forwards the parent abort signal to the agent manager", async () => {
@@ -203,7 +217,7 @@ describe("SpawnCoordinator", () => {
       signal,
     });
 
-    expect(manager.spawn.mock.calls[0][4].signal).toBe(signal);
+    expect(manager.spawn.mock.calls[0][2].signal).toBe(signal);
   });
 
   it("does not retain or nudge a synchronously parent-aborted background spawn", async () => {
@@ -228,7 +242,7 @@ describe("SpawnCoordinator", () => {
         stoppedBy: "parent",
         resultConsumed: true,
       });
-      expect(coordinator.isBackground(result.agentId)).toBe(false);
+      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
 
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
@@ -261,7 +275,7 @@ describe("SpawnCoordinator", () => {
     config.registeredTools.push("bash");
     config.tools.push("bash");
 
-    const snapshot = manager.spawn.mock.calls[0][4].agentConfig;
+    const snapshot = manager.spawn.mock.calls[0][2].agentConfig;
     expect(snapshot).toEqual(expect.objectContaining({
       systemPrompt: "Use A instructions.",
       registeredTools: ["read"],
@@ -296,16 +310,13 @@ describe("SpawnCoordinator", () => {
       modelKey: "accepted/model",
       thinkingLevel: "high",
       invocation: { modelName: "model", modelKey: "accepted/model", thinkingLevel: "high" },
+      projectTrusted: false,
     });
 
     await coordinator.spawn(mockPi, ctx, resolved);
 
     config.tools.push("bash");
     runtimeSettings.agents.accepted.model = "later/model";
-    expect(mockResolveType).not.toHaveBeenCalled();
-    expect(mockAgentConfig).not.toHaveBeenCalled();
-    expect(mockCreateRuntimeSettings).not.toHaveBeenCalled();
-    expect(mockFindModelInRegistry).not.toHaveBeenCalled();
 
     expect(manager.spawn).toHaveBeenCalledWith(mockPi, ctx, resolved);
     expect(manager.spawn.mock.calls[0]).toHaveLength(3);
@@ -324,115 +335,9 @@ describe("SpawnCoordinator", () => {
 
     expect(result.agentId).toBeTruthy();
     expect(result.record).toBeTruthy();
-    expect(manager.spawn.mock.calls[0][4].isBackground).toBe(false);
+    expect(manager.spawn.mock.calls[0][2].runInBackground).toBe(false);
   });
 
-
-  it("normalizes thinking before passing options and invocation to the manager", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const model = {
-      provider: "deepseek",
-      id: "deepseek-reasoner",
-      reasoning: true,
-      thinkingLevelMap: { xhigh: null, max: null },
-    } as any;
-    ctx = { ...ctx, model };
-
-    await coordinator.spawn(mockPi, ctx, {
-      type: "builder",
-      prompt: "do something",
-      description: "Test",
-      thinkingLevel: "max",
-
-      invocation: { thinkingLevel: "max" },
-      runInBackground: true,
-    });
-
-    const options = manager.spawn.mock.calls[0][4];
-    expect(options.model).toBe(model);
-    expect(options.modelKey).toBe("deepseek/deepseek-reasoner");
-    expect(options.thinkingLevel).toBe("high");
-    expect(options.invocation.thinkingLevel).toBe("high");
-  });
-
-  it("applies a captured ConfigStore agent override above custom Agent Markdown", async () => {
-    const markdownModel = {
-      provider: "markdown",
-      id: "custom-model",
-      reasoning: true,
-      thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", max: "max" },
-    } as any;
-    const settingsModel = {
-      provider: "settings",
-      id: "no-reasoning",
-      reasoning: false,
-    } as any;
-    const parentModel = { provider: "parent", id: "parent-model", reasoning: true } as any;
-    const models = new Map([
-      ["markdown/custom-model", markdownModel],
-      ["settings/no-reasoning", settingsModel],
-    ]);
-    mockFindModelInRegistry.mockImplementation((key: unknown, _registry: unknown, fallback: unknown) =>
-      (typeof key === "string" ? models.get(key) : undefined) ?? fallback);
-
-    let durable: SubagentsConfig = {
-      agent: {},
-      agents: { "Custom-Reviewer": { model: "settings/no-reasoning" } },
-      concurrency: { default: 4 },
-    };
-    const store = new ConfigStore({
-      load: () => structuredClone(durable),
-      save: (config) => { durable = structuredClone(config); },
-    });
-    const acceptedSnapshot = store.createSubagentRuntimeSettings();
-
-    // Simulate a later reload before the accepted request reaches the coordinator.
-    durable = {
-      ...durable,
-      agents: { "custom-reviewer": { model: "later/model", thinking: "max" } },
-    };
-    store.reload();
-    expect(store.createSubagentRuntimeSettings().agents).toEqual({
-      "custom-reviewer": { model: "later/model", thinking: "max" },
-    });
-    expect(acceptedSnapshot.agents).toEqual({ "custom-reviewer": { model: "settings/no-reasoning" } });
-
-    ctx = {
-      ...ctx,
-      model: parentModel,
-      modelRegistry: { find: vi.fn() },
-    } as unknown as ExtensionContext;
-    const coordinator = new SpawnCoordinator(manager as any);
-    await coordinator.spawn(mockPi, ctx, {
-      type: "custom-reviewer",
-      prompt: "review the custom role",
-      description: "Custom role",
-      agentConfig: {
-        name: "Custom-Reviewer",
-        description: "Custom reviewer from Agent Markdown",
-        model: "markdown/custom-model",
-        thinkingLevel: "high",
-        systemPrompt: "Review carefully.",
-      },
-      runtimeSettingsSnapshot: acceptedSnapshot,
-      runInBackground: false,
-    });
-
-    const options = manager.spawn.mock.calls[0][4];
-    expect(options.agentConfig).toEqual(expect.objectContaining({
-      model: "markdown/custom-model",
-      thinkingLevel: "high",
-    }));
-    expect(options.runtimeSettings.agents).toEqual({
-      "custom-reviewer": { model: "settings/no-reasoning" },
-    });
-    expect(options.model).toBe(settingsModel);
-    expect(options.modelKey).toBe("settings/no-reasoning");
-    // Thinking comes independently from Agent Markdown, then clamps for the
-    // settings-selected model which does not support reasoning.
-    expect(options.thinkingLevel).toBe("off");
-    expect(options.invocation.thinkingLevel).toBe("off");
-  });
 
   it("tracks a background execution in its delivery entries", async () => {
     const coordinator = new SpawnCoordinator(manager as any);
@@ -444,7 +349,7 @@ describe("SpawnCoordinator", () => {
       runInBackground: true,
     });
 
-    expect(coordinator.isBackground(result.agentId)).toBe(true);
+    expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(true);
   });
 
   it("does not track a foreground execution for background delivery", async () => {
@@ -457,7 +362,7 @@ describe("SpawnCoordinator", () => {
       runInBackground: false,
     });
 
-    expect(coordinator.isBackground(result.agentId)).toBe(false);
+    expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
   });
 
   describe("nudge scheduling", () => {
@@ -473,7 +378,7 @@ describe("SpawnCoordinator", () => {
       });
 
       result.record.lifecycle.status = "completed";
-      coordinator.scheduleNudge(result.agentId);
+      notifyCompletion(coordinator, result.record);
 
       // Not yet emitted — timer pending
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
@@ -497,8 +402,8 @@ describe("SpawnCoordinator", () => {
 
       r1.record.lifecycle.status = "completed";
       r2.record.lifecycle.status = "completed";
-      coordinator.scheduleNudge(r1.agentId);
-      coordinator.scheduleNudge(r2.agentId);
+      notifyCompletion(coordinator, r1.record);
+      notifyCompletion(coordinator, r2.record);
 
       // Advance past the individual delivery delay
       vi.advanceTimersByTime(200);
@@ -507,32 +412,20 @@ describe("SpawnCoordinator", () => {
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
     });
 
-    it("ignores an accidental nudge for a running record and delivers once after completion", async () => {
+    it("delivers only after the manager reports completion", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const result = await coordinator.spawn(mockPi, ctx, {
         type: "builder", prompt: "task", description: "Still running", runInBackground: true,
       });
 
-      coordinator.scheduleNudge(result.agentId);
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
-      expect(deliveryEntries(coordinator).some((e) => e.autoNudgeIssued)).toBe(false);
 
       result.record.lifecycle.status = "completed";
       notifyCompletion(coordinator, result.record);
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).toHaveBeenCalledOnce();
       expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
-    });
-
-    it("does not retain tracking or emit a nudge for an agent without a record", () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      coordinator.scheduleNudge("agent-999");
-
-      vi.advanceTimersByTime(200);
-
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
     });
 
     it("delivers a later nudge after its own short delay", async () => {
@@ -547,13 +440,13 @@ describe("SpawnCoordinator", () => {
 
       r1.record.lifecycle.status = "completed";
       r2.record.lifecycle.status = "completed";
-      coordinator.scheduleNudge(r1.agentId);
+      notifyCompletion(coordinator, r1.record);
 
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
 
       // A later execution gets its own delivery delay
-      coordinator.scheduleNudge(r2.agentId);
+      notifyCompletion(coordinator, r2.record);
 
       // Not yet emitted
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
@@ -591,7 +484,7 @@ describe("SpawnCoordinator", () => {
       let settled = false;
       const pending = coordinator.continueAgent(mockPi, ctx, {
         agentId: "agent-x", prompt: "wrap up", runInBackground: false,
-      }).then((result) => { settled = true; return result; });
+      }).then((result: any) => { settled = true; return result; });
       await Promise.resolve();
       expect(settled).toBe(false); // foreground callers await the execution
 
@@ -599,7 +492,7 @@ describe("SpawnCoordinator", () => {
       const result = await pending;
       expect(result.record).toBe(record);
       expect(record.lifecycle.resultConsumed).toBe(true);
-      expect((coordinator as any).backgroundDeliveries.has("exec-1")).toBe(false);
+      expect((coordinator as any).deliveryService.backgroundDeliveries.has("exec-1")).toBe(false);
     });
 
     it("acknowledges a background continuation immediately", async () => {
@@ -617,8 +510,8 @@ describe("SpawnCoordinator", () => {
       expect(result.record).toBe(record);
       expect(record.delivery).toMatchObject({ state: "pending", attempts: 0 });
       expect(record.lifecycle.resultConsumed).toBe(false);
-      expect(coordinator.isBackground("agent-x")).toBe(true);
-      expect((coordinator as any).backgroundDeliveries.has("exec-1")).toBe(true);
+      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === "agent-x" && !entry.completed)).toBe(true);
+      expect((coordinator as any).deliveryService.backgroundDeliveries.has("exec-1")).toBe(true);
     });
 
     it("reconciles a synchronously terminal continuation after claiming its execution id", async () => {
@@ -642,7 +535,7 @@ describe("SpawnCoordinator", () => {
       } as any);
 
       try {
-        const id = realManager.spawn(mockPi, ctx, "builder", "initial", { description: "initial" });
+        const id = spawnWithResolvedFixture(realManager, mockPi, ctx, "builder", "initial", { description: "initial" });
         await realManager.getRecord(id)!.execution.promise;
         mockPi.sendMessage.mockReset();
 
@@ -679,7 +572,7 @@ describe("SpawnCoordinator", () => {
       });
 
       try {
-        const id = realManager.spawn(mockPi, ctx, "builder", "initial", { description: "initial" });
+        const id = spawnWithResolvedFixture(realManager, mockPi, ctx, "builder", "initial", { description: "initial" });
         await realManager.getRecord(id)!.execution.promise;
         mockPi.sendMessage.mockReset();
 
@@ -906,7 +799,7 @@ describe("SpawnCoordinator", () => {
       await coordinator.continueAgent(mockPi, ctx, {
         agentId: "agent-x", prompt: "wrap up", runInBackground: true,
       });
-      expect(coordinator.isBackground("agent-x")).toBe(true);
+      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === "agent-x" && !entry.completed)).toBe(true);
 
       // StopAgent rejects the queued continuation: the coordinator must
       // observe the rejection (never an unhandled rejection) and the
@@ -914,7 +807,7 @@ describe("SpawnCoordinator", () => {
       rejectExecution(new Error("Agent agent-x was stopped"));
       await Promise.resolve();
       expect(manager.continueAgent).toHaveBeenCalledOnce();
-      expect((coordinator as any).backgroundDeliveries.has("exec-1")).toBe(true); // claim stays until completion/abandon
+      expect((coordinator as any).deliveryService.backgroundDeliveries.has("exec-1")).toBe(true); // claim stays until completion/abandon
     });
 
     it("reports a queued background continuation stopped before start exactly once and never runs it", async () => {
@@ -928,7 +821,7 @@ describe("SpawnCoordinator", () => {
           aborted: false,
 
         });
-        const firstId = realManager.spawn(mockPi, ctx, "builder", "first", { description: "first" });
+        const firstId = spawnWithResolvedFixture(realManager, mockPi, ctx, "builder", "first", { description: "first" });
         await realManager.getRecord(firstId)!.execution.promise;
         const firstRecord = realManager.getRecord(firstId)!;
         firstRecord.stats.lifetimeUsage = { input: 11, output: 22, cacheWrite: 33, cost: 0.44 };
@@ -937,7 +830,7 @@ describe("SpawnCoordinator", () => {
 
         const blocker = new Promise<any>(() => {});
         mockRunAgent.mockReturnValueOnce(blocker);
-        realManager.spawn(mockPi, ctx, "builder", "blocker", { description: "blocker" });
+        spawnWithResolvedFixture(realManager, mockPi, ctx, "builder", "blocker", { description: "blocker" });
 
         coordinator.continueAgent(mockPi, ctx, {
           agentId: firstId, prompt: "bg follow-up", runInBackground: true,
@@ -988,7 +881,7 @@ describe("SpawnCoordinator", () => {
       const coordinator = new SpawnCoordinator(manager as any);
       const snapshots: Array<readonly any[]> = [];
       coordinator.subscribeDeliveryActivity(() => { throw new Error("observer failure"); });
-      const unsubscribe = coordinator.subscribeDeliveryActivity((snapshot) => snapshots.push(snapshot));
+      const unsubscribe = coordinator.subscribeDeliveryActivity((snapshot: any) => snapshots.push(snapshot));
       const result = await coordinator.spawn(mockPi, ctx, {
         type: "builder", prompt: "task", description: "Test", runInBackground: true,
       });
@@ -1039,7 +932,7 @@ describe("SpawnCoordinator", () => {
       );
 
       // Should be removed from background set
-      expect(coordinator.isBackground(result.agentId)).toBe(false);
+      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
     });
 
     it("delivers a root completion once even when the manager repeats its completion callback", async () => {
@@ -1087,6 +980,21 @@ describe("SpawnCoordinator", () => {
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
     });
 
+    it("keeps terminal delivery working when record pruning throws", async () => {
+      const coordinator = new SpawnCoordinator(manager as any);
+      manager.pruneRetainedRecords.mockImplementation(() => { throw new Error("prune race"); });
+
+      const result = await coordinator.spawn(mockPi, ctx, {
+        type: "builder", prompt: "task", description: "prune race", runInBackground: true,
+      });
+      result.record.lifecycle.status = "completed";
+      notifyCompletion(coordinator, result.record);
+      vi.advanceTimersByTime(200);
+
+      expect(mockPi.sendMessage).toHaveBeenCalledOnce();
+      expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
+    });
+
     it("records sendMessage errors as delivery diagnostics (stale pi)", async () => {
       const coordinator = new SpawnCoordinator(manager as any);
 
@@ -1098,7 +1006,7 @@ describe("SpawnCoordinator", () => {
       mockPi.sendMessage.mockImplementation(() => { throw new Error("stale context"); });
       result.record.lifecycle.status = "completed";
 
-      coordinator.scheduleNudge(result.agentId);
+      notifyCompletion(coordinator, result.record);
       vi.advanceTimersByTime(200);
 
       // sendMessage was attempted once; the failed state is diagnostic until session shutdown.
@@ -1114,7 +1022,7 @@ describe("SpawnCoordinator", () => {
       });
 
       result.record.lifecycle.status = "completed";
-      coordinator.scheduleNudge(result.agentId);
+      notifyCompletion(coordinator, result.record);
 
       // Dispose before timer fires — should prevent emission
       coordinator.dispose();
@@ -1134,7 +1042,7 @@ describe("SpawnCoordinator", () => {
         type: "builder", prompt: "task", description: "Test", runInBackground: true,
       });
       result.record.lifecycle.status = "completed";
-      coordinator.scheduleNudge(result.agentId);
+      notifyCompletion(coordinator, result.record);
 
       coordinator.dispose();
 
@@ -1158,7 +1066,7 @@ describe("SpawnCoordinator", () => {
 
       // Nudge still works because it reads from shell at call time
       result.record.lifecycle.status = "completed";
-      coordinator.scheduleNudge(result.agentId);
+      notifyCompletion(coordinator, result.record);
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
     });
@@ -1175,20 +1083,11 @@ describe("SpawnCoordinator", () => {
       mockGetPiInstance.mockReturnValue(freshPi);
       result.record.lifecycle.status = "completed";
 
-      coordinator.scheduleNudge(result.agentId);
+      notifyCompletion(coordinator, result.record);
       vi.advanceTimersByTime(200);
 
       // Fresh pi was used, not the original mockPi
       expect(freshPi.sendMessage).toHaveBeenCalledTimes(1);
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-    });
-
-    it("ignores a nudge for an unknown record", () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      coordinator.scheduleNudge("agent-999");
-      vi.advanceTimersByTime(200);
-
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
     });
 
@@ -1219,7 +1118,7 @@ describe("SpawnCoordinator", () => {
         manager.getRecord(result.agentId).lifecycle.status = status;
         manager.getRecord(result.agentId).result = "Result text";
 
-        coordinator.scheduleNudge(result.agentId);
+        notifyCompletion(coordinator, result.record);
         vi.advanceTimersByTime(200);
 
         expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
@@ -1255,7 +1154,7 @@ describe("SpawnCoordinator", () => {
       expect(record.lifecycle.resultConsumed).toBeUndefined();
       record.lifecycle.status = "completed";
 
-      coordinator.scheduleNudge(result.agentId);
+      notifyCompletion(coordinator, result.record);
       vi.advanceTimersByTime(200);
 
       // sendMessage delivered the full result to the LLM — the delivery entry can be cleared.
@@ -1272,12 +1171,12 @@ describe("SpawnCoordinator", () => {
       mockGetPiInstance.mockReturnValue(null);
       record.lifecycle.status = "completed";
 
-      coordinator.scheduleNudge(result.agentId);
+      notifyCompletion(coordinator, result.record);
       vi.advanceTimersByTime(200);
 
       expect(record.lifecycle.resultConsumed).toBeUndefined();
       expect(record.delivery).toMatchObject({ state: "failed", attempts: 1 });
-      expect(coordinator.isBackground(result.agentId)).toBe(false);
+      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
     });
 
     it("marks delivery failed and preserves the result when nudge delivery throws", async () => {
@@ -1291,13 +1190,13 @@ describe("SpawnCoordinator", () => {
       // remains diagnostic until session shutdown.
       mockPi.sendMessage.mockImplementation(() => { throw new Error("stale context"); });
       record.lifecycle.status = "completed";
-      coordinator.scheduleNudge(result.agentId);
+      notifyCompletion(coordinator, result.record);
       vi.advanceTimersByTime(200);
 
       expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
       expect(record.lifecycle.resultConsumed).toBeUndefined();
       expect(record.delivery).toMatchObject({ state: "failed", attempts: 1, lastError: "stale context" });
-      expect(coordinator.isBackground(result.agentId)).toBe(false);
+      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
     });
 
     it("suppresses a delayed nudge when the parent aborts after onAgentComplete", async () => {
@@ -1336,7 +1235,7 @@ describe("SpawnCoordinator", () => {
 
         expect(result.record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent", resultConsumed: true });
         expect(result.record.delivery).toMatchObject({ state: "abandoned" });
-        expect(coordinator.isBackground(result.agentId)).toBe(false);
+        expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
         expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId)).toBe(false);
 
         vi.advanceTimersByTime(200);
@@ -1359,7 +1258,7 @@ describe("SpawnCoordinator", () => {
       vi.advanceTimersByTime(200);
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
       expect(result.record.delivery?.state).toBe("abandoned");
-      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
+      expect((coordinator as any).deliveryService.backgroundDeliveries.size).toBe(0);
 
       const acceptedParent = new AbortController();
       const accepted = await coordinator.spawn(mockPi, ctx, {
@@ -1388,7 +1287,7 @@ describe("SpawnCoordinator", () => {
 
       expect(mockPi.sendMessage).not.toHaveBeenCalled();
       expect(result.record.delivery?.state).toBe("abandoned");
-      expect((coordinator as any).backgroundDeliveries.size).toBe(0);
+      expect((coordinator as any).deliveryService.backgroundDeliveries.size).toBe(0);
     });
 
 

@@ -90,6 +90,72 @@ describe("skill discovery through Pi's real loaders", () => {
     expect(trusted).toEqual(new Set(["project-agents", "project-pi", "home-user", "pi-user"]));
   });
 
+  it("runs async discovery through the real Pi worker and preserves trust semantics", async () => {
+    const root = tempRoot();
+    const isolatedHome = join(root, "os-home");
+    const agentDir = join(root, "agent-home");
+    const repo = join(root, "repo");
+    const cwd = join(repo, "packages", "app");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(isolatedHome, { recursive: true });
+    mkdirSync(cwd, { recursive: true });
+
+    skill(join(cwd, ".agents", "skills"), "project-agents", "project shared");
+    skill(join(cwd, ".pi", "skills"), "project-pi", "project default");
+    skill(join(agentDir, "skills"), "pi-user", "global pi");
+    skill(join(isolatedHome, ".agents", "skills"), "home-user", "global agents");
+
+    vi.stubEnv("HOME", isolatedHome);
+    vi.stubEnv("USERPROFILE", isolatedHome);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.resetModules();
+    const { loadAllSkillsAsync } = await import("../../src/prompt/skill-loader.ts");
+
+    const trusted = await loadAllSkillsAsync(cwd, true);
+    const trustedNames = new Set(trusted.map(({ name }) => name));
+    expect(trustedNames).toEqual(new Set(["project-agents", "project-pi", "home-user", "pi-user"]));
+    expect(trusted.find(({ name }) => name === "project-pi")?.sourceInfo.scope).toBe("project");
+
+    const untrusted = new Set((await loadAllSkillsAsync(cwd, false)).map(({ name }) => name));
+    expect(untrusted).toEqual(new Set(["home-user", "pi-user"]));
+  });
+
+  it("keeps setImmediate live during blocking Pi discovery in the worker", async () => {
+    const root = tempRoot();
+    const isolatedHome = join(root, "os-home");
+    const agentDir = join(root, "agent-home");
+    const repo = join(root, "repo");
+    const cwd = join(repo, "packages", "app");
+    const skillsDir = join(cwd, ".pi", "skills");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(isolatedHome, { recursive: true });
+    mkdirSync(skillsDir, { recursive: true });
+    mkdirSync(cwd, { recursive: true });
+    vi.stubEnv("HOME", isolatedHome);
+    vi.stubEnv("USERPROFILE", isolatedHome);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.resetModules();
+    const { loadAllSkillsAsync } = await import("../../src/prompt/skill-loader.ts");
+
+    const selectedName = "blocking-127";
+    for (let index = 0; index < 128; index++) {
+      const name = `blocking-${index}`;
+      writeFileSync(join(skillsDir, `${name}.md`),
+        `---\nname: ${name}\ndescription: Worker skill ${index}\n---\n\n# body\n`,
+        "utf8");
+    }
+
+    let settled = false;
+    const loading = loadAllSkillsAsync(cwd).then((result) => {
+      settled = true;
+      return result;
+    });
+    await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+    expect(settled).toBe(false);
+    const loaded = await loading;
+    expect(loaded.find(({ name }) => name === selectedName)?.description).toBe("Worker skill 127");
+  });
+
   it("refreshes a real cached negative source after creation and mutation", async () => {
     const root = tempRoot();
     const cwd = join(root, "repo");

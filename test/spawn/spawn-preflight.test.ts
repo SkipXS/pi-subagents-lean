@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   getAgentConfig: vi.fn(),
   discoverNewAgents: vi.fn(),
   resolveAgentCatalog: vi.fn(),
+  resolveProjectFreeAgentCatalog: vi.fn(),
   resolveTypeInCatalog: vi.fn(),
   resolveAgentTunables: vi.fn(),
 }));
@@ -23,6 +24,7 @@ vi.mock("../../src/agents/agent-types.js", () => ({
   getAgentConfig: mocks.getAgentConfig,
   discoverNewAgents: mocks.discoverNewAgents,
   resolveAgentCatalog: mocks.resolveAgentCatalog,
+  resolveProjectFreeAgentCatalog: mocks.resolveProjectFreeAgentCatalog,
   resolveTypeInCatalog: mocks.resolveTypeInCatalog,
 }));
 
@@ -31,6 +33,11 @@ vi.mock("../../src/models/agent-resolution.js", () => ({
 }));
 
 import { runSpawnPreflight } from "../../src/spawn/spawn-preflight.js";
+import {
+  MAX_AGENT_NAME_BYTES,
+  MAX_AGENT_PROMPT_BYTES,
+  MAX_AGENT_SYSTEM_PROMPT_BYTES,
+} from "../../src/agents/agent-string-limits.js";
 
 const runtimeSettings: SubagentRuntimeSettings = {
   agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
@@ -77,6 +84,7 @@ beforeEach(() => {
   mocks.getAgentConfig.mockReturnValue(agentConfig);
   mocks.discoverNewAgents.mockResolvedValue(0);
   mocks.resolveAgentCatalog.mockResolvedValue(new Map([["local", agentConfig]]));
+  mocks.resolveProjectFreeAgentCatalog.mockResolvedValue(new Map([["known", agentConfig]]));
   mocks.resolveTypeInCatalog.mockImplementation((catalog: Map<string, unknown>, type: string) => catalog.has(type) ? type : undefined);
   mocks.resolveAgentTunables.mockReturnValue({ model, modelKey: "provider/model", thinkingLevel: "high" });
 });
@@ -140,7 +148,73 @@ describe("runSpawnPreflight", () => {
     expect(result.kind).toBe("ready");
     expect(mocks.revalidateWorktreePath).not.toHaveBeenCalled();
     expect(mocks.resolveAgentCatalog).not.toHaveBeenCalled();
-    expect(mocks.resolveType).toHaveBeenCalledWith("known");
+    expect(mocks.resolveProjectFreeAgentCatalog).toHaveBeenCalledWith({ disableDefaultAgents: false });
+    expect(mocks.resolveType).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse a trusted project role for a later untrusted preflight", async () => {
+    const projectConfig = {
+      name: "project-only",
+      description: "Project instructions",
+      systemPrompt: "Project body",
+    };
+    mocks.resolveType.mockImplementation((type: string) => type === "project-only" ? type : undefined);
+    mocks.getAgentConfig.mockReturnValue(projectConfig);
+
+    const trusted = await runSpawnPreflight({
+      ...makeInput({ agent: "project-only" }),
+      projectTrusted: true,
+    });
+    expect(trusted.kind).toBe("ready");
+
+    mocks.resolveProjectFreeAgentCatalog.mockResolvedValueOnce(new Map([
+      ["known", agentConfig],
+      ["project-only", { ...agentConfig, description: "User definition" }],
+    ]));
+    const untrusted = await runSpawnPreflight(makeInput({ agent: "project-only" }));
+    expect(untrusted.kind).toBe("ready");
+    if (untrusted.kind === "ready") {
+      expect(untrusted.resolvedSpawn.agentConfig.description).toBe("User definition");
+    }
+    expect(mocks.resolveType).toHaveBeenCalledTimes(1);
+    expect(mocks.resolveProjectFreeAgentCatalog).toHaveBeenCalledWith({ disableDefaultAgents: false });
+
+    mocks.resolveProjectFreeAgentCatalog.mockResolvedValueOnce(new Map([["known", agentConfig]]));
+    const unknown = await runSpawnPreflight(makeInput({ agent: "project-only" }));
+    expect(unknown).toEqual({
+      kind: "error",
+      error: "Unknown agent type: project-only",
+      warnings: [],
+    });
+  });
+
+  it("refreshes the bounded trusted parent catalog when a role was added after the last turn", async () => {
+    const input = { ...makeInput(), projectTrusted: true };
+    let resolveCalls = 0;
+    mocks.resolveType.mockImplementation((type: string) => {
+      resolveCalls++;
+      return resolveCalls === 1 ? undefined : type;
+    });
+    mocks.getAgentConfig.mockReturnValue({ ...agentConfig, name: "added-after-turn" });
+    mocks.discoverNewAgents.mockResolvedValueOnce(1);
+    input.params.agent = "added-after-turn";
+
+    const result = await runSpawnPreflight(input);
+
+    expect(result.kind).toBe("ready");
+    expect(mocks.discoverNewAgents).toHaveBeenCalledWith({ disableDefaultAgents: false });
+    expect(mocks.resolveProjectFreeAgentCatalog).not.toHaveBeenCalled();
+    expect(resolveCalls).toBe(2);
+  });
+
+  it("does not refresh the trusted registry for an untrusted unknown role", async () => {
+    const input = makeInput({ agent: "project-only" });
+    mocks.resolveProjectFreeAgentCatalog.mockResolvedValueOnce(new Map());
+
+    const result = await runSpawnPreflight(input);
+
+    expect(result.kind).toBe("error");
+    expect(mocks.discoverNewAgents).not.toHaveBeenCalled();
   });
 
   it("returns validation warnings and the existing domain error", async () => {
@@ -165,13 +239,67 @@ describe("runSpawnPreflight", () => {
     expect(mocks.resolveType).not.toHaveBeenCalled();
   });
 
+  it("rejects an oversized agent name before worktree/catalog", async () => {
+    const result = await runSpawnPreflight(makeInput({ agent: "a".repeat(MAX_AGENT_NAME_BYTES + 1) }));
+
+    expect(result).toEqual({
+      kind: "error",
+      error: expect.stringContaining("Agent type exceeds"),
+      warnings: [],
+    });
+    expect(mocks.validateWorktreePath).not.toHaveBeenCalled();
+    expect(mocks.resolveProjectFreeAgentCatalog).not.toHaveBeenCalled();
+  });
+
+  it("accepts the exact ASCII prompt boundary and rejects one byte over before worktree/catalog", async () => {
+    const exact = await runSpawnPreflight(makeInput({ prompt: "a".repeat(MAX_AGENT_PROMPT_BYTES) }));
+    expect(exact.kind).toBe("ready");
+    vi.clearAllMocks();
+
+    const result = await runSpawnPreflight(makeInput({ prompt: "a".repeat(MAX_AGENT_PROMPT_BYTES + 1) }));
+
+    expect(result).toEqual({
+      kind: "error",
+      error: expect.stringContaining("Agent prompt exceeds"),
+      warnings: [],
+    });
+    expect(mocks.validateWorktreePath).not.toHaveBeenCalled();
+    expect(mocks.resolveType).not.toHaveBeenCalled();
+  });
+
+  it("uses UTF-8 bytes for the exact multibyte prompt boundary", async () => {
+    const exact = "😀".repeat(MAX_AGENT_PROMPT_BYTES / 4);
+    const accepted = await runSpawnPreflight(makeInput({ prompt: exact }));
+    expect(accepted.kind).toBe("ready");
+
+    const rejected = await runSpawnPreflight(makeInput({ prompt: `${exact}😀` }));
+    expect(rejected.kind).toBe("error");
+    if (rejected.kind === "error") expect(rejected.error).toContain("UTF-8 bytes");
+  });
+
+  it("rejects an oversized systemPrompt after resolution but before accepted snapshot", async () => {
+    mocks.resolveProjectFreeAgentCatalog.mockResolvedValueOnce(new Map([[
+      "known",
+      { ...agentConfig, systemPrompt: "界".repeat(MAX_AGENT_SYSTEM_PROMPT_BYTES / 3 + 1) },
+    ]]));
+
+    const result = await runSpawnPreflight(makeInput());
+
+    expect(result).toEqual({
+      kind: "error",
+      error: expect.stringContaining("AgentConfig systemPrompt exceeds"),
+      warnings: [],
+    });
+    expect(mocks.resolveAgentTunables).not.toHaveBeenCalled();
+  });
+
   it("returns cancelled after an asynchronous discovery boundary", async () => {
     const controller = new AbortController();
     const input = { ...makeInput(), signal: controller.signal };
     mocks.resolveType.mockReturnValue(undefined);
-    mocks.discoverNewAgents.mockImplementationOnce(async () => {
+    mocks.resolveProjectFreeAgentCatalog.mockImplementationOnce(async () => {
       controller.abort();
-      return 0;
+      return new Map();
     });
 
     const result = await runSpawnPreflight(input);

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { acceptedSpawnFixture } from "./fixtures.ts";
 
 const boundary = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
@@ -429,6 +430,7 @@ describe("offline extension headless lifecycle", () => {
         prompt: "Keep the running agent active",
         run_in_background: true,
       }, undefined, undefined, ctx);
+      await vi.waitFor(() => expect(sessions).toHaveLength(1));
       await sessions[0].promptStarted;
       const runningRecord = manager.listAgents().find((record) => (record.execution.session as unknown) === sessions[0])!;
 
@@ -504,6 +506,7 @@ describe("offline extension headless lifecycle", () => {
         prompt: "Remain active until shutdown",
         run_in_background: true,
       }, undefined, undefined, ctx);
+      await vi.waitFor(() => expect(sessions).toHaveLength(1));
       await sessions[0].promptStarted;
       const activeRecord = manager.listAgents().find((record) => (record.execution.session as unknown) === sessions[0])!;
 
@@ -538,7 +541,15 @@ describe("offline extension headless lifecycle", () => {
     const settings = getStore().createSubagentRuntimeSettings();
     await expect(runWithSubagentRuntime(
       createSubagentRuntimeContext(),
-      () => runAgent({} as any, "implementer", "nested", { pi: {} as any, runtimeSettings: settings }),
+      () => runAgent({} as any, "implementer", "nested", {
+        pi: {} as any,
+        acceptedSpawn: acceptedSpawnFixture({
+          type: "implementer",
+          prompt: "nested",
+          runtimeSettings: settings,
+          projectTrusted: false,
+        }),
+      }),
     )).rejects.toThrow("Nested agent execution is unavailable from a child runtime");
   });
 
@@ -580,9 +591,16 @@ describe("offline extension headless lifecycle", () => {
       const rootManager = getManager();
       const rootCoordinator = getCoordinator();
 
-      // This legacy/direct call has neither an accepted parent ID nor a
-      // nested executor, but its resource/session extension setup is isolated.
-      const run = runAgent(ctx as any, "implementer", "Inspect directly", { pi: api.api as any });
+      // An accepted contract is enough to exercise the runner's isolated
+      // resource/session setup without a coordinator or manager.
+      const run = runAgent(ctx as any, "stale", "stale", {
+        pi: api.api as any,
+        acceptedSpawn: acceptedSpawnFixture({
+          type: "implementer",
+          prompt: "Inspect directly",
+          projectTrusted: false,
+        }),
+      });
       await session.promptStarted;
 
       expect(observedRuntime).toMatchObject({ isChildRuntime: true });

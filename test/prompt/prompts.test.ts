@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { buildAgentPrompt } from "../../src/prompt/prompts.ts";
+import {
+  buildAgentPrompt,
+  MAX_CHILD_SYSTEM_PROMPT_BYTES,
+  MAX_SKILL_METADATA_PROMPT_BYTES,
+} from "../../src/prompt/prompts.ts";
 import type { AgentConfig, EnvInfo } from "../../src/types.ts";
 
 vi.mock("@earendil-works/pi-coding-agent", async () => {
@@ -96,6 +100,36 @@ describe("buildAgentPrompt", () => {
 
     const plain = buildAgentPrompt(baseConfig, "/test/cwd", env);
     expect(plain).not.toContain("<available_skills>");
+  });
+
+  it("rejects the complete 10,000-entry metadata prompt instead of selecting a prefix", () => {
+    const metadata = Array.from({ length: 10_000 }, (_, index) => ({
+      name: `skill-${index}`,
+      description: "metadata",
+      location: `/skills/skill-${index}/SKILL.md`,
+      disableModelInvocation: false,
+    }));
+
+    expect(() => buildAgentPrompt(baseConfig, "/test/cwd", env, { skillMetas: metadata }))
+      .toThrow(`Skill metadata prompt exceeds the maximum of ${MAX_SKILL_METADATA_PROMPT_BYTES} UTF-8 bytes`);
+  });
+
+  it("charges multibyte metadata and rejects an over-budget final child prompt", () => {
+    const unicodeMetadata = [{
+      name: "unicode",
+      description: "😀漢字".repeat(200),
+      location: "/skills/unicode/SKILL.md",
+      disableModelInvocation: false,
+    }];
+    const prompt = buildAgentPrompt(baseConfig, "/test/cwd", env, { skillMetas: unicodeMetadata });
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(MAX_CHILD_SYSTEM_PROMPT_BYTES);
+    expect(prompt).not.toContain("\uFFFD");
+
+    expect(() => buildAgentPrompt(
+      { ...baseConfig, systemPrompt: "😀".repeat(MAX_CHILD_SYSTEM_PROMPT_BYTES / 4) },
+      "/test/cwd",
+      env,
+    )).toThrow(`Child system prompt exceeds the maximum of ${MAX_CHILD_SYSTEM_PROMPT_BYTES} UTF-8 bytes`);
   });
 });
 

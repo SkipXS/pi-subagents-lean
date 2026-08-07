@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   lstatSync: vi.fn(),
   realpathSync: vi.fn(),
   readdirSync: vi.fn(),
+  opendirSync: vi.fn(),
   statSync: vi.fn(),
   cwd: "",
   home: "",
@@ -21,6 +22,7 @@ vi.mock("node:fs", async () => {
     lstatSync: mocks.lstatSync,
     realpathSync: mocks.realpathSync,
     readdirSync: mocks.readdirSync,
+    opendirSync: mocks.opendirSync,
     statSync: mocks.statSync,
   };
 });
@@ -90,6 +92,14 @@ describe("skill fingerprint edge cases", () => {
     mocks.readdirSync.mockImplementation((directory: string, options?: { withFileTypes?: boolean }) => {
       if (!options?.withFileTypes) return directory === cwd ? [".git"] : [];
       return (entries.get(directory) ?? []).map((name) => ({ name }));
+    });
+    mocks.opendirSync.mockImplementation((directory: string) => {
+      const names = directory === cwd ? [".git"] : (entries.get(directory) ?? []);
+      let index = 0;
+      return {
+        readSync: () => index < names.length ? { name: names[index++] } : null,
+        closeSync: () => undefined,
+      };
     });
     mocks.lstatSync.mockImplementation((filePath: string) => {
       if (filePath === disappearing) throw missingError();

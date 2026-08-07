@@ -3,6 +3,12 @@ import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import type { AgentConfig } from "../agents/types.js";
 import type { AgentInvocation, SubagentType } from "../agents/types.js";
 import type { ThinkingLevel } from "../types.js";
+import { normalizeAgentSettingsOverrides } from "../config/types.js";
+import {
+  assertAgentPrompt,
+  assertAgentSystemPrompt,
+  retainAgentDescription,
+} from "../agents/agent-string-limits.js";
 
 /**
  * Values resolved by the regular Agent tool before the spawn is accepted.
@@ -13,7 +19,9 @@ import type { ThinkingLevel } from "../types.js";
  */
 export interface ResolvedSpawn {
   readonly type: SubagentType;
+  /** Authoritative executed prompt; at most 256 KiB UTF-8. */
   readonly prompt: string;
+  /** Retained/display description; capped at 8 KiB UTF-8. */
   readonly description: string;
   readonly runInBackground: boolean;
   readonly agentConfig: AgentConfig;
@@ -79,7 +87,12 @@ function cloneAndFreeze<T>(value: T, seen = new WeakMap<object, unknown>()): T {
 
 /** Clone the mutable portions of an AgentConfig and freeze the snapshot. */
 function freezeAgentConfig(config: AgentConfig): AgentConfig {
-  return cloneAndFreeze({ ...config });
+  return cloneAndFreeze({
+    ...config,
+    ...(typeof config.description === "string"
+      ? { description: retainAgentDescription(config.description) }
+      : {}),
+  });
 }
 
 /**
@@ -96,10 +109,10 @@ export function snapshotRuntimeSettings(
     disableDefaultAgents: sourceAgent?.disableDefaultAgents ?? DEFAULT_RUNTIME_AGENT_SETTINGS.disableDefaultAgents,
     orchestrationPrompt: sourceAgent?.orchestrationPrompt ?? DEFAULT_RUNTIME_AGENT_SETTINGS.orchestrationPrompt,
   });
-  const sourceAgents = settings?.agents;
-  const agents = sourceAgents
+  const normalizedAgents = normalizeAgentSettingsOverrides(settings?.agents);
+  const agents = Object.keys(normalizedAgents).length > 0
     ? Object.fromEntries(
-      Object.entries(sourceAgents).map(([name, override]) => [name, { ...override }]),
+      Object.entries(normalizedAgents).map(([name, override]) => [name, { ...override }]),
     )
     : undefined;
 
@@ -109,20 +122,15 @@ export function snapshotRuntimeSettings(
   });
 }
 
-type ResolvedSpawnInput = Omit<ResolvedSpawn, "projectTrusted"> & {
-  /** Optional only for legacy/direct callers; snapshots always materialize false. */
-  readonly projectTrusted?: boolean;
-};
-
-function snapshotResolvedFields(spawn: ResolvedSpawnInput): ResolvedSpawn {
+function snapshotResolvedFields(spawn: ResolvedSpawn): ResolvedSpawn {
   return Object.freeze({
     type: spawn.type,
     prompt: spawn.prompt,
-    description: spawn.description,
+    description: retainAgentDescription(spawn.description),
     runInBackground: spawn.runInBackground,
     agentConfig: freezeAgentConfig(spawn.agentConfig),
     runtimeSettings: snapshotRuntimeSettings(spawn.runtimeSettings),
-    projectTrusted: spawn.projectTrusted === true,
+    projectTrusted: spawn.projectTrusted,
     model: spawn.model,
     modelKey: spawn.modelKey,
     thinkingLevel: spawn.thinkingLevel,
@@ -136,19 +144,18 @@ function snapshotResolvedFields(spawn: ResolvedSpawnInput): ResolvedSpawn {
 }
 
 /** Create the detached, immutable pre-acceptance resolution snapshot. */
-export function snapshotResolvedSpawn(spawn: ResolvedSpawnInput): ResolvedSpawn {
+export function snapshotResolvedSpawn(spawn: ResolvedSpawn): ResolvedSpawn {
   return snapshotResolvedFields(spawn);
 }
 
 /** Mark a resolved snapshot as accepted while retaining a fresh defensive copy. */
-export function acceptResolvedSpawn(spawn: ResolvedSpawnInput): AcceptedSpawn {
+export function acceptResolvedSpawn(spawn: ResolvedSpawn): AcceptedSpawn {
+  // This is the last boundary before queue/record ownership. Validate before
+  // cloning so an oversized prompt or system prompt cannot enter AcceptedSpawn.
+  assertAgentPrompt(spawn.prompt, "Agent prompt");
+  assertAgentSystemPrompt(spawn.agentConfig?.systemPrompt);
   return Object.freeze({
     ...snapshotResolvedFields(spawn),
     accepted: true as const,
   });
-}
-
-/** Re-snapshot an accepted contract at the manager acceptance boundary. */
-export function snapshotAcceptedSpawn(spawn: AcceptedSpawn): AcceptedSpawn {
-  return acceptResolvedSpawn(spawn);
 }

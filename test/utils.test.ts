@@ -1,10 +1,71 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { writeFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { isUnsafeName, isSymlink, safeReadFile, summarizeToolArgs } from "../src/utils.ts";
+import {
+  capUtf8Strings,
+  capUtf8StringsToBudget,
+  isUnsafeName,
+  isSymlink,
+  safeReadFile,
+  summarizeToolArgs,
+  truncateUtf8,
+  utf8ByteLength,
+} from "../src/utils.ts";
 import { canCreateSymlinks, tempDirFixture } from "./fixtures";
 
 const itWithSymlinkSupport = it.skipIf(!canCreateSymlinks());
+
+describe("bounded UTF-8 text", () => {
+  it("truncates deterministic multibyte text without splitting a code point", () => {
+    const value = truncateUtf8("😀界".repeat(100), 32);
+
+    expect(utf8ByteLength(value)).toBeLessThanOrEqual(32);
+    expect(value).toContain("[TRUNCATED]");
+    expect(value.endsWith("[TRUNCATED]")).toBe(true);
+    expect([...value.slice(0, -"[TRUNCATED]".length)].every((character) => character !== "\uFFFD")).toBe(true);
+    expect(truncateUtf8("short", 32)).toBe("short");
+  });
+
+  it("handles zero and marker-only budgets byte-safely", () => {
+    expect(truncateUtf8("😀", 0)).toBe("");
+    const markerPrefix = truncateUtf8("😀😀", 4);
+    expect(utf8ByteLength(markerPrefix)).toBeLessThanOrEqual(4);
+    expect(markerPrefix).toBe("[TRU");
+  });
+
+  it("recursively caps only string fields and preserves metadata shape", () => {
+    const huge = "界".repeat(5_000);
+    const value = { text: huge, nested: [{ summary: huge, count: 3 }], flag: true };
+    const capped = capUtf8Strings(value, 8 * 1024);
+
+    expect(capped).not.toBe(value);
+    expect(capped.nested).not.toBe(value.nested);
+    expect(utf8ByteLength(capped.text)).toBeLessThanOrEqual(8 * 1024);
+    expect(utf8ByteLength(capped.nested[0]!.summary)).toBeLessThanOrEqual(8 * 1024);
+    expect(capped.text).toContain("[TRUNCATED]");
+    expect(capped.nested[0]!.count).toBe(3);
+    expect(capped.flag).toBe(true);
+  });
+
+  it("shares a total budget across details fields and leaves non-plain values alone", () => {
+    const value = { first: "a".repeat(100), second: "界".repeat(100), date: new Date(0) };
+    const capped = capUtf8StringsToBudget(value, 32);
+
+    const textBytes = utf8ByteLength(capped.first) + utf8ByteLength(capped.second);
+    expect(textBytes).toBeLessThanOrEqual(32);
+    expect(capped.first).toContain("[TRUNCATED]");
+    expect(capped.date).toBe(value.date);
+  });
+
+  it("does not loop on a cyclic plain metadata object", () => {
+    const value: { text: string; self?: unknown } = { text: "界".repeat(5_000) };
+    value.self = value;
+    const capped = capUtf8Strings(value, 8 * 1024);
+
+    expect(capped.self).toBe(capped);
+    expect(capped.text).toContain("[TRUNCATED]");
+  });
+});
 
 describe("summarizeToolArgs", () => {
   it("keeps log summaries neutral and compact for common tools", () => {

@@ -1,70 +1,29 @@
-import { getPiInstance, getSessionCtx, getStore, getSubagentRuntimeContext } from "../shell.js";
-import { resolveAgentTunables } from "../models/agent-resolution.js";
-import { getStatusNote } from "../status-note.js";
+import { getSubagentRuntimeContext } from "../shell.js";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentExecutionSummary, AgentRecord, AgentStatus, SpawnConfig } from "../types.js";
-import type { AgentManager, SpawnOptions } from "../agents/agent-manager.js";
-import type { SubagentRuntimeSettings } from "../config/config-store.js";
+import type { AgentExecutionSummary, AgentRecord } from "../types.js";
+import type { AgentManager } from "../agents/agent-manager.js";
 import type { ResolvedSpawn } from "./spawn-contract.js";
-import { getAgentConfig, resolveType, snapshotAgentConfig } from "../agents/agent-types.js";
-import { buildAgentDetails } from "../agents/agent-details.js";
-import { executionKind, formatAgentStatusLine } from "../agents/execution-display.js";
+import {
+  BackgroundDeliveryService,
+  type DeliveryActivityObserver,
+  type DeliveryActivitySnapshot,
+} from "./background-delivery.js";
+
+export type { DeliveryActivityProjection, DeliveryActivitySnapshot, DeliveryActivityObserver } from "./background-delivery.js";
 
 /**
  * spawn-coordinator.ts — Spawn-and-track coordination for subagents.
  *
- * Single entry point for the LLM tool spawn path. It owns background-result
- * delivery; AgentManager owns execution and records.
+ * The coordinator is the root execution facade. AgentManager owns execution
+ * and records; BackgroundDeliveryService owns execution-scoped result handoff.
  */
-/**
- * Legacy input for direct coordinator callers. The regular Agent tool passes a
- * ResolvedSpawn directly instead of duplicating these fields beside it.
- */
-export interface LegacySpawnIntent extends SpawnConfig {
-  type: string;
-  prompt: string;
-  runInBackground: boolean;
-  /** Parent abort signal forwarded to the agent manager. */
-  signal?: AbortSignal;
-  /** Runtime settings snapshot captured by callers that resolve fields before entering the coordinator. */
-  runtimeSettingsSnapshot?: SubagentRuntimeSettings;
-  /** Transitional adapter for callers from the pre-unified contract shape. */
-  resolvedSpawn?: ResolvedSpawn;
-}
-
-/** Transitional wrapper retained for callers migrating from the old intent shape. */
-export interface ResolvedSpawnIntent {
-  resolvedSpawn: ResolvedSpawn;
-}
-
-/** Normal authoritative input or one of the explicitly retained adapters. */
-export type SpawnIntent = ResolvedSpawn | LegacySpawnIntent | ResolvedSpawnIntent;
-
-function isResolvedSpawn(intent: SpawnIntent): intent is ResolvedSpawn {
-  return "runtimeSettings" in intent && intent.runtimeSettings !== undefined;
-}
-
-function resolvedSpawnFromIntent(intent: SpawnIntent): ResolvedSpawn | undefined {
-  if (isResolvedSpawn(intent)) return intent;
-  return "resolvedSpawn" in intent ? intent.resolvedSpawn : undefined;
-}
-
 export interface SpawnResult {
   agentId: string;
   record: AgentRecord;
+  /** Full foreground response; retained record projections may be bounded. */
+  responseText?: string;
 }
-
-/** Read-only projection of one completed background execution still pending delivery. */
-export interface DeliveryActivityProjection {
-  readonly agentId: string;
-  readonly type: string;
-  readonly executionId: string;
-}
-
-/** Stable, detached delivery snapshot exposed to presentation observers. */
-export type DeliveryActivitySnapshot = readonly DeliveryActivityProjection[];
-export type DeliveryActivityObserver = (snapshot: DeliveryActivitySnapshot) => void;
 
 /** Input for continueAgent(). Built by the AgentContinue tool executor. */
 export interface ContinueIntent {
@@ -78,205 +37,58 @@ export interface ContinueIntent {
 export interface ContinueResult {
   executionId: string;
   record: AgentRecord;
+  /** Full foreground response; retained execution text may be bounded. */
+  responseText?: string;
 }
 
-/** Short delay before each automatic background-result delivery (ms). */
-const NUDGE_DELAY_MS = 200;
-
-/** Immutable payload captured at one execution's completion boundary. */
-interface BackgroundPayload {
-  /** Resolved full record id; delivery never echoes a caller's short prefix. */
-  agentId: string;
-  type: string;
-  /** Terminal status of this execution, frozen at completion. */
-  status: AgentStatus;
-  /** Result text frozen at completion; a later execution can never overwrite it. */
-  result: string;
-  /** Prebuilt message content frozen at completion. */
-  content: string;
-  details: Record<string, unknown>;
-}
-
-/**
- * Authoritative per-execution background delivery state.
- *
- * Everything one execution needs for its single automatic delivery — immutable
- * payload, timer, attempt state, in-flight guard, and parent-abort binding —
- * is keyed by the execution id, so a stale timer or callback can never send a
- * later execution's mutable `record.result`. `record.delivery` remains only a
- * public projection of the latest execution.
- */
-interface BackgroundDeliveryEntry {
-  /** Manager-assigned execution id; every claim is execution-scoped. */
-  executionId: string;
-  agentId: string;
-  payload?: BackgroundPayload;
-  signal?: AbortSignal;
-  onParentAbort?: () => void;
-  state: "pending" | "accepted" | "failed" | "abandoned";
-  /** True once the runner reported completion and delivery may be scheduled. */
-  completed: boolean;
-  attempts: number;
-  lastAttemptAt?: number;
-  lastError?: string;
-  /** Claims the single automatic delivery attempt. */
-  autoNudgeIssued: boolean;
-  /** Captured display type; delivery status must not reread a mutable record. */
-  type: string;
-  timer: ReturnType<typeof setTimeout> | null;
-}
-
-/** Return whether a record has reached a terminal lifecycle status. */
 function isTerminal(record: AgentRecord): boolean {
   return record.lifecycle.status !== "running" && record.lifecycle.status !== "queued";
 }
 
-function deliveryErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 export class SpawnCoordinator {
-  /** Authoritative per-execution background delivery state. */
-  private backgroundDeliveries = new Map<string, BackgroundDeliveryEntry>();
+  private readonly deliveryService: BackgroundDeliveryService;
+  private readonly manager: AgentManager;
+  /** Stable bound subscription facade; the delivery service remains the owner. */
+  readonly subscribeDeliveryActivity: (observer: DeliveryActivityObserver) => () => void;
 
-  /** Latest claimed execution per record, retained after accepted entries are cleared. */
-  private latestDeliveryKeys = new Map<string, string>();
-  private deliveryObservers = new Set<DeliveryActivityObserver>();
-
-  /** Set during dispose to prevent delivery through a stale Pi instance. */
-  private disposed = false;
-
-  constructor(private manager: AgentManager) {}
-
-  /**
-   * Subscribe to detached completed-delivery projections.
-   *
-   * Delivery observers are additive and best effort: a presentation failure
-   * cannot change nudge scheduling or handoff state.
-   */
-  subscribeDeliveryActivity(observer: DeliveryActivityObserver): () => void {
-    this.deliveryObservers.add(observer);
-    this.notifyDeliveryObserver(observer);
-    let subscribed = true;
-    return () => {
-      if (!subscribed) return;
-      subscribed = false;
-      this.deliveryObservers.delete(observer);
-    };
+  constructor(manager: AgentManager) {
+    this.manager = manager;
+    this.deliveryService = new BackgroundDeliveryService(
+      manager,
+      () => { this.pruneRetainedRecords(); },
+    );
+    this.subscribeDeliveryActivity = this.deliveryService.subscribeActivity.bind(this.deliveryService);
+    // The service owns the authoritative pending/armed delivery map. The
+    // manager receives only a query, never a second copy of that state. Keep
+    // minimal legacy test/host manager doubles compatible with the optional
+    // retention hook; the public runtime always provides it.
+    const setRetentionProtection = (this.manager as unknown as {
+      setRetentionProtection?: (protection: (record: AgentRecord) => boolean) => void;
+    }).setRetentionProtection;
+    if (typeof setRetentionProtection === "function") {
+      setRetentionProtection.call(this.manager, (record) => this.deliveryService.isPendingOrArmed(record.id));
+    }
   }
 
   /** Return only completed, still-pending coordinator deliveries. */
   getDeliveryActivitySnapshot(): DeliveryActivitySnapshot {
-    const byAgent = new Map<string, DeliveryActivityProjection>();
-    for (const entry of this.backgroundDeliveries.values()) {
-      if (!entry.completed || entry.state !== "pending" || !entry.payload) continue;
-      byAgent.set(entry.agentId, Object.freeze({
-        agentId: entry.agentId,
-        type: entry.type,
-        executionId: entry.executionId,
-      }));
-    }
-    const projections = [...byAgent.values()].sort((left, right) =>
-      left.agentId < right.agentId ? -1 : left.agentId > right.agentId ? 1 : 0,
-    );
-    return Object.freeze(projections);
-  }
-
-  private notifyDeliveryObserver(observer: DeliveryActivityObserver): void {
-    try {
-      observer(this.getDeliveryActivitySnapshot());
-    } catch {
-      // Presentation observers must never affect delivery lifecycle.
-    }
-  }
-
-  private notifyDeliveryObservers(): void {
-    for (const observer of [...this.deliveryObservers]) this.notifyDeliveryObserver(observer);
+    return this.deliveryService.getActivitySnapshot();
   }
 
   /** Spawn + wire tracking + (foreground) await. */
   async spawn(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
-    intent: SpawnIntent,
+    resolvedSpawn: ResolvedSpawn,
     onAccepted?: (record: AgentRecord) => void,
   ): Promise<SpawnResult> {
     if (getSubagentRuntimeContext()) {
       throw new Error("Root agent spawning is unavailable from a child runtime");
     }
-    return this.spawnInternal(pi, ctx, intent, onAccepted);
-  }
-
-  private async spawnInternal(
-    pi: ExtensionAPI,
-    ctx: ExtensionContext,
-    intent: SpawnIntent,
-    onAccepted?: (record: AgentRecord) => void,
-  ): Promise<SpawnResult> {
-    let runInBackground: boolean;
-    let signal: AbortSignal | undefined;
-    let agentId: string;
-    const resolvedSpawn = resolvedSpawnFromIntent(intent);
-
-    if (resolvedSpawn) {
-      // The regular Agent tool has already completed discovery, worktree
-      // preflight, settings capture, and model/thinking resolution. Pass that
-      // authoritative contract to AgentManager; it is the sole acceptance
-      // boundary that turns ResolvedSpawn into AcceptedSpawn.
-      runInBackground = resolvedSpawn.runInBackground;
-      signal = resolvedSpawn.signal;
-      agentId = this.manager.spawn(pi, ctx, resolvedSpawn);
-    } else {
-      // Narrow compatibility adapter for direct coordinator callers that have
-      // not migrated to the authoritative contract yet. This is the only
-      // coordinator path allowed to retain registry/config/model resolution.
-      const legacyIntent = intent as LegacySpawnIntent;
-      const runtimeSettings = legacyIntent.runtimeSettingsSnapshot ?? getStore().createSubagentRuntimeSettings();
-      const canonicalType = resolveType(legacyIntent.type) ?? legacyIntent.type;
-      const selectedConfig = legacyIntent.agentConfig ?? getAgentConfig(canonicalType);
-      const agentConfig = selectedConfig ? snapshotAgentConfig(selectedConfig) : undefined;
-      const resolvedTunables = resolveAgentTunables({
-        agentName: canonicalType,
-        agentConfig,
-        overrides: runtimeSettings.agents,
-        modelRegistry: ctx.modelRegistry,
-        parentModel: ctx.model,
-        parentThinking: ctx.thinkingLevel,
-        baseModel: legacyIntent.model,
-        requestedThinking: legacyIntent.thinkingLevel,
-      });
-      const model = resolvedTunables.model;
-      const thinkingLevel = resolvedTunables.thinkingLevel;
-      const modelKey = resolvedTunables.modelKey ?? legacyIntent.modelKey;
-      const {
-        type: legacyType,
-        prompt: legacyPrompt,
-        runInBackground: legacyRunInBackground,
-        signal: legacySignal,
-        runtimeSettingsSnapshot: _runtimeSettingsSnapshot,
-        resolvedSpawn: _resolvedSpawn,
-        ...legacyConfig
-      } = legacyIntent;
-      runInBackground = legacyRunInBackground;
-      signal = legacySignal;
-      agentId = this.manager.spawn(pi, ctx, legacyType, legacyPrompt, {
-        ...legacyConfig,
-        signal,
-        model,
-        modelKey,
-        thinkingLevel,
-        projectTrusted: legacyIntent.projectTrusted === true,
-        agentConfig,
-        invocation: {
-          ...legacyIntent.invocation,
-          ...(modelKey !== undefined ? { modelKey } : {}),
-          thinkingLevel,
-        },
-        isBackground: runInBackground,
-        runtimeSettings,
-      });
-    }
+    const runInBackground = resolvedSpawn.runInBackground;
+    const agentId = this.manager.spawn(pi, ctx, resolvedSpawn);
     const record = this.manager.getRecord(agentId)!;
+
     // Foreground callers await below, so publish the accepted record's full ID
     // before that await. Rendering is observational and must never affect the
     // accepted execution if a host-side observer fails.
@@ -287,39 +99,58 @@ export class SpawnCoordinator {
         // Render observers are best-effort and cannot change spawn semantics.
       }
     }
-    const executionId = record.stats.executions?.[0]?.id;
-    if (runInBackground && executionId) {
-      // The initial spawn is execution 0. Claims are deliberately keyed only
-      // by the manager-issued execution id.
-      this.claimBackgroundDelivery(record, executionId, signal);
-    }
 
-    if (isTerminal(record)) {
-      // A synchronous terminal start can complete before the claim above was
-      // installed. Reconcile that terminal execution after claiming it so the
-      // completion still gets exactly one delivery attempt.
-      if (runInBackground) {
-        this.reconcileBackgroundClaim(record, executionId);
-      } else {
-        record.lifecycle.resultConsumed = true;
+    const executionId = record.stats.executions?.[0]?.id;
+    if (runInBackground) {
+      if (executionId) {
+        // Install the claim before reconciliation: the manager may have
+        // completed synchronously before control returned to this facade.
+        this.deliveryService.claim(record, executionId, resolvedSpawn.signal);
+        this.deliveryService.reconcile(record, executionId);
+        // Completion pruning is normally queued by the manager. Reconcile can
+        // settle a completion-before-claim race synchronously, so make the
+        // post-claim trigger explicit as well.
+        this.pruneRetainedRecords();
       }
+      // Background acceptance is always an immediate acknowledgement, even if
+      // a malformed/legacy manager record has no execution id to reconcile.
       return { agentId, record };
     }
 
-    if (runInBackground) {
-      // The delivery claim above is the only background tracking needed.
-    } else {
-      await record.execution.promise;
-      record.lifecycle.resultConsumed = true;
+    if (isTerminal(record)) {
+      // A conforming runner may settle before the coordinator regains control;
+      // still capture its full caller-facing promise before releasing it.
+      const terminalPromise = record.execution.promise;
+      if (!terminalPromise) {
+        record.lifecycle.resultConsumed = true;
+        return { agentId, record };
+      }
+      try {
+        const responseText = await terminalPromise;
+        record.lifecycle.resultConsumed = true;
+        return { agentId, record, responseText };
+      } finally {
+        this.releaseConsumedPromise(record, terminalPromise);
+      }
     }
 
-    return { agentId, record };
+    // The execution promise is the foreground return channel and remains
+    // complete. AgentRecord.result is only a retained diagnostic projection.
+    const foregroundPromise = record.execution.promise;
+    if (!foregroundPromise) return { agentId, record };
+    try {
+      const responseText = await foregroundPromise;
+      record.lifecycle.resultConsumed = true;
+      return { agentId, record, responseText };
+    } finally {
+      this.releaseConsumedPromise(record, foregroundPromise);
+    }
   }
 
   /**
    * Continue an existing agent's session. Foreground callers await their own
-   * execution; background callers return immediately and receive a per-execution
-   * completion notification through the normal delivery path.
+   * execution; background callers return immediately and receive a per-
+   * execution completion notification through BackgroundDeliveryService.
    */
   async continueAgent(
     pi: ExtensionAPI,
@@ -335,296 +166,68 @@ export class SpawnCoordinator {
     });
 
     if (intent.runInBackground) {
-      // Fresh per-execution delivery state; an earlier execution's state is
-      // already consumed or still delivering under its own execution key.
-      record.delivery = { state: "pending", attempts: 0 };
-      record.lifecycle.resultConsumed = false;
-      this.claimBackgroundDelivery(record, executionId, intent.signal);
-      // The manager can finish a synchronous startup before this claim exists.
-      // Reconcile the terminal summary against the fresh execution claim; the
-      // per-execution guard makes a callback/timer race exactly-once.
-      this.reconcileBackgroundClaim(record, executionId);
+      // Claim before reconcile for the completion-before-claim race. The
+      // service also resets the record's latest delivery projection here.
+      this.deliveryService.claim(record, executionId, intent.signal, { resetRecordProjection: true });
+      this.deliveryService.reconcile(record, executionId);
+      this.pruneRetainedRecords();
       // Background callers never await this promise (a queued stop rejects
       // it), so observe the rejection here as well as at the manager.
       promise.catch(() => {});
+      return { executionId, record };
     }
-    if (!intent.runInBackground) {
-      try {
-        await promise;
-      } finally {
-        // Even a rejected continuation (stopped/cancelled while queued) is
-        // consumed by the caller's error result.
-        record.lifecycle.resultConsumed = true;
-      }
+
+    // Capture the caller-facing promise locally. The record may move to a
+    // newer continuation before this await/finally completes.
+    try {
+      const responseText = await promise;
+      record.lifecycle.resultConsumed = true;
+      return { executionId, record, responseText };
+    } finally {
+      // Even a rejected continuation (stopped/cancelled while queued) is
+      // consumed by the caller's error result.
+      record.lifecycle.resultConsumed = true;
+      this.releaseConsumedPromise(record, promise);
     }
-    return { executionId, record };
-  }
-
-  /** Check if an agent still has a background execution awaiting completion. */
-  isBackground(agentId: string): boolean {
-    return this.entriesFor(agentId).some((entry) => !entry.completed);
-  }
-
-  /**
-   * Request the sole automatic delivery attempt for a background completion.
-   * Kept public for existing callers/tests; duplicate requests are deliberately
-   * ignored, including after a failed attempt.
-   */
-  scheduleNudge(agentId: string): void {
-    const record = this.manager.getRecord(agentId);
-    const entry = this.latestDelivery(agentId);
-    if (this.disposed || !entry || !record || !isTerminal(record) || entry.state !== "pending") return;
-    entry.completed = true;
-    const executions = record.stats.executions;
-    const retained = executions?.find((candidate) => candidate.id === entry.executionId) ?? executions?.at(-1);
-    const index = retained ? (executions?.indexOf(retained) ?? 0) : 0;
-    const execution: AgentExecutionSummary = retained
-      ? {
-        ...retained,
-        kind: executionKind(retained, index),
-        status: record.lifecycle.status,
-        responseText: record.result ?? retained.responseText,
-      }
-      : {
-        id: entry.executionId,
-        prompt: "",
-        mode: "background",
-        kind: "new",
-        status: record.lifecycle.status,
-        startedAt: record.lifecycle.startedAt,
-        responseText: record.result,
-      };
-    entry.payload ??= this.capturePayload(record, execution);
-    this.scheduleEntry(entry);
-    this.notifyDeliveryObservers();
   }
 
   /** Called by AgentManager's completion callback, once per executed turn. */
   onAgentComplete(record: AgentRecord, execution: AgentExecutionSummary): void {
-    // Every background execution gets exactly one automatic delivery attempt,
-    // keyed by its own execution id so repeated continuations can never reuse
-    // a stale claim or read a later execution's mutable result.
-    if (execution.mode === "background") {
-      const entry = this.backgroundDeliveries.get(execution.id);
-      if (!entry || entry.completed) return;
-      entry.completed = true;
-      entry.payload = this.capturePayload(record, execution);
-      if (this.disposed || entry.signal?.aborted) {
-        this.abandonBackgroundDelivery(entry, record);
-        return;
-      }
-      this.scheduleEntry(entry);
-      this.notifyDeliveryObservers();
-      return;
-    }
+    this.deliveryService.onAgentComplete(record, execution);
   }
 
-  /** Reconcile a claim installed after a synchronous terminal completion. */
-  private reconcileBackgroundClaim(record: AgentRecord, executionId?: string): void {
-    if (!executionId) return;
-    const execution = record.stats.executions?.find((candidate) => candidate.id === executionId);
-    if (!execution || execution.status === "running" || execution.status === "queued") return;
-    this.onAgentComplete(record, execution);
-  }
-
-  /** Dispose without delivering any retained pending or failed result. */
-  dispose(): void {
-    this.disposed = true;
-    for (const entry of this.backgroundDeliveries.values()) {
-      if (entry.state === "pending" || entry.state === "failed") {
-        this.abandonBackgroundDelivery(entry, this.manager.getRecord(entry.agentId));
-      } else {
-        this.clearEntry(entry, true);
-      }
-    }
-    this.backgroundDeliveries.clear();
-    this.latestDeliveryKeys.clear();
-    this.notifyDeliveryObservers();
-    this.deliveryObservers.clear();
-  }
-
-  /** Register one background execution's delivery claim at acceptance. */
-  private claimBackgroundDelivery(record: AgentRecord, executionId: string, signal?: AbortSignal): void {
-    const entry: BackgroundDeliveryEntry = {
-      executionId,
-      agentId: record.id,
-      type: record.display.type,
-      signal,
-      state: "pending",
-      completed: false,
-      attempts: 0,
-      autoNudgeIssued: false,
-      timer: null,
+  private releaseConsumedPromise(record: AgentRecord, promise: Promise<string>): void {
+    const manager = this.manager as unknown as {
+      releaseExecutionPromise?: (record: AgentRecord, promise: Promise<string>) => boolean;
+      clearExecutionPromise?: (record: AgentRecord, promise: Promise<string>) => boolean;
     };
-    this.backgroundDeliveries.set(entry.executionId, entry);
-    this.latestDeliveryKeys.set(record.id, entry.executionId);
-    record.delivery ??= { state: "pending", attempts: 0 };
-    this.trackBackgroundParentAbort(entry, record);
-    this.notifyDeliveryObservers();
-  }
-
-  /** Keep each execution's delivery tied to its parent turn until acceptance or session shutdown. */
-  private trackBackgroundParentAbort(entry: BackgroundDeliveryEntry, record: AgentRecord): void {
-    const signal = entry.signal;
-    if (!signal) return;
-    if (signal.aborted) {
-      // AbortSignal does not dispatch a past abort event; abandon immediately.
-      this.abandonBackgroundDelivery(entry, record);
-      return;
-    }
-    entry.onParentAbort = () => this.abandonBackgroundDelivery(entry, this.manager.getRecord(entry.agentId));
-    signal.addEventListener("abort", entry.onParentAbort, { once: true });
-  }
-
-  private removeParentAbortListener(entry: BackgroundDeliveryEntry): void {
-    if (!entry.signal || !entry.onParentAbort) return;
-    entry.signal.removeEventListener("abort", entry.onParentAbort);
-    entry.onParentAbort = undefined;
-  }
-
-  /** Parent/dispose abandonment is terminal and deliberately has no retry path. */
-  private abandonBackgroundDelivery(entry: BackgroundDeliveryEntry, record?: AgentRecord): void {
-    if (entry.state !== "accepted") {
-      entry.state = "abandoned";
-      if (record) {
-        // Only the latest execution owns the record's projection and consumption flag.
-        if (this.isLatestDelivery(record.id, entry)) {
-          this.projectDelivery(record, entry);
-          record.lifecycle.resultConsumed = true;
-        }
-      }
-    }
-    this.clearEntry(entry, true);
-    this.notifyDeliveryObservers();
-  }
-
-  /** Clear transient tracking; failed delivery entries remain until session shutdown. */
-  private clearEntry(entry: BackgroundDeliveryEntry, clearParent: boolean): void {
-    if (entry.timer) {
-      clearTimeout(entry.timer);
-      entry.timer = null;
-    }
-    if (clearParent) {
-      this.removeParentAbortListener(entry);
-      this.backgroundDeliveries.delete(entry.executionId);
-    }
-  }
-
-  /** All delivery entries for one record, in claim order. */
-  private entriesFor(agentId: string): BackgroundDeliveryEntry[] {
-    return [...this.backgroundDeliveries.values()].filter((entry) => entry.agentId === agentId);
-  }
-
-  /** The most recently claimed delivery entry for a record, if any. */
-  private latestDelivery(agentId: string): BackgroundDeliveryEntry | undefined {
-    const entries = this.entriesFor(agentId);
-    return entries.length > 0 ? entries[entries.length - 1] : undefined;
-  }
-
-  private isLatestDelivery(agentId: string, entry: BackgroundDeliveryEntry): boolean {
-    return this.latestDeliveryKeys.get(agentId) === entry.executionId;
-  }
-
-  /** Mirror one execution's delivery state onto the record projection. */
-  private projectDelivery(record: AgentRecord, entry: BackgroundDeliveryEntry): void {
-    if (!this.isLatestDelivery(record.id, entry)) return;
-    record.delivery = {
-      state: entry.state,
-      attempts: entry.attempts,
-      ...(entry.lastAttemptAt !== undefined ? { lastAttemptAt: entry.lastAttemptAt } : {}),
-      ...(entry.lastError !== undefined ? { lastError: entry.lastError } : {}),
-    };
-  }
-
-  /** Freeze the completion-time payload; delivery never re-reads the mutable record. */
-  private capturePayload(record: AgentRecord, execution: AgentExecutionSummary): BackgroundPayload {
-    const executions = record.stats.executions;
-    const index = executions?.indexOf(execution) ?? 0;
-    const kind = executionKind(execution, index);
-    const result = execution.responseText ?? record.result ?? "";
-    return {
-      agentId: record.id,
-      type: record.display.type,
-      status: execution.status,
-      result,
-      content: `${formatAgentStatusLine(record.id, record.display.type, execution.status, {
-        mode: execution.mode,
-        kind,
-      })}\n\nResponse:\n${result}${getStatusNote({ ...record.lifecycle, status: execution.status })}`,
-      details: buildAgentDetails(record, { includeStats: true, includeStatus: true, execution }),
-    };
-  }
-
-  /** Claim and arm the one automatic delivery attempt for a completed execution. */
-  private scheduleEntry(entry: BackgroundDeliveryEntry): void {
-    if (this.disposed || entry.state !== "pending" || !entry.completed || entry.autoNudgeIssued) return;
-    entry.autoNudgeIssued = true;
-    entry.timer = setTimeout(() => {
-      entry.timer = null;
-      this.deliver(entry);
-    }, NUDGE_DELAY_MS);
-  }
-
-  /** Attempt the one automatic delivery for a completed execution. */
-  private deliver(entry: BackgroundDeliveryEntry): void {
-    if (this.disposed) return;
-    const record = this.manager.getRecord(entry.agentId);
-    if (!record) {
-      this.clearEntry(entry, true);
-      this.notifyDeliveryObservers();
-      return;
-    }
-    if (entry.state !== "pending") return;
-    if (entry.signal?.aborted) {
-      this.abandonBackgroundDelivery(entry, record);
-      return;
-    }
-
-    entry.attempts++;
-    entry.lastAttemptAt = Date.now();
-    delete entry.lastError;
     try {
-      const pi = getPiInstance();
-      if (!pi) throw new Error("Pi instance unavailable for background result delivery");
-      // Check immediately before the irreversible handoff as well as before
-      // preparation, so a queued timer can never send after parent/dispose.
-      if (this.disposed || entry.signal?.aborted) {
-        this.abandonBackgroundDelivery(entry, record);
-        return;
+      if (typeof manager.releaseExecutionPromise === "function") {
+        manager.releaseExecutionPromise(record, promise);
+      } else if (typeof manager.clearExecutionPromise === "function") {
+        manager.clearExecutionPromise(record, promise);
       }
-
-      const payload = entry.payload;
-      if (!payload) throw new Error("Background result payload is unavailable");
-      const parentIdle = getSessionCtx()?.isIdle?.() ?? true;
-      pi.sendMessage(
-        {
-          customType: "subagent-result",
-          content: payload.content,
-          details: payload.details,
-          display: true,
-        },
-        { deliverAs: parentIdle ? "followUp" : "steer", triggerTurn: true },
-      );
-
-      // This intentionally means only that Pi did not synchronously throw. It
-      // is not an LLM/provider delivery confirmation.
-      entry.state = "accepted";
-      // deliveredText records an actual handoff only — never completion.
-      const execution = record.stats.executions?.find((e) => e.id === entry.executionId);
-      if (execution) execution.deliveredText = payload.result;
-      // Only the latest execution owns the record's consumption flag.
-      if (this.isLatestDelivery(record.id, entry)) record.lifecycle.resultConsumed = true;
-      this.projectDelivery(record, entry);
-      this.clearEntry(entry, true);
-      this.notifyDeliveryObservers();
-    } catch (error) {
-      // Keep the result and record the sendMessage failure diagnostically until
-      // session shutdown; there is no automatic or manual retry path.
-      entry.state = "failed";
-      entry.lastError = deliveryErrorMessage(error);
-      this.projectDelivery(record, entry);
-      this.clearEntry(entry, false);
-      this.notifyDeliveryObservers();
+    } catch {
+      // Promise retention is cleanup telemetry; it cannot change the caller's
+      // already-consumed response.
     }
+  }
+
+  /** Ask the manager to prune without requiring legacy manager doubles to know retention. */
+  private pruneRetainedRecords(): void {
+    const prune = (this.manager as unknown as {
+      pruneRetainedRecords?: () => string[];
+    }).pruneRetainedRecords;
+    if (typeof prune !== "function") return;
+    try {
+      prune.call(this.manager);
+    } catch {
+      // Retention must not change spawn/delivery behavior.
+    }
+  }
+
+  /** Cancel all delayed/retained delivery work at session shutdown. */
+  dispose(): void {
+    this.deliveryService.dispose();
   }
 }

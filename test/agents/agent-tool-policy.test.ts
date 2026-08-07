@@ -1,9 +1,8 @@
 /**
- * agent-types-resolver.test.ts — Tests for resolveVisibleTools.
+ * agent-tool-policy.test.ts — Tests for tool and config policy.
  *
- * Verifies that the single-owner tool visibility resolver in agent-types.ts
- * correctly handles allowlist, denylist, ext/* expansion, and the
- * no-sub-subagent exclude policy.
+ * The unit tests target the policy boundary directly. Facade getConfig tests
+ * below retain coverage for the public registry-facing compatibility API.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -14,20 +13,22 @@ import {
   resolveSessionAllowedTools,
   EXCLUDED_TOOL_NAMES,
   BUILTIN_TOOL_NAMES,
-  getConfig,
-  registerAgents,
-} from "../../src/agents/agent-types.js";
-import type { AgentConfig } from "../../src/types.ts";
+  resolveAgentConfig,
+} from "../../src/agents/agent-tool-policy.js";
+import * as agentTypesFacade from "../../src/agents/agent-types.js";
+import { getConfig, registerAgents } from "../../src/agents/agent-types.js";
+import type { AgentConfig } from "../../src/agents/types.js";
 
 /* ------------------------------------------------------------------ */
 /*  Sanity: constants                                                 */
 /* ------------------------------------------------------------------ */
 
 describe("EXCLUDED_TOOL_NAMES", () => {
-  it("contains Agent and keeps it out of every session tool policy", () => {
-    expect(EXCLUDED_TOOL_NAMES).toContain("Agent");
-    expect(resolveVisibleTools({ activeTools: ["read", "Agent"], tools: ["read", "Agent"] })).toEqual(["read"]);
-    expect(resolveSessionAllowedTools({ registeredTools: ["read", "Agent"], tools: undefined })).toEqual(["read"]);
+  it("contains every root control and keeps them out regardless of activeTools", () => {
+    expect(EXCLUDED_TOOL_NAMES).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
+    const controls = [...EXCLUDED_TOOL_NAMES];
+    expect(resolveVisibleTools({ activeTools: ["read", ...controls], tools: ["read", ...controls] })).toEqual(["read"]);
+    expect(resolveSessionAllowedTools({ registeredTools: ["read", ...controls], tools: undefined })).toEqual(["read"]);
   });
 });
 
@@ -41,6 +42,16 @@ describe("BUILTIN_TOOL_NAMES", () => {
     expect(BUILTIN_TOOL_NAMES).toContain("bash");
     expect(BUILTIN_TOOL_NAMES).toContain("edit");
     expect(BUILTIN_TOOL_NAMES).toContain("write");
+  });
+});
+
+describe("agent-types facade compatibility", () => {
+  it("re-exports the extracted policy symbols", () => {
+    expect(agentTypesFacade.BUILTIN_TOOL_NAMES).toBe(BUILTIN_TOOL_NAMES);
+    expect(agentTypesFacade.EXCLUDED_TOOL_NAMES).toBe(EXCLUDED_TOOL_NAMES);
+    expect(agentTypesFacade.resolveAgentConfig).toBe(resolveAgentConfig);
+    expect(agentTypesFacade.resolveSessionAllowedTools).toBe(resolveSessionAllowedTools);
+    expect(agentTypesFacade.resolveVisibleTools).toBe(resolveVisibleTools);
   });
 });
 

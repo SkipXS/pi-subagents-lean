@@ -4,6 +4,11 @@ import { executeAgentTool, executeContinueAgentTool, executeStopAgentTool } from
 import type { AgentRenderMetadataBridge } from "./agents/agent-render-bridge.js";
 import { executeAgentStatusTool } from "./agents/agent-status.js";
 import {
+  MAX_AGENT_ID_BYTES,
+  MAX_AGENT_PROMPT_BYTES,
+  MAX_DESCRIPTION_BYTES,
+} from "./agents/agent-string-limits.js";
+import {
   renderAgentCall,
   renderAgentContinueCall,
   renderAgentResult,
@@ -43,8 +48,8 @@ function registerAgentTool(pi: ExtensionAPI, renderBridge: AgentRenderMetadataBr
     label: "Agent",
     description: "Delegate a task to a specialized agent.",
     parameters: Type.Object({
-      prompt: Type.String(),
-      description: Type.Optional(Type.String()),
+      prompt: Type.String({ maxLength: MAX_AGENT_PROMPT_BYTES }),
+      description: Type.Optional(Type.String({ maxLength: MAX_DESCRIPTION_BYTES })),
       agent: Type.String(),
       run_in_background: Type.Optional(Type.Boolean()),
       worktree_path: Type.Optional(Type.String()),
@@ -85,8 +90,8 @@ export function registerTools(
     // `required`, so run_in_background remains a mandatory boolean here even
     // though the executor tolerates its absence (defaults to foreground).
     parameters: Type.Object({
-      agent_id: Type.String(),
-      prompt: Type.String(),
+      agent_id: Type.String({ maxLength: MAX_AGENT_ID_BYTES }),
+      prompt: Type.String({ maxLength: MAX_AGENT_PROMPT_BYTES }),
       run_in_background: Type.Boolean(),
     }, { additionalProperties: false }),
     execute: throwingToolExecute(executeContinueWithBridge),
@@ -109,7 +114,7 @@ export function registerTools(
     label: "StopAgent",
     description: "Stop a running or queued agent.",
     parameters: Type.Object({
-      agent_id: Type.String(),
+      agent_id: Type.String({ maxLength: MAX_AGENT_ID_BYTES }),
     }, { additionalProperties: false }),
     execute: throwingToolExecute(executeStopWithBridge),
     renderCall: renderStopAgentCall,

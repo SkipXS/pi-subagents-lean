@@ -5,12 +5,20 @@ import {
   discoverNewAgents,
   getAgentConfig,
   resolveAgentCatalog,
+  resolveProjectFreeAgentCatalog,
   resolveType,
   resolveTypeInCatalog,
 } from "../agents/agent-types.js";
 import { resolveAgentTunables } from "../models/agent-resolution.js";
 import { revalidateWorktreePath, validateWorktreePath } from "./worktree-validator.js";
 import { snapshotResolvedSpawn, snapshotRuntimeSettings, type ResolvedSpawn } from "./spawn-contract.js";
+import {
+  isAgentNameWithinLimit,
+  MAX_AGENT_NAME_BYTES,
+  retainAgentDescription,
+  validateAgentPrompt,
+  validateAgentSystemPrompt,
+} from "../agents/agent-string-limits.js";
 
 /** The read-only ConfigStore surface needed during Agent preflight. */
 export interface SpawnPreflightStore {
@@ -81,6 +89,21 @@ export async function runSpawnPreflight(input: SpawnPreflightInput): Promise<Spa
 
   if (signal?.aborted) return cancelled();
 
+  // Reject the executed prompt before any worktree/catalog await. This is the
+  // authoritative byte check; the public schema's maxLength is only an early
+  // code-unit-based hint.
+  const promptError = validateAgentPrompt(params.prompt, "Agent prompt");
+  if (promptError) return failed(promptError);
+
+  const rawType = params.agent;
+  if (typeof rawType !== "string" || rawType.trim() === "") {
+    return failed("Agent type is required");
+  }
+  const type = rawType.trim();
+  if (!isAgentNameWithinLimit(type)) {
+    return failed(`Agent type exceeds the maximum of ${MAX_AGENT_NAME_BYTES} UTF-8 bytes`);
+  }
+
   const rawWorktreePath = params.worktree_path as string | undefined;
   let validatedWorktreePath: string | undefined;
   let worktreeLabel: string | undefined;
@@ -107,11 +130,6 @@ export async function runSpawnPreflight(input: SpawnPreflightInput): Promise<Spa
     validationWarnings = warnings;
   }
 
-  const rawType = params.agent;
-  if (typeof rawType !== "string" || rawType.trim() === "") {
-    return failed("Agent type is required");
-  }
-  const type = rawType.trim();
   const trustedWorktreeDir = validatedWorktreePath && projectTrusted
     ? `${validatedWorktreePath}/.pi/agents`
     : undefined;
@@ -142,21 +160,43 @@ export async function runSpawnPreflight(input: SpawnPreflightInput): Promise<Spa
       if (signal?.aborted) return cancelled();
       resolvedType = resolveTypeInCatalog(catalog, type);
       agentConfig = resolvedType ? catalog.get(resolvedType) : undefined;
+    } else if (!projectTrusted) {
+      // Never consult the global registry here: a prior trusted refresh may
+      // contain project/shared definitions and is not a safe authority for an
+      // untrusted request. Resolve against the user-global/default-only catalog
+      // instead; its filesystem scan is independently cached and bounded.
+      const catalog = await resolveProjectFreeAgentCatalog({
+        disableDefaultAgents: store.agent.disableDefaultAgents,
+      });
+      if (signal?.aborted) return cancelled();
+      resolvedType = resolveTypeInCatalog(catalog, type);
+      agentConfig = resolvedType ? catalog.get(resolvedType) : undefined;
     } else {
       resolvedType = resolveType(type);
-      if (!resolvedType) {
+      agentConfig = resolvedType ? getAgentConfig(resolvedType) : undefined;
+      if (!resolvedType || !agentConfig) {
+        // A parent turn may have created an agent definition after the last
+        // before_agent_start refresh. Trusted requests may perform exactly one
+        // bounded refresh against the configured parent catalog, then resolve
+        // again. The untrusted branch above never reaches this path and stays
+        // project-free.
         await discoverNewAgents({ disableDefaultAgents: store.agent.disableDefaultAgents });
         if (signal?.aborted) return cancelled();
         resolvedType = resolveType(type);
+        agentConfig = resolvedType ? getAgentConfig(resolvedType) : undefined;
       }
-      agentConfig = resolvedType ? getAgentConfig(resolvedType) : undefined;
     }
     if (!resolvedType || !agentConfig) return failed(`Unknown agent type: ${type}`);
 
+    const systemPromptError = validateAgentSystemPrompt(agentConfig.systemPrompt);
+    if (systemPromptError) return failed(systemPromptError);
+
     const prompt = params.prompt as string;
-    const description = (params.description as string | undefined)
+    const suppliedDescription = typeof params.description === "string" ? params.description : undefined;
+    const rawDescription = suppliedDescription
       || prompt.split("\n")[0].slice(0, 80)
       || prompt.slice(0, 80);
+    const description = retainAgentDescription(rawDescription);
     const runInBackground = params.run_in_background as boolean | undefined;
 
     // Persisted per-agent settings are applied above the effective merged

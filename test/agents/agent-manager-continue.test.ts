@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fakeCtx, fakePi, makeResolvablePromise } from "../fixtures.ts";
+import { fakeCtx, fakePi, makeResolvablePromise, spawnWithResolvedFixture } from "../fixtures.ts";
 import { readFile } from "node:fs/promises";
 
 let uuidCounter = 0;
@@ -21,20 +21,11 @@ const mockModules = vi.hoisted(() => ({
     return `agent-${String(uuidCounter).padStart(8, "0")}`;
   }),
   resetUuidCounter: () => { uuidCounter = 0; },
-  fsMock: {
-    writeFileSync: vi.fn(),
-    readFileSync: vi.fn(),
-    mkdirSync: vi.fn(),
-    appendFileSync: vi.fn(),
-    existsSync: vi.fn(),
-  },
 }));
 
 vi.mock("node:crypto", () => ({
   randomUUID: mockModules.mockRandomUUID,
 }));
-
-vi.mock("node:fs", () => mockModules.fsMock);
 
 vi.mock("../../src/agents/agent-runner.js", () => ({
   runAgent: mockModules.mockRunAgent,
@@ -60,7 +51,11 @@ function mockRunResult(overrides?: Partial<MockRunResult>): MockRunResult {
   };
 }
 
-import { AgentManager } from "../../src/agents/agent-manager.js";
+import {
+  AgentManager,
+  MAX_QUEUED_ROOT_EXECUTIONS,
+  QUEUE_QUOTA_ERROR,
+} from "../../src/agents/agent-manager.js";
 import type { OnAgentComplete } from "../../src/agents/agent-manager.js";
 import { registerAgents } from "../../src/agents/agent-types.js";
 import {
@@ -69,6 +64,11 @@ import {
 } from "../../src/shell.js";
 import { buildAgentDetails } from "../../src/agents/agent-details.js";
 import { whenOutputLogsIdle } from "../../src/agents/output-file.js";
+import {
+  MAX_AGENT_PROMPT_BYTES,
+  MAX_RETAINED_TEXT_BYTES,
+  utf8ByteLength,
+} from "../../src/agents/agent-string-limits.js";
 
 describe("AgentManager.continueAgent", () => {
   let manager: AgentManager;
@@ -78,8 +78,6 @@ describe("AgentManager.continueAgent", () => {
     mockModules.resetUuidCounter();
     mockModules.mockRunAgent.mockReset();
     mockModules.mockExecuteAgentTurn.mockReset();
-    mockModules.fsMock.writeFileSync.mockClear();
-    mockModules.fsMock.appendFileSync.mockClear();
     registerAgents(new Map([
       ["scout", { name: "scout", description: "", systemPrompt: "" }],
       ["implementer", { name: "implementer", description: "", systemPrompt: "" }],
@@ -98,7 +96,7 @@ describe("AgentManager.continueAgent", () => {
   ): Promise<{ id: string; session: any }> {
     const session = options.session ?? mockAgentSession();
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult({ session, ...options.runResult }));
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", prompt, { description: "initial" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", prompt, { description: "initial" });
     await manager.getRecord(id)!.execution.promise;
     return { id, session };
   }
@@ -171,7 +169,7 @@ describe("AgentManager.continueAgent", () => {
     manager = new AgentManager(onComplete);
     const firstRun = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(firstRun.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "initial task", { description: "initial" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "initial task", { description: "initial" });
     const record = manager.getRecord(id)!;
 
     // First execution usage: drive the captured onAssistantUsage callback
@@ -202,7 +200,7 @@ describe("AgentManager.continueAgent", () => {
     manager = new AgentManager(onComplete);
     const firstRun = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(firstRun.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "initial task", { description: "initial" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "initial task", { description: "initial" });
     const record = manager.getRecord(id)!;
 
     // Initial execution accumulates real usage and compactions.
@@ -236,11 +234,41 @@ describe("AgentManager.continueAgent", () => {
     expect(manager.getTotalAgentCost()).toBeCloseTo(0.03);
   });
 
+  it("rejects an oversized continuation before allocating history or a promise", async () => {
+    manager = new AgentManager(onComplete);
+    const { id } = await spawnCompletedAgent("initial task");
+    const record = manager.getRecord(id)!;
+    const historyBefore = record.stats.executions;
+    const responsePromiseBefore = record.execution.promise;
+    const oversized = `${"😀".repeat(MAX_AGENT_PROMPT_BYTES / 4)}😀`;
+
+    expect(() => manager.continueAgent(id, oversized, {}))
+      .toThrow("AgentContinue prompt exceeds");
+    expect(record.stats.executions).toBe(historyBefore);
+    expect(record.execution.promise).toBe(responsePromiseBefore);
+    expect(mockModules.mockExecuteAgentTurn).not.toHaveBeenCalled();
+  });
+
+  it("keeps the full foreground response while bounding retained projections", async () => {
+    manager = new AgentManager(onComplete);
+    const hugeResponse = "😀界".repeat(Math.ceil(MAX_RETAINED_TEXT_BYTES / 4) + 20);
+    mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult({ responseText: hugeResponse }));
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "initial task", { description: "initial" });
+    const record = manager.getRecord(id)!;
+    const full = await record.execution.promise;
+
+    expect(full).toBe(hugeResponse);
+    expect(utf8ByteLength(record.result!)).toBeLessThanOrEqual(MAX_RETAINED_TEXT_BYTES);
+    expect(utf8ByteLength(record.stats.executions![0]!.responseText!)).toBeLessThanOrEqual(MAX_RETAINED_TEXT_BYTES);
+    expect(utf8ByteLength(record.stats.executions![0]!.deliveredText!)).toBeLessThanOrEqual(MAX_RETAINED_TEXT_BYTES);
+    expect(record.result).toContain("[TRUNCATED]");
+  });
+
   it("rejects a continuation while the agent is running", async () => {
     manager = new AgentManager(onComplete);
     const firstRun = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(firstRun.promise);
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
     expect(manager.getRecord(id)!.lifecycle.status).toBe("running");
 
     expect(() => manager.continueAgent(id, "nope", {}))
@@ -257,8 +285,8 @@ describe("AgentManager.continueAgent", () => {
     const blocker = makeResolvablePromise();
     const queuedRun = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise).mockReturnValueOnce(queuedRun.promise);
-    manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
-    const queuedId = manager.spawn(fakePi(), fakeCtx(), "scout", "queued", { description: "queued" });
+    spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "queued", { description: "queued" });
     expect(manager.getRecord(queuedId)!.lifecycle.status).toBe("queued");
 
     expect(() => manager.continueAgent(queuedId, "nope", {}))
@@ -278,21 +306,48 @@ describe("AgentManager.continueAgent", () => {
       .toThrow("is aborted and cannot be continued");
 
     mockModules.mockRunAgent.mockRejectedValueOnce(new Error("boom"));
-    const failedId = manager.spawn(fakePi(), fakeCtx(), "scout", "fail", { description: "fail" });
+    const failedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "fail", { description: "fail" });
     await manager.getRecord(failedId)!.execution.promise;
     expect(() => manager.continueAgent(failedId, "nope", {}))
       .toThrow("is error and cannot be continued");
   });
 
+  it("rejects a queued continuation at quota before allocating execution history", async () => {
+    manager = new AgentManager(onComplete, { default: 1 });
+    mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
+    const { id } = await spawnCompletedAgent("initial task");
+
+    const blocker = makeResolvablePromise();
+    mockModules.mockRunAgent.mockReturnValue(blocker.promise);
+    spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    for (let index = 0; index < MAX_QUEUED_ROOT_EXECUTIONS; index++) {
+      spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", `queued-${index}`, {
+        description: `queued-${index}`,
+      });
+    }
+
+    const record = manager.getRecord(id)!;
+    const historyBefore = [...record.stats.executions!];
+    const pendingBefore = (manager as any).executionService.pendingCount;
+    expect(pendingBefore).toBe(MAX_QUEUED_ROOT_EXECUTIONS);
+
+    expect(() => manager.continueAgent(id, "over quota", {})).toThrow(QUEUE_QUOTA_ERROR);
+    expect(record.stats.executions).toEqual(historyBefore);
+    expect(record.lifecycle).toMatchObject({ status: "completed", settled: true });
+    expect((manager as any).executionService.pendingCount).toBe(pendingBefore);
+
+    blocker.resolve(mockRunResult());
+  });
+
   it("queues a continuation on the global queue until a slot frees, without re-counting it", async () => {
     manager = new AgentManager(onComplete, { default: 1 });
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const firstId = manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    const firstId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
     await manager.getRecord(firstId)!.execution.promise; // completed; slot released
 
     const blocker = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
-    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const blockerId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
 
     const continuationRun = makeResolvablePromise();
     mockModules.mockExecuteAgentTurn.mockReturnValueOnce(continuationRun.promise);
@@ -374,7 +429,7 @@ describe("AgentManager.continueAgent", () => {
   it("StopAgent rejects a queued continuation without leaks", async () => {
     manager = new AgentManager(onComplete, { default: 1 });
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
     await manager.getRecord(id)!.execution.promise;
     const initialRecord = manager.getRecord(id)!;
     initialRecord.stats.lifetimeUsage = { input: 101, output: 202, cacheWrite: 303, cost: 0.404 };
@@ -383,7 +438,7 @@ describe("AgentManager.continueAgent", () => {
 
     const blocker = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
-    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const blockerId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
 
     const queued = manager.continueAgent(id, "queued follow-up", {});
     expect(manager.getRecord(id)!.lifecycle.status).toBe("queued");
@@ -461,7 +516,7 @@ describe("AgentManager.continueAgent", () => {
       if ((record.stats.executions?.length ?? 0) > 1) throw new Error("start boom");
     });
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
     await manager.getRecord(id)!.execution.promise;
 
     const { promise, record } = manager.continueAgent(id, "second", {});
@@ -480,7 +535,7 @@ describe("AgentManager.continueAgent", () => {
 
     // The claimed slot was released: the next spawn starts immediately.
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const nextId = manager.spawn(fakePi(), fakeCtx(), "scout", "next", { description: "next" });
+    const nextId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "next", { description: "next" });
     expect(manager.getRecord(nextId)!.lifecycle.status).toBe("running");
     await manager.getRecord(nextId)!.execution.promise;
   });
@@ -488,17 +543,17 @@ describe("AgentManager.continueAgent", () => {
   it("fails a queued continuation cleanly when its session disappears before start", async () => {
     manager = new AgentManager(onComplete, { default: 1 });
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
     await manager.getRecord(id)!.execution.promise;
 
     const blocker = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
-    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const blockerId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
 
     const { promise } = manager.continueAgent(id, "queued", {});
     expect(manager.getRecord(id)!.lifecycle.status).toBe("queued");
-    // Simulate the record losing its retained session while waiting for the slot.
-    (manager as any).releaseExecution(manager.getRecord(id));
+    // Simulate the retained session disappearing while waiting for the slot.
+    manager.getRecord(id)!.execution.session = undefined;
 
     blocker.resolve(mockRunResult());
     await manager.getRecord(blockerId)!.execution.promise;
@@ -517,13 +572,13 @@ describe("AgentManager.continueAgent", () => {
 
     const blocker = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
-    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const blockerId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
 
     const queued = manager.continueAgent(id, "queued follow-up", {});
     const queuedRejection = expect(queued.promise).rejects.toThrow("queued continuation start failed");
     const laterRun = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(laterRun.promise);
-    const laterId = manager.spawn(fakePi(), fakeCtx(), "scout", "later", { description: "later" });
+    const laterId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "later", { description: "later" });
 
     expect(manager.getRecord(id)!.lifecycle.status).toBe("queued");
     expect(manager.getRecord(laterId)!.lifecycle.status).toBe("queued");
@@ -551,7 +606,7 @@ describe("AgentManager.continueAgent", () => {
 
     const blocker = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
-    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const blockerId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
     const parent = new AbortController();
     const removeListener = vi.spyOn(parent.signal, "removeEventListener");
     const queued = manager.continueAgent(id, "queued follow-up", { signal: parent.signal });
@@ -607,7 +662,7 @@ describe("AgentManager.continueAgent", () => {
     await runWithSubagentRuntime(
       createSubagentRuntimeContext(),
       async () => {
-        expect(() => manager.spawn(fakePi(), fakeCtx(), "scout", "nope", { description: "nope" }))
+        expect(() => spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "nope", { description: "nope" }))
           .toThrow("Root agent spawning is unavailable from a child runtime");
         expect(() => manager.continueAgent(id, "nope", {}))
           .toThrow("Root agent continuation is unavailable from a child runtime");
@@ -625,7 +680,7 @@ describe("AgentManager.continueAgent", () => {
   it("resolves unique short IDs and rejects ambiguous prefixes", async () => {
     manager = new AgentManager(onComplete);
     mockModules.mockRunAgent.mockResolvedValue(mockRunResult());
-    const first = manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    const first = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
     await manager.getRecord(first)!.execution.promise;
 
     // A short prefix matching exactly one retained record resolves.
@@ -636,7 +691,7 @@ describe("AgentManager.continueAgent", () => {
     await promise;
 
     // With two retained records the same prefix is ambiguous.
-    const second = manager.spawn(fakePi(), fakeCtx(), "scout", "second", { description: "second" });
+    const second = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "second", { description: "second" });
     await manager.getRecord(second)!.execution.promise;
     expect(() => manager.continueAgent("agent-0000000", "ambiguous", {}))
       .toThrow("is ambiguous; use a longer ID prefix");
@@ -645,19 +700,19 @@ describe("AgentManager.continueAgent", () => {
   it("rejects continuation when the retained session is already gone", async () => {
     manager = new AgentManager(onComplete);
     const { id } = await spawnCompletedAgent("initial task");
-    (manager as any).releaseExecution(manager.getRecord(id));
+    manager.getRecord(id)!.execution.session = undefined;
     expect(() => manager.continueAgent(id, "nope", {})).toThrow("session is no longer available");
   });
 
   it("rejects a queued continuation on dispose so callers cannot hang", async () => {
     manager = new AgentManager(onComplete, { default: 1 });
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
     await manager.getRecord(id)!.execution.promise;
 
     const blocker = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
-    manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
 
     const queued = manager.continueAgent(id, "queued", {});
     expect(manager.getRecord(id)!.lifecycle.status).toBe("queued");
@@ -748,8 +803,8 @@ describe("AgentManager.continueAgent", () => {
     const blocker = makeResolvablePromise();
     const queuedRun = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise).mockReturnValueOnce(queuedRun.promise);
-    manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
-    const queuedId = manager.spawn(fakePi(), fakeCtx(), "scout", "queued", { description: "queued" });
+    spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const queuedId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "queued", { description: "queued" });
     const record = manager.getRecord(queuedId)!;
     expect(record.stats.executions![0]!.status).toBe("queued");
 
@@ -765,12 +820,12 @@ describe("AgentManager.continueAgent", () => {
   it("stops a queued background continuation, observes its rejection, and never runs it", async () => {
     manager = new AgentManager(onComplete, { default: 1 });
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
     await manager.getRecord(id)!.execution.promise;
 
     const blocker = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
-    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const blockerId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
 
     const queued = manager.continueAgent(id, "bg follow-up", { isBackground: true });
     const record = manager.getRecord(id)!;
@@ -799,7 +854,7 @@ describe("AgentManager.continueAgent", () => {
       if ((record.stats.executions?.length ?? 0) > 1) throw new Error("start boom");
     });
     mockModules.mockRunAgent.mockResolvedValueOnce(mockRunResult());
-    const id = manager.spawn(fakePi(), fakeCtx(), "scout", "first", { description: "first" });
+    const id = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "first", { description: "first" });
     await manager.getRecord(id)!.execution.promise;
 
     const { promise, record } = manager.continueAgent(id, "second", {});
@@ -911,7 +966,7 @@ describe("AgentManager.continueAgent", () => {
 
     const blocker = makeResolvablePromise();
     mockModules.mockRunAgent.mockReturnValueOnce(blocker.promise);
-    const blockerId = manager.spawn(fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
+    const blockerId = spawnWithResolvedFixture(manager, fakePi(), fakeCtx(), "scout", "blocker", { description: "blocker" });
     const queued = manager.continueAgent(id, "queued follow-up", {});
     const record = manager.getRecord(id)!;
     record.execution.session = undefined;
@@ -949,8 +1004,6 @@ describe("AgentManager.continueAgent", () => {
 
     const { promise, record } = manager.continueAgent(id, "cancelled", { signal: aborted.signal });
     await expect(promise).rejects.toThrow("was stopped");
-    const execution = record.stats.executions![1]!;
-    expect((manager as any).finishUnstartedExecution(record, execution, "stopped")).toBe(false);
     expect(onComplete).toHaveBeenCalledTimes(2); // initial + one continuation terminal callback
   });
 

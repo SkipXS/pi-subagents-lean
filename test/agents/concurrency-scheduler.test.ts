@@ -14,6 +14,8 @@ describe("FifoConcurrencyScheduler", () => {
 
     scheduler.enqueue(entry("second"));
     scheduler.enqueue(entry("third"));
+    expect(scheduler.pendingCount).toBe(2);
+    expect(scheduler.queuedCount).toBe(2);
     expect(scheduler.decide()).toBe("queued");
     expect(scheduler.shouldQueue()).toBe(true);
 
@@ -39,7 +41,7 @@ describe("FifoConcurrencyScheduler", () => {
 
   it("starts queued work when the limit expands and normalizes invalid limits", () => {
     const scheduler = new FifoConcurrencyScheduler<Entry>(0);
-    expect(scheduler.limitCount).toBe(1);
+    expect(scheduler.limitCount).toBe(4);
     scheduler.acquire();
     scheduler.enqueue(entry("second"));
     scheduler.enqueue(entry("third"));
@@ -48,5 +50,41 @@ describe("FifoConcurrencyScheduler", () => {
     expect(scheduler.limitCount).toBe(3);
     expect(scheduler.runningCount).toBe(3);
     expect(scheduler.queuedCount).toBe(0);
+  });
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "2",
+    {},
+    1.5,
+    -1,
+    65,
+    Number.MAX_SAFE_INTEGER,
+    1e100,
+  ] as unknown[]) ("falls back instead of accepting an unsafe limit %p", (limit) => {
+    const scheduler = new FifoConcurrencyScheduler<Entry>(limit as number);
+    expect(scheduler.limitCount).toBe(4);
+
+    scheduler.acquire();
+    scheduler.enqueue(entry("queued"));
+    expect(scheduler.decide()).toBe("queued");
+    expect(scheduler.release().map((item) => item.id)).toEqual(["queued"]);
+  });
+
+  it("caps extreme limits at the default four while preserving FIFO admission", () => {
+    const scheduler = new FifoConcurrencyScheduler<Entry>(Number.MAX_SAFE_INTEGER);
+    expect(scheduler.limitCount).toBe(4);
+
+    for (const id of ["first", "second", "third", "fourth"]) {
+      expect(scheduler.decide()).toBe("running");
+      scheduler.acquire();
+    }
+    expect(scheduler.runningCount).toBe(4);
+    scheduler.enqueue(entry("fifth"));
+    expect(scheduler.decide()).toBe("queued");
+    expect(scheduler.runningCount).toBeLessThanOrEqual(64);
+    expect(scheduler.release().map((item) => item.id)).toEqual(["fifth"]);
+    expect(scheduler.runningCount).toBe(4);
   });
 });

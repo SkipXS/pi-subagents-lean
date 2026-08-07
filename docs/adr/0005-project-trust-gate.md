@@ -10,8 +10,7 @@ project cwd.
 The `Agent` tool snapshots `ctx.isProjectTrusted()` synchronously during its
 preflight, before the first asynchronous validation or discovery boundary.
 The boolean is carried as immutable `projectTrusted` data through
-`ResolvedSpawn` and `AcceptedSpawn`. Contracts from older/direct callers that
-lack the field are treated as `false`.
+`ResolvedSpawn` and `AcceptedSpawn`.
 
 At runner setup, the snapshot creates one Pi `SettingsManager`:
 
@@ -19,11 +18,22 @@ At runner setup, the snapshot creates one Pi `SettingsManager`:
 - `createAgentSession` receives the same manager instance; and
 - the manager is created with `{ projectTrusted }` for the effective cwd.
 
-The custom prompt skill lookup applies the same snapshot. Trusted children keep
-the existing project/CWD context and skill behavior. Untrusted children do not
-walk project/CWD context or skill roots, while user-global context and skill
-roots remain available. An explicitly selected worktree inherits the parent's
-snapshot; it is never trusted independently.
+The custom prompt skill lookup applies the same snapshot. Context files use an
+invocation-local async bounded loader rather than Pi's unbounded synchronous
+helper: it reads the global AgentDir candidate first, then at most 64 accepted
+ancestor directories in root-to-cwd order, with AGENTS/CLAUDE candidate order,
+256 KiB per file, 512 KiB total, and pre/post-lstat regular-file identity checks.
+Oversize and race results are skipped with bounded warnings. Skill metadata
+for both `skills:true` and explicit arrays comes from one bounded async catalog;
+per-root fingerprints reject more than 512 KiB per skill Markdown, 256 KiB per
+ignore file, 32 MiB relevant bytes, 10,000 entries, or depth 64, while the
+catalog caps trusted ancestor roots at 64 and the merged result at 10,000
+skills. A post-worker fingerprint mismatch is fail-closed. The child
+`DefaultResourceLoader` uses `noSkills:true`, so it does not repeat an
+unbounded scan. Trusted children may read project/CWD context and skills;
+untrusted children do not walk project/CWD context or skill roots, while
+user-global context and skill roots remain available. An explicitly selected
+worktree inherits the parent's snapshot; it is never trusted independently.
 
 This gate is internal. The public tool schema is unchanged, and the decision
 does not alter spawn retention, queueing, or the existing preflight and spawn
@@ -47,10 +57,18 @@ path preserves user configuration without opening the selected project.
 - Trust is decided by the parent at tool preflight, not by the worktree or child
   session.
 - Existing trusted behavior remains unchanged.
-- Legacy/direct runner and spawn paths fail closed for missing trust metadata.
+- The runner consumes only the accepted trust snapshot and fails closed if a
+  malformed internal value is not explicitly trusted.
+- Untrusted spawn preflight resolves against a separate project-free catalog
+  containing only bundled defaults and user-global Agent Markdown. It never
+  consults the mutable global registry, which may retain a prior trusted
+  project/shared/worktree override.
 - Project agent catalog discovery and worktree overlay policy remain governed by
   their existing trust checks; this ADR covers child context and skills only.
 - The public `Agent` parameters remain fixed; trust is not model-controlled.
+- If a trusted parent preflight cannot resolve a role, it performs one bounded
+  `discoverNewAgents()` refresh and resolves again; the untrusted path remains
+  project-free and never refreshes the trusted registry.
 
 ## Considered options
 

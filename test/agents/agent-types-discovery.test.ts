@@ -14,6 +14,7 @@ import {
   getAgentConfig,
   resolveWorktreeAgent,
   resolveAgentCatalog,
+  resolveProjectFreeAgentCatalog,
   resolveTypeInCatalog,
   snapshotAgentConfig,
 } from "../../src/agents/agent-types.js";
@@ -81,46 +82,61 @@ describe("global discovery publication", () => {
     setAgentScanDirs("", "", "");
   });
 
-  it("does not let an older scan overwrite a newer scan", async () => {
-    const { dir, cleanup } = tempDirWithFiles([
-      { name: "agent.md", content: makeAgentMd({ name: "agent", description: "filesystem" }) },
-    ], "global-discovery-race");
-    const agentPath = join(dir, "agent.md");
-    const oldContent = makeAgentMd({ name: "agent", description: "old" });
-    const newContent = makeAgentMd({ name: "agent", description: "new" });
+  it("coalesces concurrent parent scans and publishes only the latest directory revision", async () => {
+    const oldDirs = [
+      tempDirWithFiles([{ name: "user.md", content: makeAgentMd({ name: "agent", description: "old user" }) }], "old-user"),
+      tempDirWithFiles([{ name: "shared.md", content: makeAgentMd({ name: "agent", description: "old shared" }) }], "old-shared"),
+      tempDirWithFiles([{ name: "project.md", content: makeAgentMd({ name: "agent", description: "old project" }) }], "old-project"),
+    ];
+    const newDirs = [
+      tempDirWithFiles([{ name: "user.md", content: makeAgentMd({ name: "agent", description: "new user" }) }], "new-user"),
+      tempDirWithFiles([{ name: "shared.md", content: makeAgentMd({ name: "agent", description: "new shared" }) }], "new-shared"),
+      tempDirWithFiles([{ name: "project.md", content: makeAgentMd({ name: "agent", description: "new project" }) }], "new-project"),
+    ];
+    const cleanup = () => {
+      for (const { cleanup: remove } of [...oldDirs, ...newDirs]) remove();
+    };
+    const oldPaths = new Set(oldDirs.map(({ dir }) => dir));
     let releaseOld!: () => void;
-    let oldReadStarted!: () => void;
     const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
-    const oldStarted = new Promise<void>((resolve) => { oldReadStarted = resolve; });
-    const originalReadFile = fs.promises.readFile;
-    let readCount = 0;
-    const readFile = vi.spyOn(fs.promises, "readFile").mockImplementation(async (filePath, options) => {
-      if (filePath === agentPath) {
-        readCount++;
-        if (readCount === 1) {
-          oldReadStarted();
-          await oldGate;
-          return oldContent;
-        }
-        return newContent;
+    let oldOpendirCount = 0;
+    let oldStarted!: () => void;
+    const allOldStarted = new Promise<void>((resolve) => { oldStarted = resolve; });
+    const opendirCalls = new Map<string, number>();
+    const originalOpendir = fs.promises.opendir;
+    const opendir = vi.spyOn(fs.promises, "opendir").mockImplementation(async (directory, ...args) => {
+      const directoryName = String(directory);
+      opendirCalls.set(directoryName, (opendirCalls.get(directoryName) ?? 0) + 1);
+      if (oldPaths.has(directoryName)) {
+        oldOpendirCount++;
+        if (oldOpendirCount === oldDirs.length) oldStarted();
+        await oldGate;
       }
-      return originalReadFile(filePath, options as "utf-8");
+      return originalOpendir(directory, ...args) as any;
     });
 
     try {
-      setAgentScanDirs("", dir);
+      setAgentScanDirs(oldDirs[0]!.dir, oldDirs[2]!.dir, oldDirs[1]!.dir);
       const oldScan = discoverNewAgents({ disableDefaultAgents: true });
-      await oldStarted;
+      await allOldStarted;
 
-      const newScan = discoverNewAgents({ disableDefaultAgents: true });
-      await newScan;
-      expect(getAgentConfig("agent")?.description).toBe("new");
+      // The second call shares the three already-running physical source scans.
+      const sameRevisionScan = discoverNewAgents({ disableDefaultAgents: true });
+      expect(oldOpendirCount).toBe(oldDirs.length);
+      for (const { dir } of oldDirs) expect(opendirCalls.get(dir)).toBe(1);
+
+      // A directory/trust revision starts fresh scans, and its result wins.
+      setAgentScanDirs(newDirs[0]!.dir, newDirs[2]!.dir, newDirs[1]!.dir);
+      const latestScan = discoverNewAgents({ disableDefaultAgents: true });
+      await latestScan;
+      expect(getAgentConfig("agent")?.description).toBe("new project");
+      for (const { dir } of newDirs) expect(opendirCalls.get(dir)).toBe(1);
 
       releaseOld();
-      await oldScan;
-      expect(getAgentConfig("agent")?.description).toBe("new");
+      await Promise.all([oldScan, sameRevisionScan]);
+      expect(getAgentConfig("agent")?.description).toBe("new project");
     } finally {
-      readFile.mockRestore();
+      opendir.mockRestore();
       cleanup();
     }
   });
@@ -263,6 +279,22 @@ describe("worktree-local agent resolution", () => {
       cleanup();
     }
   });
+
+  it("does not re-register an unchanged effective catalog", async () => {
+    const { dir: projectDir, cleanup } = tempDirWithFiles([
+      { name: "stable.md", content: makeAgentMd({ name: "stable", description: "Stable" }) },
+    ], "unchanged-catalog");
+    try {
+      setAgentScanDirs("", projectDir);
+      expect(await discoverNewAgents({ disableDefaultAgents: true })).toBe(1);
+      const first = getAgentConfig("stable");
+
+      expect(await discoverNewAgents({ disableDefaultAgents: true })).toBe(0);
+      expect(getAgentConfig("stable")).toEqual(first);
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("discoverNewAgents — shared .agents/agents/ discovery", () => {
@@ -368,6 +400,32 @@ describe("discoverNewAgents — shared .agents/agents/ discovery", () => {
       expect(count).toBe(0);
     } finally {
       cleanupProject();
+    }
+  });
+
+  it("keeps the project-free catalog independent from a trusted global refresh", async () => {
+    const { dir: userDir, cleanup: cleanupUser } = tempDirWithFiles([
+      { name: "same.md", content: makeAgentMd({ name: "same", description: "User definition" }) },
+    ], "user-agents-trust-boundary");
+    const { dir: projectDir, cleanup: cleanupProject } = tempDirWithFiles([
+      { name: "same.md", content: makeAgentMd({ name: "same", description: "Project definition" }) },
+      { name: "project-only.md", content: makeAgentMd({ name: "project-only", description: "Project only" }) },
+    ], "project-agents-trust-boundary");
+    const { dir: sharedDir, cleanup: cleanupShared } = tempDirWithFiles([], "shared-agents-trust-boundary");
+
+    try {
+      setAgentScanDirs(userDir, projectDir, sharedDir);
+      await discoverNewAgents();
+      expect(getAgentConfig("same")?.description).toBe("Project definition");
+      expect(getAgentConfig("project-only")).toBeDefined();
+
+      const projectFree = await resolveProjectFreeAgentCatalog();
+      expect(projectFree.get("same")?.description).toBe("User definition");
+      expect(projectFree.has("project-only")).toBe(false);
+    } finally {
+      cleanupUser();
+      cleanupProject();
+      cleanupShared();
     }
   });
 

@@ -58,8 +58,8 @@ describe("tool registration", () => {
       additionalProperties: false,
       required: ["prompt", "agent"],
       properties: {
-        prompt: { type: "string" },
-        description: { type: "string" },
+        prompt: { type: "string", maxLength: 262144 },
+        description: { type: "string", maxLength: 8192 },
         agent: { type: "string" },
         run_in_background: { type: "boolean" },
         worktree_path: { type: "string" },
@@ -85,8 +85,8 @@ describe("tool registration", () => {
       additionalProperties: false,
       required: ["agent_id", "prompt", "run_in_background"],
       properties: {
-        agent_id: { type: "string" },
-        prompt: { type: "string" },
+        agent_id: { type: "string", maxLength: 128 },
+        prompt: { type: "string", maxLength: 262144 },
         run_in_background: { type: "boolean" },
       },
     });
@@ -101,7 +101,7 @@ describe("tool registration", () => {
 
     expect(JSON.parse(JSON.stringify(stop.parameters))).toEqual({
       type: "object", additionalProperties: false,
-      required: ["agent_id"], properties: { agent_id: { type: "string" } },
+      required: ["agent_id"], properties: { agent_id: { type: "string", maxLength: 128 } },
     });
     expect(JSON.parse(JSON.stringify(status.parameters))).toEqual({
       type: "object", additionalProperties: false, properties: {},

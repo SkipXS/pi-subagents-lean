@@ -143,15 +143,29 @@ describe("AgentStatus tool execute behavior", () => {
     expect(text).toContain("Don't poll");
   });
 
-  it("includes background delivery state when present", async () => {
+  it("includes background delivery state and an older failure projection", async () => {
     mockListAgents.mockReturnValue([
-      { id: "abc123def456ghi", display: { type: "builder" }, lifecycle: { status: "completed" }, delivery: { state: "failed", attempts: 1 } },
+      {
+        id: "abc123def456ghi",
+        display: { type: "builder" },
+        lifecycle: { status: "completed" },
+        delivery: {
+          state: "accepted",
+          attempts: 1,
+          lastFailure: {
+            executionId: "initial-execution",
+            attempts: 1,
+            lastError: "initial sendMessage failed",
+          },
+        },
+      },
     ]);
 
     const { executeAgentStatusTool } = await import("../../src/agents/agent-status.js");
     const result = await executeAgentStatusTool("call_delivery", {}, undefined, undefined, {} as any);
 
-    expect(result.content[0].text).toContain("delivery:failed");
+    expect(result.content[0].text).toContain("delivery:accepted");
+    expect(result.content[0].text).toContain("delivery-failure:initial sendMessage failed");
   });
 
 
