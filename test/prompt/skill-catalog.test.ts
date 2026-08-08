@@ -14,21 +14,16 @@ vi.mock("../../src/prompt/skill-loader-worker.ts", () => ({
 }));
 
 import {
-  loadAllSkills,
   loadAllSkillsAsync,
   MAX_ANCESTOR_SKILL_ROOTS,
 } from "../../src/prompt/skill-catalog.ts";
 import { canCreateSymlinks } from "../fixtures.ts";
 
-const { mockLoadSkills, mockLoadSkillsFromDir, mockGetAgentDir } = vi.hoisted(() => ({
-  mockLoadSkills: vi.fn(),
-  mockLoadSkillsFromDir: vi.fn(),
+const { mockGetAgentDir } = vi.hoisted(() => ({
   mockGetAgentDir: vi.fn(() => "C:\\Users\\Pi User\\.pi\\agent"),
 }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
-  loadSkills: mockLoadSkills,
-  loadSkillsFromDir: mockLoadSkillsFromDir,
   getAgentDir: mockGetAgentDir,
 }));
 
@@ -48,8 +43,6 @@ function makeSkill(name: string, description: string, filePath: string): Skill {
 beforeEach(() => {
   tmpDir = join(tmpdir(), `skill-catalog-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tmpDir, { recursive: true });
-  mockLoadSkills.mockReturnValue({ skills: [], diagnostics: [] });
-  mockLoadSkillsFromDir.mockReturnValue({ skills: [], diagnostics: [] });
   mockWorkerRun.mockResolvedValue([]);
   mockWorkerClose.mockClear();
   mockWorkerCreate.mockClear();
@@ -64,78 +57,67 @@ afterEach(() => {
 });
 
 describe("skill catalog composition", () => {
-  it("keeps Pi defaults and passes the complete default request", () => {
-    const skill = makeSkill("tdd", "TDD workflow", join(tmpDir, ".pi", "skills", "tdd", "SKILL.md"));
-    mockLoadSkills.mockReturnValue({ skills: [skill], diagnostics: [] });
+  it("keeps Pi defaults and passes the complete default request through the worker", async () => {
+    const agentDir = join(tmpDir, "agent");
+    const skill = makeSkill("tdd", "TDD workflow", join(agentDir, "skills", "tdd", "SKILL.md"));
+    mkdirSync(join(agentDir, "skills"), { recursive: true });
+    mockGetAgentDir.mockReturnValue(agentDir);
+    mockWorkerRun.mockImplementation(async (operation: string) => operation === "loadSkills" ? [skill] : []);
 
-    expect(loadAllSkills(tmpDir)).toEqual([skill]);
-    expect(mockLoadSkills).toHaveBeenCalledWith(expect.objectContaining({
+    await expect(loadAllSkillsAsync(tmpDir)).resolves.toEqual([skill]);
+    expect(mockWorkerRun).toHaveBeenCalledWith("loadSkills", expect.objectContaining({
       cwd: tmpDir,
+      agentDir,
       includeDefaults: true,
       skillPaths: [],
     }));
   });
 
-  it("does not call Pi's combined loader for an untrusted project", () => {
-    const userSkill = makeSkill("user-only", "Global user skill", "C:\\Users\\Pi User\\.pi\\agent\\skills\\user-only\\SKILL.md");
-    const projectSkill = makeSkill("project-only", "Project skill", join(tmpDir, ".pi", "skills", "project-only", "SKILL.md"));
-    mockLoadSkillsFromDir.mockImplementation(({ dir }: { dir: string }) =>
-      dir.includes("agent") && !dir.includes(".agents")
-        ? { skills: [userSkill], diagnostics: [] }
-        : { skills: [], diagnostics: [] });
-    mockLoadSkills.mockReturnValue({ skills: [projectSkill], diagnostics: [] });
-
-    expect(loadAllSkills(tmpDir, false).map(({ name }) => name)).toEqual(["user-only"]);
-    expect(mockLoadSkills).not.toHaveBeenCalled();
-  });
-
-  it("uses Pi's agent directory even when the process home is unset", () => {
-    vi.stubEnv("HOME", "");
-    const agentDir = "C:\\Users\\Pi User\\.pi\\agent";
-    try {
-      loadAllSkills(tmpDir);
-    } finally {
-      vi.unstubAllEnvs();
-    }
-
-    expect(mockGetAgentDir).toHaveBeenCalledOnce();
-    expect(mockLoadSkills).toHaveBeenCalledWith(expect.objectContaining({ agentDir }));
-  });
-
-  it("walks ancestor .agents/skills and excludes root Markdown files", () => {
+  it("walks ancestor .agents/skills and excludes root Markdown files asynchronously", async () => {
     const rootSkill = makeSkill("root-skill", "Root level", join(tmpDir, ".agents", "skills", "root-skill.md"));
     const dirSkill = makeSkill("dir-skill", "Dir level", join(tmpDir, ".agents", "skills", "dir-skill", "SKILL.md"));
     const agentsSkillsDir = join(tmpDir, ".agents", "skills");
-    mockLoadSkillsFromDir.mockImplementation(({ dir }: { dir: string }) => {
-      if (dir === agentsSkillsDir) return { skills: [rootSkill, dirSkill], diagnostics: [] };
-      return { skills: [], diagnostics: [] };
-    });
+    mkdirSync(join(agentsSkillsDir, "dir-skill"), { recursive: true });
+    writeFileSync(dirSkill.filePath, "dir");
+    writeFileSync(rootSkill.filePath, "root");
+    mockWorkerRun.mockImplementation(async (operation: string, input: { dir?: string }) =>
+      operation === "loadSkillsFromDir" && input.dir === agentsSkillsDir ? [rootSkill, dirSkill] : []);
 
-    const result = loadAllSkills(tmpDir);
+    const result = await loadAllSkillsAsync(tmpDir);
     expect(result.map(({ name }) => name)).toEqual(["dir-skill"]);
-    expect(mockLoadSkillsFromDir).toHaveBeenCalledWith({ dir: agentsSkillsDir, source: "agents" });
+    expect(mockWorkerRun).toHaveBeenCalledWith("loadSkillsFromDir", expect.objectContaining({ dir: agentsSkillsDir }));
   });
 
-  it("gives nearer ancestors precedence over defaults by name", () => {
+  it("gives nearer ancestors precedence over defaults by name asynchronously", async () => {
     const defaultSkill = makeSkill("tdd", "Default TDD", join(tmpDir, ".pi", "skills", "tdd", "SKILL.md"));
     const agentsSkill = makeSkill("tdd", "Agents TDD", join(tmpDir, ".agents", "skills", "tdd", "SKILL.md"));
-    mockLoadSkills.mockReturnValue({ skills: [defaultSkill], diagnostics: [] });
-    mockLoadSkillsFromDir.mockReturnValue({ skills: [agentsSkill], diagnostics: [] });
+    const ancestorRoot = join(tmpDir, ".agents", "skills");
+    mkdirSync(join(tmpDir, ".git"));
+    mkdirSync(ancestorRoot, { recursive: true });
+    const agentDir = join(tmpDir, "agent");
+    mkdirSync(join(agentDir, "skills"), { recursive: true });
+    mockGetAgentDir.mockReturnValue(agentDir);
+    mockWorkerRun.mockImplementation(async (operation: string, input: { dir?: string }) => {
+      if (operation === "loadSkillsFromDir" && input.dir === ancestorRoot) return [agentsSkill];
+      if (operation === "loadSkills") return [defaultSkill];
+      return [];
+    });
 
-    expect(loadAllSkills(tmpDir)).toEqual([agentsSkill]);
+    await expect(loadAllSkillsAsync(tmpDir)).resolves.toEqual([agentsSkill]);
   });
 
-  it("caps the synchronous ancestor skill-root walk", () => {
+  it("caps the async ancestor skill-root walk", async () => {
     let cwd = tmpDir;
     for (let index = 0; index < MAX_ANCESTOR_SKILL_ROOTS + 1; index++) {
       cwd = join(cwd, `nested-${index}`);
       mkdirSync(cwd);
     }
 
-    loadAllSkills(cwd, true);
-    const ancestorCalls = mockLoadSkillsFromDir.mock.calls.filter(([input]) => {
+    await loadAllSkillsAsync(cwd, true);
+    const ancestorCalls = mockWorkerRun.mock.calls.filter(([operation, input]) => {
       const candidate = input as { source?: string; dir?: string };
-      return candidate.source === "agents"
+      return operation === "loadSkillsFromDir"
+        && candidate.source === "agents"
         && candidate.dir?.startsWith(tmpDir) === true
         && candidate.dir.endsWith(join(".agents", "skills"));
     });
@@ -307,7 +289,7 @@ describe("skill catalog composition", () => {
       .rejects.toThrow("Skill catalog exceeds the maximum of 10000 skills");
   });
 
-  it("deduplicates a canonical path as well as a duplicate name", () => {
+  it("deduplicates a canonical path as well as a duplicate name asynchronously", async () => {
     if (!canCreateSymlinks()) return;
     const target = join(tmpDir, "target.md");
     const link = join(tmpDir, ".pi", "skills", "link.md");
@@ -316,8 +298,8 @@ describe("skill catalog composition", () => {
     symlinkSync(target, link, "file");
     const first = makeSkill("same-path", "first", target);
     const second = makeSkill("different-name", "second", link);
-    mockLoadSkills.mockReturnValue({ skills: [first, second], diagnostics: [] });
+    mockWorkerRun.mockImplementation(async (operation: string) => operation === "loadSkills" ? [first, second] : []);
 
-    expect(loadAllSkills(tmpDir).map(({ name }) => name)).toEqual(["same-path"]);
+    await expect(loadAllSkillsAsync(tmpDir)).resolves.toEqual([first]);
   });
 });

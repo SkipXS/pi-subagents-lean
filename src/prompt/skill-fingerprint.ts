@@ -1,13 +1,12 @@
 /**
- * Stable, bounded resource fingerprints used by the skill source caches.
+ * Stable, bounded async resource fingerprints used by the skill source caches.
  *
- * The walker owns the complete metadata snapshot and its sync/async budgets;
- * this facade owns the serialized fingerprint format and public API.
+ * The walker owns the complete metadata snapshot and its budgets; this facade
+ * owns the serialized fingerprint format.
  */
 
 import { resolve } from "node:path";
 import {
-  walkResourceTree,
   walkResourceTreeAsync,
   type FingerprintWalkResult,
   type ResolvedResourceFingerprintOptions,
@@ -60,17 +59,7 @@ function formatFingerprint(
   };
 }
 
-/** Fingerprint a resource root synchronously. */
-export function fingerprintResourceTree(
-  root: string,
-  options?: ResourceFingerprintOptions,
-): ResourceFingerprint {
-  const resolvedRoot = resolve(root);
-  const resolvedOptions = optionsWithDefaults(options);
-  return formatFingerprint(resolvedOptions, walkResourceTree(resolvedRoot, resolvedOptions));
-}
-
-/** Promise-based equivalent of fingerprintResourceTree. */
+/** Fingerprint a resource root without blocking the parent thread. */
 export async function fingerprintResourceTreeAsync(
   root: string,
   options?: ResourceFingerprintOptions,

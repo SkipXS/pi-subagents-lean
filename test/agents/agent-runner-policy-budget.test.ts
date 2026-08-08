@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../../src/agents/types.js";
 import type { EnvInfo } from "../../src/types.js";
 import type { ResolvedAgentConfig } from "../../src/agents/agent-tool-policy.js";
@@ -36,6 +36,24 @@ const metadata = [{
 }];
 
 describe("child skill prompt budget policy", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("keeps skills=false synchronous without catalog metadata", () => {
+    const result = buildAgentSystemPrompt(
+      "budget-agent",
+      agentConfig,
+      { ...baseConfig, skills: false },
+      "/worktree",
+      env,
+    );
+
+    expect(typeof result).toBe("string");
+    expect(result).toContain("<agent_instructions>");
+    expect(loadSkillMetaAsync).not.toHaveBeenCalled();
+  });
+
   it.each([
     [true, true],
     [["selected"], false],

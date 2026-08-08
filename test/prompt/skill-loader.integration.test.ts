@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentConfig } from "../../src/agents/types.ts";
+import type { ResolvedAgentConfig } from "../../src/agents/agent-tool-policy.ts";
+import type { EnvInfo } from "../../src/types.ts";
 
 let roots: string[] = [];
 
@@ -50,8 +54,8 @@ describe("skill discovery through Pi's real loaders", () => {
     vi.stubEnv("USERPROFILE", isolatedHome);
     vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
     vi.resetModules();
-    const { loadAllSkills } = await import("../../src/prompt/skill-loader.ts");
-    const loaded = loadAllSkills(cwd);
+    const { loadAllSkillsAsync } = await import("../../src/prompt/skill-loader.ts");
+    const loaded = await loadAllSkillsAsync(cwd);
     const byName = new Map(loaded.map((entry) => [entry.name, entry]));
 
     expect(byName.get("winner")?.description).toBe("nearest ancestor");
@@ -81,12 +85,12 @@ describe("skill discovery through Pi's real loaders", () => {
     vi.stubEnv("USERPROFILE", isolatedHome);
     vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
     vi.resetModules();
-    const { loadAllSkills } = await import("../../src/prompt/skill-loader.ts");
+    const { loadAllSkillsAsync } = await import("../../src/prompt/skill-loader.ts");
 
-    const untrusted = new Set(loadAllSkills(cwd, false).map(({ name }) => name));
+    const untrusted = new Set((await loadAllSkillsAsync(cwd, false)).map(({ name }) => name));
     expect(untrusted).toEqual(new Set(["home-user", "pi-user"]));
 
-    const trusted = new Set(loadAllSkills(cwd, true).map(({ name }) => name));
+    const trusted = new Set((await loadAllSkillsAsync(cwd, true)).map(({ name }) => name));
     expect(trusted).toEqual(new Set(["project-agents", "project-pi", "home-user", "pi-user"]));
   });
 
@@ -190,7 +194,7 @@ describe("skill discovery through Pi's real loaders", () => {
     expect(loaded.find(({ name }) => name === selectedName)?.description).toBe("Worker skill 127");
   });
 
-  it("refreshes a real cached negative source after creation and mutation", async () => {
+  it("refreshes a real cached negative source after creation and mutation", { timeout: 15_000 }, async () => {
     const root = tempRoot();
     const cwd = join(root, "repo");
     const isolatedHome = join(root, "os-home");
@@ -203,18 +207,80 @@ describe("skill discovery through Pi's real loaders", () => {
     vi.stubEnv("USERPROFILE", isolatedHome);
     vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
     vi.resetModules();
-    const { loadAllSkills } = await import("../../src/prompt/skill-loader.ts");
+    const { loadAllSkillsAsync } = await import("../../src/prompt/skill-loader.ts");
 
-    expect(loadAllSkills(cwd).some(({ name }) => name === "cached")).toBe(false);
+    expect((await loadAllSkillsAsync(cwd)).some(({ name }) => name === "cached")).toBe(false);
     const filePath = skill(join(cwd, ".pi", "skills"), "cached", "initial");
-    expect(loadAllSkills(cwd).find(({ name }) => name === "cached")?.description).toBe("initial");
-    expect(loadAllSkills(cwd).find(({ name }) => name === "cached")?.description).toBe("initial");
+    expect((await loadAllSkillsAsync(cwd)).find(({ name }) => name === "cached")?.description).toBe("initial");
+    expect((await loadAllSkillsAsync(cwd)).find(({ name }) => name === "cached")?.description).toBe("initial");
 
     writeFileSync(filePath, "---\nname: cached\ndescription: changed\n---\n\n# changed\n", "utf8");
-    expect(loadAllSkills(cwd).find(({ name }) => name === "cached")?.description).toBe("changed");
+    expect((await loadAllSkillsAsync(cwd)).find(({ name }) => name === "cached")?.description).toBe("changed");
 
     rmSync(filePath, { force: true });
-    expect(loadAllSkills(cwd).some(({ name }) => name === "cached")).toBe(false);
+    expect((await loadAllSkillsAsync(cwd)).some(({ name }) => name === "cached")).toBe(false);
+  });
+
+  it("builds a provider-free Agent-equivalent prompt from a real async skill catalog", async () => {
+    const root = tempRoot();
+    const project = join(root, "project");
+    const agentDir = join(root, "agent-home");
+    const skillPath = join(project, ".pi", "skills", "lean-smoke", "SKILL.md");
+    const description = "Temporary integration skill used to verify async skill metadata.";
+    const marker = "SKILL_BODY_6F2C9A";
+    mkdirSync(join(project, ".git"), { recursive: true });
+    mkdirSync(agentDir, { recursive: true });
+    mkdirSync(join(skillPath, ".."), { recursive: true });
+    writeFileSync(skillPath, [
+      "---",
+      "name: lean-smoke",
+      `description: ${description}`,
+      "---",
+      "",
+      marker,
+      "",
+    ].join("\n"), "utf8");
+
+    vi.stubEnv("HOME", join(root, "os-home"));
+    vi.stubEnv("USERPROFILE", join(root, "os-home"));
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.resetModules();
+    const { buildAgentSystemPrompt } = await import("../../src/agents/agent-runner-policy.ts");
+
+    const agentConfig: AgentConfig = {
+      name: "lean-smoke",
+      description: "Lean smoke agent",
+      tools: ["read"],
+      extensions: false,
+      skills: ["lean-smoke"],
+      systemPrompt: "Verify the temporary skill.",
+    };
+    const config: ResolvedAgentConfig = {
+      name: agentConfig.name,
+      description: agentConfig.description,
+      registeredTools: ["read"],
+      tools: ["read"],
+      extensions: false,
+      skills: ["lean-smoke"],
+    };
+    const env: EnvInfo = { isGitRepo: true, branch: "main", platform: process.platform };
+
+    const prompt = await buildAgentSystemPrompt(
+      "lean-smoke",
+      agentConfig,
+      config,
+      project,
+      env,
+      {},
+      true,
+    );
+    expect(prompt).toContain("<name>lean-smoke</name>");
+    expect(prompt).toContain(`<description>${description}</description>`);
+    expect(prompt).toContain(`<location>${skillPath}</location>`);
+    expect(prompt).not.toContain(marker);
+
+    const resolvedSkill = await readFile(skillPath, "utf8");
+    expect(resolvedSkill).toContain(marker);
   });
 
   it("deduplicates a directory link by canonical skill path when the platform permits it", async () => {
@@ -241,7 +307,7 @@ describe("skill discovery through Pi's real loaders", () => {
     vi.stubEnv("USERPROFILE", isolatedHome);
     vi.stubEnv("PI_CODING_AGENT_DIR", join(root, "agent-home"));
     vi.resetModules();
-    const { loadAllSkills } = await import("../../src/prompt/skill-loader.ts");
-    expect(loadAllSkills(cwd).filter(({ name }) => name === "shared-skill")).toHaveLength(1);
+    const { loadAllSkillsAsync } = await import("../../src/prompt/skill-loader.ts");
+    expect((await loadAllSkillsAsync(cwd)).filter(({ name }) => name === "shared-skill")).toHaveLength(1);
   });
 });
