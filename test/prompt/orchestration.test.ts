@@ -43,7 +43,7 @@ Do not duplicate delegated work. Re-enter the same area only for incomplete or c
 
 Run dependent work in the foreground and independent read-only work in the background. run_in_background returns immediately. After a background spawn, do useful independent work; never poll or sleep. Resume dependent work only after its completion notification.
 
-Use AgentContinue only for finished agents; it reuses their session, so send only the new delta. Running, queued, stopped, aborted, or failed agents cannot be continued.
+AgentContinue reuses a finished session; send new instructions plus unseen parent/peer evidence. Running, queued, stopped, aborted, or failed agents cannot be continued.
 
 For external APIs, lifecycle/concurrency ordering, and integrations, require installed or upstream evidence and a representative real sequence; synthetic mocks alone are insufficient for critical paths.
 
