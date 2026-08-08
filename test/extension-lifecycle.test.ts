@@ -55,7 +55,7 @@ vi.mock("../src/shell.js", () => ({
 
 import { setupEventListeners } from "../src/events.js";
 import { AgentRenderMetadataBridge } from "../src/agents/agent-render-bridge.js";
-import { AGENT_RENDER_DETAILS_KEY, renderAgentCall, stopAgentRendererTimers } from "../src/agents/agent-renderer.js";
+import { AGENT_RENDER_DETAILS_KEY, renderAgentCall } from "../src/agents/agent-renderer.js";
 
 function context(): ExtensionContext {
   return { cwd: "/tmp/project", hasUI: false, isProjectTrusted: () => true } as unknown as ExtensionContext;
@@ -84,7 +84,6 @@ describe("headless extension lifecycle", () => {
     state.store.reload.mockReset().mockImplementation(() => { state.order.push("reload"); });
     state.discover.mockReset().mockResolvedValue(0);
     state.scanDirs.mockReset();
-    stopAgentRendererTimers();
     vi.useRealTimers();
   });
 
@@ -147,7 +146,7 @@ describe("headless extension lifecycle", () => {
     await listeners.get("session_shutdown")!({}, context());
   });
 
-  it("clears interactive row timers when a session reloads", async () => {
+  it("keeps renderer rows timer-free across session reload and shutdown", async () => {
     vi.useFakeTimers();
     const { listeners } = listenersFor();
     await listeners.get("session_start")!({}, context());
@@ -156,21 +155,15 @@ describe("headless extension lifecycle", () => {
       args: { agent: "scout", prompt: "reload me" },
       state: {},
       lastComponent: undefined,
-      executionStarted: false,
-      isPartial: true,
       invalidate: vi.fn(),
     };
-    rowContext.invalidate = vi.fn(() => renderAgentCall(rowContext.args, {}, rowContext));
-    const unopened = renderAgentCall(rowContext.args, {}, rowContext);
-    rowContext.lastComponent = unopened;
-    rowContext.executionStarted = true;
-    renderAgentCall(rowContext.args, {}, rowContext);
-    expect(vi.getTimerCount()).toBe(1);
+    const row = renderAgentCall(rowContext.args, {}, rowContext);
+    expect(row.render(200)[0]).toContain("Role: scout");
+    expect(vi.getTimerCount()).toBe(0);
 
     await listeners.get("session_start")!({}, context());
-    expect(vi.getTimerCount()).toBe(0);
     await listeners.get("session_shutdown")!({}, context());
-    vi.useRealTimers();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("does not publish stale startup state after shutdown and restart", async () => {
@@ -233,24 +226,4 @@ describe("headless extension lifecycle", () => {
     expect(state.coordinators[0]).not.toHaveProperty("dispose");
   });
 
-  it("stops interactive row timers during session shutdown", async () => {
-    vi.useFakeTimers();
-    const { listeners } = listenersFor();
-    const rowContext: any = {
-      args: { agent: "scout", prompt: "inspect" },
-      state: {},
-      lastComponent: undefined,
-      executionStarted: false,
-      isPartial: true,
-      invalidate: vi.fn(),
-    };
-    rowContext.invalidate = vi.fn(() => renderAgentCall(rowContext.args, {}, rowContext));
-    const first = renderAgentCall(rowContext.args, {}, rowContext);
-    rowContext.lastComponent = first;
-    rowContext.executionStarted = true;
-    renderAgentCall(rowContext.args, {}, rowContext);
-    expect(vi.getTimerCount()).toBe(1);
-    await listeners.get("session_shutdown")!({}, context());
-    expect(vi.getTimerCount()).toBe(0);
-  });
 });
