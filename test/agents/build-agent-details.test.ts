@@ -193,27 +193,42 @@ describe("buildAgentDetails", () => {
 
   // --- includeStatus ---
 
-  it("includes status and outputFile when includeStatus is true", () => {
-    const record = makeRecord({ lifecycle: { status: "completed", startedAt: 1000, completedAt: 5000 }, display: { type: "builder", description: "Build something", outputFile: "/tmp/out.log" } });
+  it("includes status without exposing a child transcript path", () => {
+    const record = makeRecord({ lifecycle: { status: "completed", startedAt: 1000, completedAt: 5000 } });
     const details = buildAgentDetails(record, { includeStatus: true });
 
     expect(details.status).toBe("completed");
-    expect(details.outputFile).toBe("/tmp/out.log");
+    expect(details[["output", "File"].join("")]).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(details, ["output", "File"].join(""))).toBe(false);
     // Stats should NOT be included
     expect(details.tokens).toBeUndefined();
   });
 
   // --- Both options ---
 
-  it("includes both stats and status when both options are true", () => {
-    const record = makeRecord({ lifecycle: { status: "error", startedAt: 1000, completedAt: 5000 }, display: { type: "builder", description: "Build something", outputFile: "/tmp/err.log" } });
+  it("keeps status, telemetry, model, thinking, duration, and worktree without a transcript path", () => {
+    const record = makeRecord({
+      lifecycle: { status: "error", startedAt: 1000, completedAt: 5000 },
+      display: {
+        type: "builder",
+        description: "Build something",
+        invocation: { modelName: "sonnet", thinkingLevel: "high" },
+        worktreePath: "/worktrees/build",
+      },
+    });
     const details = buildAgentDetails(record, { includeStats: true, includeStatus: true });
 
     expect(details.status).toBe("error");
-    expect(details.outputFile).toBe("/tmp/err.log");
-    expect(details.input).toBeDefined();
-    expect(details.output).toBeDefined();
-    expect(details.durationMs).toBeDefined();
+    expect(details[["output", "File"].join("")]).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(details, ["output", "File"].join(""))).toBe(false);
+    expect(details.input).toBe(100);
+    expect(details.output).toBe(200);
+    expect(details.contextWindow).toBe(128000);
+    expect(details.compactions).toBe(1);
+    expect(details.modelName).toBe("sonnet");
+    expect(details.thinkingLevel).toBe("high");
+    expect(details.durationMs).toBe(4000);
+    expect(details.worktreePath).toBe("/worktrees/build");
   });
 
   // --- per-execution continuation deltas ---

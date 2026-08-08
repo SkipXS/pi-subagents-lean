@@ -7,7 +7,6 @@ import {
   isUnsafeName,
   isSymlink,
   safeReadFile,
-  summarizeToolArgs,
   truncateUtf8,
   utf8ByteLength,
 } from "../src/utils.ts";
@@ -64,21 +63,6 @@ describe("bounded UTF-8 text", () => {
 
     expect(capped.self).toBe(capped);
     expect(capped.text).toContain("[TRUNCATED]");
-  });
-});
-
-describe("summarizeToolArgs", () => {
-  it("keeps log summaries neutral and compact for common tools", () => {
-    expect(summarizeToolArgs("read", { path: "src/index.ts" })).toBe('("src/index.ts")');
-    expect(summarizeToolArgs("write", { file_path: "out.txt", content: "hello" })).toBe('("out.txt", 5 chars)');
-    expect(summarizeToolArgs("edit", { path: "out.txt", edits: [{ oldText: "a", newText: "b" }] })).toBe('("out.txt", 1 edits)');
-    expect(summarizeToolArgs("bash", { command: "cat <<EOF\\nbody\\nEOF" })).toBe('("cat")');
-    expect(summarizeToolArgs("rg", { pattern: "Agent", path: "src" })).toBe('("Agent", "src")');
-  });
-
-  it("falls back to bounded JSON for unknown tools", () => {
-    expect(summarizeToolArgs("custom", { value: "ok" })).toBe('("ok")');
-    expect(summarizeToolArgs("custom", {})).toBe("");
   });
 });
 

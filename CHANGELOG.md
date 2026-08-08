@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Extension-owned child transcript logging.** Child execution remains in
+  memory; internal child calls, thinking, and intermediate transcript are no
+  longer persisted by the extension or written to files in system temp.
 - **Breaking foreground-only surface.** Background `Agent` and `AgentContinue`
   execution and the `run_in_background` parameter are removed; both tools now
   always await their complete foreground results.

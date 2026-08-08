@@ -49,7 +49,7 @@ Parent resumes after both settle
   promise, awaits it, and releases by identity in `finally`.
 - `AgentManager` and `AgentExecutionService` retain FIFO scheduling, configured
   concurrency, queue quota, parent-signal cancellation, shutdown cleanup,
-  telemetry, output logs, and deterministic retention. Running, queued, and
+  telemetry, and deterministic record retention. Running, queued, and
   unsettled records are protected; settled records are bounded to 64.
 - `AgentContinue` reuses only a successful settled retained root session. Exact
   IDs and unique prefixes are supported; ambiguous, missing, active, failed, or
@@ -61,8 +61,7 @@ Parent resumes after both settle
   working spinner. Noninteractive and headless paths never create renderer
   timers.
 - Catalog live refresh, project trust, model/thinking resolution, worktrees,
-  skills, extensions, output-log bounds/security, and useful timing diagnostics
-  remain covered.
+  skills, extensions, and useful timing diagnostics remain covered.
 
 ## Removed implementation
 

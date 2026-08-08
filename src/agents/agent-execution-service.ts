@@ -157,14 +157,9 @@ export class AgentExecutionService {
     this.activeTasks.delete(record.id);
     this.telemetry.finalizeUnstartedExecution(execution);
     this.telemetry.forgetExecution(execution.id);
-    this.finalizeOutputLog(record);
     this.resources.clearParentAbortSignal(record.id);
     this.safeNotifySettled();
     return true;
-  }
-
-  finalizeOutputLog(record: AgentRecord): void {
-    this.resources.finalizeOutputLog(record);
   }
 
   releaseExecution(record: AgentRecord): void {
@@ -211,7 +206,6 @@ export class AgentExecutionService {
     const { id, record, execution, pi, ctx } = task;
     let acceptedSpawn: AcceptedSpawn | undefined = task.acceptedSpawn;
     this.store.beginSpawn(record);
-    this.resources.prepareSpawnOutput(record, id, acceptedSpawn.prompt);
 
     this.onStart?.(record);
     execution.status = "running";
@@ -229,7 +223,6 @@ export class AgentExecutionService {
         }
         record.execution.session = session;
         this.telemetry.observeContext(record);
-        if (record.execution.outputLog) record.execution.outputLog.attach(session);
       },
     })
       .then(({ responseText, session, aborted }) => {
@@ -274,7 +267,6 @@ export class AgentExecutionService {
     this.resources.clearParentAbortSignal(id);
     this.resources.bindParentAbortSignal(id, signal, () => this.cancel(id));
 
-    this.resources.prepareContinuationOutput(record, id, promptForExecution, session);
     this.onStart?.(record);
     const promise = executeAgentTurn(session, promptForExecution, {
       signal: record.execution.abortController.signal,
@@ -334,7 +326,6 @@ export class AgentExecutionService {
   }
 
   private finalizeCompletedExecution(record: AgentRecord): void {
-    this.finalizeOutputLog(record);
     this.store.markSettled(record);
     this.resources.clearParentAbortSignal(record.id);
     this.scheduler.releaseSlot();
@@ -414,7 +405,6 @@ export class AgentExecutionService {
   }
 
   private discardFailedSpawn(task: SpawnExecutionTask): void {
-    this.finalizeOutputLog(task.record);
     this.resources.clearParentAbortSignal(task.id);
     this.telemetry.forgetRecord(task.record);
     this.store.remove(task.id);

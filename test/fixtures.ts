@@ -5,7 +5,6 @@
  *   - createMockExtensionAPI: mock ExtensionAPI for index test
  *   - hasParam: check TypeBox schema for a parameter
  *   - loadExtension: import and invoke the extension factory
- *   - createMockSession: mock agent session for output-file tests
  *   - tempDirFixture: temp directory setup/teardown for filesystem tests
  *   - canCreateSymlinks: detect whether the current host permits file symlink creation
  *   - createDirectoryLink / canCreateDirectoryLinks: portable directory-link fixtures
@@ -76,7 +75,6 @@ export function shellMock(fns: ShellMockFns = {}) {
 }
 
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -159,74 +157,6 @@ export function hasParam(schema: any, paramName: string): boolean {
 export async function loadExtension(api: any) {
   const factory = (await import("../src/index.js")).default;
   return factory(api);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Mock session for output-file tests                                */
-/* ------------------------------------------------------------------ */
-
-export interface MockSession {
-  messages: Array<{ role: string; content: any }>;
-  subscribe: ReturnType<typeof vi.fn>;
-  _addMessage: (role: string, content: string) => void;
-  _fireTurnEnd: () => void;
-  _fireMessageStart: () => void;
-  _fireThinkingStart: () => void;
-  _fireThinkingDelta: (delta: string) => void;
-  _fireThinkingEnd: (content: string) => void;
-  _getListeners: () => Array<(event: any) => void>;
-}
-
-/**
- * Create a mock agent session for testing streamToOutputFile.
- */
-export function createMockSession(): MockSession {
-  const listeners: Array<(event: any) => void> = [];
-  let msgIdx = 0;
-
-  return {
-    messages: [] as Array<{ role: string; content: any }>,
-    subscribe: vi.fn((listener: (event: any) => void) => {
-      listeners.push(listener);
-      return () => {
-        const idx = listeners.indexOf(listener);
-        if (idx >= 0) listeners.splice(idx, 1);
-      };
-    }),
-    _addMessage: (role: string, content: string) => {
-      msgIdx++;
-      const msg: any = { role, content };
-      if (role === "assistant") {
-        msg.content = [{ type: "text", text: content }];
-      }
-      (msg as any)._idx = msgIdx;
-    },
-    _fireTurnEnd: () => {
-      for (const fn of listeners) fn({ type: "turn_end" });
-    },
-    _fireMessageStart: () => {
-      for (const fn of listeners) fn({ type: "message_start" });
-    },
-    _fireThinkingStart: () => {
-      for (const fn of listeners) fn({
-        type: "message_update",
-        assistantMessageEvent: { type: "thinking_start" },
-      });
-    },
-    _fireThinkingDelta: (delta: string) => {
-      for (const fn of listeners) fn({
-        type: "message_update",
-        assistantMessageEvent: { type: "thinking_delta", delta },
-      });
-    },
-    _fireThinkingEnd: (content: string) => {
-      for (const fn of listeners) fn({
-        type: "message_update",
-        assistantMessageEvent: { type: "thinking_end", content },
-      });
-    },
-    _getListeners: () => listeners,
-  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -360,9 +290,6 @@ export function tempDirWithFiles(
   };
 }
 
-/* ------------------------------------------------------------------ */
-/*  Output file cleanup                                               */
-/* ------------------------------------------------------------------ */
 /*  Fake context / pi                                                 */
 /* ------------------------------------------------------------------ */
 
