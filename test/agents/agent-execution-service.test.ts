@@ -1,20 +1,33 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { acceptedSpawnFixture, fakeCtx, fakePi } from "../fixtures.ts";
-import { AgentExecutionService, type SpawnExecutionTask } from "../../src/agents/agent-execution-service.js";
+import {
+  AgentExecutionService,
+  type ContinueExecutionTask,
+  type SpawnExecutionTask,
+} from "../../src/agents/agent-execution-service.js";
 import { AgentRecordStore } from "../../src/agents/agent-record-store.js";
 import { ExecutionTelemetry } from "../../src/agents/execution-telemetry.js";
 
-const state = vi.hoisted(() => ({
-  runAgent: vi.fn(),
-  outputLog: vi.fn().mockImplementation((id: string) => ({
-    path: `/private/${id}.log`,
-    append: vi.fn(),
-    attach: vi.fn(),
-    finalize: vi.fn(),
-  })),
-  releaseOutputRoot: vi.fn(() => Promise.resolve()),
-}));
+const state = vi.hoisted(() => {
+  const finalizeOutputLog = vi.fn();
+  const outputLog = vi.fn().mockImplementation(function (id: string) {
+    return {
+      path: `/private/${id}.log`,
+      append: vi.fn(),
+      attach: vi.fn(),
+      finalize: finalizeOutputLog,
+    };
+  });
+  return {
+    runAgent: vi.fn(),
+    executeAgentTurn: vi.fn(),
+    outputLog,
+    finalizeOutputLog,
+    releaseOutputRoot: vi.fn(() => Promise.resolve()),
+  };
+});
 vi.mock("../../src/agents/agent-runner.js", () => ({ runAgent: state.runAgent }));
+vi.mock("../../src/agents/agent-session-runtime.js", () => ({ executeAgentTurn: state.executeAgentTurn }));
 vi.mock("../../src/agents/output-file.js", () => ({
   AgentOutputLog: state.outputLog,
   createOutputRoot: vi.fn(() => "/private"),
@@ -23,22 +36,315 @@ vi.mock("../../src/agents/output-file.js", () => ({
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => { resolve = res; });
-  return { promise, resolve };
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 function session(): any {
   return { messages: [], subscribe: vi.fn(), dispose: vi.fn() };
 }
 
-function runResult(responseText = "done") {
-  return { responseText, session: session(), aborted: false };
+function runResult(responseText = "done", aborted = false, childSession = session()) {
+  return { responseText, session: childSession, aborted };
 }
+
+const services = new Set<AgentExecutionService>();
 
 describe("AgentExecutionService", () => {
   beforeEach(() => {
     state.runAgent.mockReset();
+    state.executeAgentTurn.mockReset();
+    state.outputLog.mockClear();
+    state.finalizeOutputLog.mockClear();
     state.releaseOutputRoot.mockClear();
+  });
+
+  afterEach(() => {
+    for (const service of services) service.dispose();
+    services.clear();
+  });
+
+  it("discards a spawn whose runner cannot start synchronously", () => {
+    const failure = new Error("spawn setup failed");
+    state.runAgent.mockImplementation(() => { throw failure; });
+    const { service, store, telemetry } = createService(1);
+    const accepted = acceptedSpawnFixture({ prompt: "sync failure" });
+    const created = store.createSpawnRecord(accepted, "running", new AbortController());
+    initialize(telemetry, created.record, created.execution);
+
+    expect(() => service.submit(spawnTask(created, accepted))).toThrow(failure);
+
+    expect(store.get(created.id)).toBeUndefined();
+    expect(store.list()).toEqual([]);
+    expect(service.pendingCount).toBe(0);
+    expect(state.runAgent).toHaveBeenCalledOnce();
+    expect(state.finalizeOutputLog).toHaveBeenCalledOnce();
+    expect(created.record.execution.outputLog).toBeUndefined();
+  });
+
+  it("rejects a continuation whose turn cannot start synchronously and retains its session", async () => {
+    const failure = new Error("continuation setup failed");
+    state.executeAgentTurn.mockImplementation(() => { throw failure; });
+    const { service, store, telemetry } = createService(1);
+    const root = completedRecord(store, telemetry);
+    const continuation = continuationTask(store, telemetry, root);
+
+    service.submit(continuation.task);
+
+    await expect(continuation.caller.promise).rejects.toThrow(failure);
+    expect(root.record.lifecycle).toMatchObject({ status: "error", settled: true });
+    expect(root.record.stats.executions?.at(-1)).toMatchObject({
+      status: "error",
+      error: "continuation setup failed",
+    });
+    expect(root.record.execution.session).toBe(root.session);
+    expect(root.record.execution.outputLog).toBeUndefined();
+    expect(state.executeAgentTurn).toHaveBeenCalledOnce();
+    expect(state.finalizeOutputLog).toHaveBeenCalledOnce();
+    expect(service.pendingCount).toBe(0);
+  });
+
+  it("settles an asynchronously failed spawn and keeps its slot advancing FIFO", async () => {
+    const firstFailure = deferred<ReturnType<typeof runResult>>();
+    const secondRun = deferred<ReturnType<typeof runResult>>();
+    const thirdRun = deferred<ReturnType<typeof runResult>>();
+    state.runAgent
+      .mockReturnValueOnce(firstFailure.promise)
+      .mockReturnValueOnce(secondRun.promise)
+      .mockReturnValueOnce(thirdRun.promise);
+    const { service, store, telemetry } = createService(1);
+    const first = spawnWithCaller(store, telemetry, "async failure", "running");
+    const second = spawnWithCaller(store, telemetry, "second", "queued");
+    const third = spawnWithCaller(store, telemetry, "third", "queued");
+    service.submit(first.task);
+    service.submit(second.task);
+    service.submit(third.task);
+
+    firstFailure.reject(new Error("provider unavailable"));
+    await expect(first.caller.promise).resolves.toBe("");
+    expect(first.created.record.lifecycle).toMatchObject({ status: "error", settled: true });
+    expect(first.created.record.error).toBe("provider unavailable");
+    expect(first.created.record.execution.outputLog).toBeUndefined();
+    expect(state.finalizeOutputLog).toHaveBeenCalledOnce();
+    expect(state.runAgent).toHaveBeenCalledTimes(2);
+    expect(state.runAgent.mock.calls.map((call) => call[2])).toEqual(["async failure", "second"]);
+    expect(second.created.record.lifecycle.status).toBe("running");
+    expect(service.pendingCount).toBe(1);
+
+    secondRun.resolve(runResult("second complete"));
+    await expect(second.caller.promise).resolves.toBe("second complete");
+    expect(state.runAgent).toHaveBeenCalledTimes(3);
+    expect(state.runAgent.mock.calls.map((call) => call[2])).toEqual([
+      "async failure",
+      "second",
+      "third",
+    ]);
+    expect(third.created.record.lifecycle.status).toBe("running");
+
+    thirdRun.resolve(runResult("third complete"));
+    await expect(third.caller.promise).resolves.toBe("third complete");
+    expect(first.created.record.stats.executions?.at(-1)?.status).toBe("error");
+    expect(second.created.record.lifecycle.status).toBe("completed");
+    expect(third.created.record.lifecycle.status).toBe("completed");
+    expect(service.pendingCount).toBe(0);
+  });
+
+  it("settles an asynchronously failed continuation without losing its retained session", async () => {
+    const turnFailure = deferred<{ responseText: string; aborted: boolean }>();
+    state.executeAgentTurn.mockReturnValue(turnFailure.promise);
+    const { service, store, telemetry } = createService(1);
+    const root = completedRecord(store, telemetry);
+    const continuation = continuationTask(store, telemetry, root);
+
+    service.submit(continuation.task);
+    turnFailure.reject(new Error("turn failed"));
+
+    await expect(continuation.caller.promise).resolves.toBe("");
+    expect(root.record.lifecycle).toMatchObject({ status: "error", settled: true });
+    expect(root.record.stats.executions?.at(-1)).toMatchObject({
+      status: "error",
+      error: "turn failed",
+      responseText: "",
+    });
+    expect(root.record.execution.session).toBe(root.session);
+    expect(root.record.execution.outputLog).toBeUndefined();
+    expect(state.finalizeOutputLog).toHaveBeenCalledOnce();
+    expect(service.pendingCount).toBe(0);
+  });
+
+  it("handles a queued synchronous start failure and preserves FIFO for the next task", async () => {
+    const firstRun = deferred<ReturnType<typeof runResult>>();
+    const thirdRun = deferred<ReturnType<typeof runResult>>();
+    state.runAgent
+      .mockReturnValueOnce(firstRun.promise)
+      .mockImplementationOnce(() => { throw new Error("queued setup failed"); })
+      .mockReturnValueOnce(thirdRun.promise);
+    const { service, store, telemetry } = createService(1);
+    const first = spawnWithCaller(store, telemetry, "first", "running");
+    const second = spawnWithCaller(store, telemetry, "second", "queued");
+    const third = spawnWithCaller(store, telemetry, "third", "queued");
+    service.submit(first.task);
+    service.submit(second.task);
+    service.submit(third.task);
+
+    firstRun.resolve(runResult("first complete"));
+    await expect(first.caller.promise).resolves.toBe("first complete");
+    await expect(second.caller.promise).resolves.toBe("");
+    expect(second.created.record.lifecycle).toMatchObject({ status: "error", settled: true });
+    expect(second.created.record.error).toBe("queued setup failed");
+    expect(state.runAgent.mock.calls.map((call) => call[2])).toEqual(["first", "second", "third"]);
+    expect(third.created.record.lifecycle.status).toBe("running");
+    expect(service.pendingCount).toBe(0);
+
+    thirdRun.resolve(runResult("third complete"));
+    await expect(third.caller.promise).resolves.toBe("third complete");
+    expect(first.created.record.lifecycle.status).toBe("completed");
+    expect(third.created.record.lifecycle.status).toBe("completed");
+  });
+
+  it("rejects a queued continuation after synchronous setup failure and advances FIFO", async () => {
+    const blockerRun = deferred<ReturnType<typeof runResult>>();
+    const followingRun = deferred<ReturnType<typeof runResult>>();
+    state.runAgent.mockReturnValueOnce(blockerRun.promise).mockReturnValueOnce(followingRun.promise);
+    state.executeAgentTurn.mockImplementation(() => { throw new Error("queued continuation setup failed"); });
+    const { service, store, telemetry } = createService(1);
+    const blocker = spawnWithCaller(store, telemetry, "blocker", "running");
+    service.submit(blocker.task);
+    const root = completedRecord(store, telemetry, "queued continuation root");
+    const continuation = continuationTask(store, telemetry, root, "queued follow-up", "queued");
+    service.submit(continuation.task);
+    const following = spawnWithCaller(store, telemetry, "following spawn", "queued");
+    service.submit(following.task);
+
+    blockerRun.resolve(runResult("blocker complete"));
+    await expect(blocker.caller.promise).resolves.toBe("blocker complete");
+    await expect(continuation.caller.promise).rejects.toThrow("queued continuation setup failed");
+    expect(root.record.lifecycle).toMatchObject({ status: "error", settled: true });
+    expect(state.runAgent.mock.calls.map((call) => call[2])).toEqual(["blocker", "following spawn"]);
+    expect(following.created.record.lifecycle.status).toBe("running");
+    expect(service.pendingCount).toBe(0);
+
+    followingRun.resolve(runResult("following complete"));
+    await expect(following.caller.promise).resolves.toBe("following complete");
+  });
+
+  it("releases exactly one slot after running spawn cancellation and late completion", async () => {
+    const firstRun = deferred<ReturnType<typeof runResult>>();
+    const secondRun = deferred<ReturnType<typeof runResult>>();
+    state.runAgent.mockReturnValueOnce(firstRun.promise).mockReturnValueOnce(secondRun.promise);
+    const { service, store, telemetry } = createService(1);
+    const parent = new AbortController();
+    const first = spawnWithCaller(store, telemetry, "cancelled", "running", parent.signal);
+    const second = spawnWithCaller(store, telemetry, "after cancellation", "queued");
+    service.submit(first.task);
+    service.submit(second.task);
+
+    parent.abort();
+    parent.abort();
+    expect(first.created.record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent" });
+    expect(service.pendingCount).toBe(1);
+    expect(state.runAgent).toHaveBeenCalledOnce();
+
+    firstRun.resolve(runResult("partial", true));
+    await expect(first.caller.promise).resolves.toBe("partial");
+    expect(state.runAgent).toHaveBeenCalledTimes(2);
+    expect(second.created.record.lifecycle.status).toBe("running");
+    expect(service.pendingCount).toBe(0);
+
+    secondRun.resolve(runResult("after"));
+    await expect(second.caller.promise).resolves.toBe("after");
+    expect(first.created.record.lifecycle).toMatchObject({ status: "stopped", settled: true });
+    expect(second.created.record.lifecycle.status).toBe("completed");
+  });
+
+  it("drops stale queued records without consuming the released slot", async () => {
+    const blockerRun = deferred<ReturnType<typeof runResult>>();
+    const liveRun = deferred<ReturnType<typeof runResult>>();
+    state.runAgent.mockReturnValueOnce(blockerRun.promise).mockReturnValueOnce(liveRun.promise);
+    const { service, store, telemetry } = createService(1);
+    const blocker = spawnWithCaller(store, telemetry, "blocker", "running");
+    const staleAccepted = acceptedSpawnFixture({ prompt: "stale" });
+    const staleCreated = store.createSpawnRecord(staleAccepted, "queued", new AbortController());
+    initialize(telemetry, staleCreated.record, staleCreated.execution);
+    const live = spawnWithCaller(store, telemetry, "live", "queued");
+    service.submit(blocker.task);
+    service.submit(spawnTask(staleCreated, staleAccepted));
+    service.submit(live.task);
+
+    expect(service.finishUnstartedExecution(
+      staleCreated.record,
+      staleCreated.execution,
+      "stopped",
+      "stale queue entry",
+    )).toBe(true);
+    expect(staleCreated.record.lifecycle).toMatchObject({ status: "stopped", settled: true });
+    expect(service.pendingCount).toBe(2);
+
+    blockerRun.resolve(runResult("blocker complete"));
+    await expect(blocker.caller.promise).resolves.toBe("blocker complete");
+    expect(state.runAgent.mock.calls.map((call) => call[2])).toEqual(["blocker", "live"]);
+    expect(live.created.record.lifecycle.status).toBe("running");
+    expect(service.pendingCount).toBe(0);
+
+    liveRun.resolve(runResult("live complete"));
+    await expect(live.caller.promise).resolves.toBe("live complete");
+  });
+
+  it("settles mixed running and queued spawn/continuation work during shutdown", async () => {
+    const runningSpawn = deferred<ReturnType<typeof runResult>>();
+    const runningContinuation = deferred<{ responseText: string; aborted: boolean }>();
+    state.runAgent.mockReturnValue(runningSpawn.promise);
+    state.executeAgentTurn.mockReturnValue(runningContinuation.promise);
+    const { service, store, telemetry } = createService(2);
+    const spawn = spawnWithCaller(store, telemetry, "running spawn", "running");
+    service.submit(spawn.task);
+    const root = completedRecord(store, telemetry, "continuation root");
+    const continuation = continuationTask(store, telemetry, root, "running continuation");
+    service.submit(continuation.task);
+    const queued = spawnWithCaller(store, telemetry, "queued spawn", "queued");
+    service.submit(queued.task);
+    const queuedRoot = completedRecord(store, telemetry, "queued continuation root");
+    const queuedContinuation = continuationTask(
+      store,
+      telemetry,
+      queuedRoot,
+      "queued continuation",
+      "queued",
+    );
+    service.submit(queuedContinuation.task);
+    expect(queuedRoot.record.execution.session).toBe(queuedRoot.session);
+    expect(service.pendingCount).toBe(2);
+
+    service.dispose();
+
+    await expect(spawn.caller.promise).resolves.toBe("");
+    await expect(queued.caller.promise).resolves.toBe("");
+    await expect(continuation.caller.promise).rejects.toThrow("Agent session shut down");
+    await expect(queuedContinuation.caller.promise).rejects.toThrow("Agent session shut down");
+    expect(queuedRoot.record.lifecycle).toMatchObject({ status: "stopped", settled: true });
+    expect(queuedRoot.record.stats.executions?.at(-1)).toMatchObject({
+      kind: "continued",
+      status: "stopped",
+    });
+    expect(queuedRoot.record.execution.session).toBeUndefined();
+    expect(queuedRoot.session.dispose).toHaveBeenCalledOnce();
+    expect(store.get(queuedRoot.id)).toBeUndefined();
+    expect(store.list()).toEqual([]);
+    expect(root.session.dispose).toHaveBeenCalledOnce();
+    expect(state.runAgent).toHaveBeenCalledOnce();
+    expect(state.executeAgentTurn).toHaveBeenCalledOnce();
+    expect(state.finalizeOutputLog).toHaveBeenCalledTimes(2);
+    expect(state.releaseOutputRoot).toHaveBeenCalledWith("/private");
+
+    runningSpawn.resolve(runResult("late spawn"));
+    runningContinuation.resolve({ responseText: "late continuation", aborted: true });
+    await Promise.resolve();
+    expect(state.runAgent).toHaveBeenCalledOnce();
+    expect(state.executeAgentTurn).toHaveBeenCalledOnce();
   });
 
   it("removes a queued task on parent abort without consuming a slot", async () => {
@@ -122,7 +428,82 @@ function createService(concurrency: number) {
   const store = new AgentRecordStore();
   const telemetry = new ExecutionTelemetry((record) => store.get(record.id) === record);
   const service = new AgentExecutionService({ store, telemetry, concurrency });
+  services.add(service);
   return { store, telemetry, service };
+}
+
+function completedRecord(
+  store: AgentRecordStore,
+  telemetry: ExecutionTelemetry,
+  prompt = "initial",
+) {
+  const accepted = acceptedSpawnFixture({ prompt });
+  const created = store.createSpawnRecord(accepted, "running", new AbortController());
+  initialize(telemetry, created.record, created.execution);
+  const retainedSession = session();
+  created.record.execution.session = retainedSession;
+  store.completeTurn(created.record, created.execution, { responseText: "initial response", aborted: false });
+  store.markSettled(created.record);
+  telemetry.forgetExecution(created.execution.id);
+  return { ...created, session: retainedSession };
+}
+
+function spawnWithCaller(
+  store: AgentRecordStore,
+  telemetry: ExecutionTelemetry,
+  prompt: string,
+  status: "queued" | "running",
+  signal?: AbortSignal,
+) {
+  const accepted = acceptedSpawnFixture(signal ? { prompt, signal } : { prompt });
+  const caller = deferred<string>();
+  const created = store.createSpawnRecord(
+    accepted,
+    status,
+    new AbortController(),
+    caller.promise,
+  );
+  initialize(telemetry, created.record, created.execution);
+  return {
+    created,
+    caller,
+    task: spawnTask(created, accepted, caller.resolve),
+  };
+}
+
+function continuationTask(
+  store: AgentRecordStore,
+  telemetry: ExecutionTelemetry,
+  root: ReturnType<typeof completedRecord>,
+  prompt = "follow-up",
+  status: "queued" | "running" = "running",
+  signal?: AbortSignal,
+): { task: ContinueExecutionTask; caller: ReturnType<typeof deferred<string>> } {
+  const executionId = store.createExecutionId();
+  const baseline = telemetry.beginExecution(executionId, root.record);
+  const caller = deferred<string>();
+  const execution = store.createContinuation(root.record, executionId, prompt, status);
+  root.record.execution.promise = caller.promise;
+  return {
+    task: {
+      kind: "continue",
+      id: root.id,
+      record: root.record,
+      execution,
+      request: {
+        record: root.record,
+        session: root.session,
+        executionId,
+        baseline,
+        prompt,
+        signal,
+        resolve: caller.resolve,
+        reject: caller.reject,
+        startedAt: Date.now(),
+      },
+    },
+    caller,
+  };
 }
 
 function initialize(telemetry: ExecutionTelemetry, record: any, execution: any): void {
