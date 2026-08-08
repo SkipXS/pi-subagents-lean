@@ -1,18 +1,14 @@
 /**
- * Public skill-loading facade.
+ * Async skill metadata facade used by prompts and agent runners.
  *
- * Catalog composition, source fingerprints/caches, and the async Pi worker
- * transport live in focused modules; this file preserves the loader API used by
- * prompts and agent runners.
+ * Catalog composition, source fingerprints/caches, and the Pi worker transport
+ * live in focused modules; metadata discovery never blocks the parent thread.
  */
 
 import type { Skill } from "@earendil-works/pi-coding-agent";
-import {
-  loadAllSkills,
-  loadAllSkillsAsync,
-} from "./skill-catalog.js";
+import { loadAllSkillsAsync } from "./skill-catalog.js";
 
-export { loadAllSkills, loadAllSkillsAsync };
+export { loadAllSkillsAsync };
 export {
   MAX_SERIALIZED_WORKER_SKILLS,
   MAX_SKILLS_TOTAL,
@@ -54,27 +50,9 @@ function selectSkillNames(skillNames: string[], excludeSkills?: string[]): strin
 
 export type SkillSelection = true | string[];
 
-/** Load metadata for the selected skills without loading their bodies. */
-export function loadSkillMeta(
-  skillNames: string[] | true,
-  cwd: string,
-  excludeSkills?: string[],
-  projectTrusted = true,
-): SkillMeta[] {
-  const explicitNames = skillNames === true ? undefined : selectSkillNames(skillNames, excludeSkills);
-  if (explicitNames && explicitNames.length === 0) return [];
-  const catalog = loadAllSkills(cwd, projectTrusted);
-  const selectedNames = explicitNames ?? catalog.map((skill) => skill.name);
-  if (selectedNames.length === 0) return [];
-  const skillsByName = new Map(catalog.map((skill) => [skill.name, skill]));
-  return selectedNames
-    .filter((name) => !(excludeSkills ?? []).includes(name))
-    .map((name) => toSkillMeta(name, skillsByName.get(name)));
-}
-
 /**
- * Async metadata path used by the runner. Both explicit lists and `true`
- * (all-skills mode) use the bounded catalog/worker path; no caller needs to
+ * Bounded async metadata path used by the runner. Both explicit lists and
+ * `true` (all-skills mode) use the catalog/worker path; no caller needs to
  * invoke Pi's synchronous loader on the foreground event loop.
  */
 export async function loadSkillMetaAsync(

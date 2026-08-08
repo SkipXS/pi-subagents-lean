@@ -40,7 +40,6 @@ const mockModules = vi.hoisted(() => ({
   mockGetAgentConfig: vi.fn(),
   mockBuildAgentPrompt: vi.fn(),
   mockExtractText: vi.fn(),
-  mockLoadSkillMeta: vi.fn().mockReturnValue([]),
   mockLoadSkillMetaAsync: vi.fn().mockResolvedValue([]),
   mockCreateAgentSession: vi.fn(),
   mockDefaultResourceLoader: MockDefaultResourceLoader,
@@ -84,7 +83,6 @@ vi.mock("../../src/prompt/context.js", () => ({
 }));
 
 vi.mock("../../src/prompt/skill-loader.js", () => ({
-  loadSkillMeta: mockModules.mockLoadSkillMeta,
   loadSkillMetaAsync: mockModules.mockLoadSkillMetaAsync,
 }));
 
@@ -200,7 +198,6 @@ function resetMocks() {
   mockModules.mockGetAgentConfig.mockReturnValue({ ...defaultAgentConfig });
   mockModules.mockBuildAgentPrompt.mockReturnValue("system prompt");
   mockModules.mockExtractText.mockReturnValue("");
-  mockModules.mockLoadSkillMeta.mockReturnValue([]);
   mockModules.mockLoadSkillMetaAsync.mockResolvedValue([]);
   mockModules.mockGetAgentDir.mockReturnValue("/home/test/.pi/agent");
   mockModules.mockManager = null;
@@ -780,7 +777,6 @@ describe("runAgent — skill selection and exclusion", () => {
     expect(mockModules.mockLoadSkillMetaAsync).toHaveBeenCalledWith(
       ["visible", "blocked"], expect.any(String), excludeSkills,
     );
-    expect(mockModules.mockLoadSkillMeta).not.toHaveBeenCalled();
     const loader = mockModules.getLoaderOpts();
     expect(loader.noSkills).toBe(true);
     expect(loader.skillsOverride({
@@ -806,7 +802,7 @@ describe("runAgent — skill selection and exclusion", () => {
 
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
 
-    expect(mockModules.mockLoadSkillMeta).not.toHaveBeenCalled();
+    expect(mockModules.mockLoadSkillMetaAsync).not.toHaveBeenCalled();
     const loader = mockModules.getLoaderOpts();
     expect(loader.noSkills).toBe(true);
     expect(loader.skillsOverride({
@@ -832,7 +828,6 @@ describe("runAgent — skill selection and exclusion", () => {
 
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
 
-    expect(mockModules.mockLoadSkillMeta).not.toHaveBeenCalled();
     expect(mockModules.mockLoadSkillMetaAsync).toHaveBeenCalledWith(
       true, expect.any(String), ["blocked"], false,
     );

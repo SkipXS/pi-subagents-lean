@@ -7,16 +7,12 @@ import type { Skill } from "@earendil-works/pi-coding-agent";
 import { canCreateSymlinks } from "./fixtures.ts";
 
 const mocks = vi.hoisted(() => ({
-  loadSkills: vi.fn(),
-  loadSkillsFromDir: vi.fn(),
   getAgentDir: vi.fn(),
   workerRun: vi.fn(),
   workerClose: vi.fn(),
 }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
-  loadSkills: mocks.loadSkills,
-  loadSkillsFromDir: mocks.loadSkillsFromDir,
   getAgentDir: mocks.getAgentDir,
 }));
 
@@ -29,20 +25,14 @@ vi.mock("../src/prompt/skill-loader-worker.ts", () => ({
 
 import {
   createSkillCatalogBudget,
-  loadPiDefaultSkillsCached,
   loadPiDefaultSkillsCachedAsync,
-  loadSkillsFromDirCached,
   loadSkillsFromDirCachedAsync,
 } from "../src/prompt/skill-cache.ts";
 import {
   filterRootMdFiles,
-  loadAllSkills,
   loadAllSkillsAsync,
 } from "../src/prompt/skill-catalog.ts";
-import {
-  fingerprintResourceTree,
-  fingerprintResourceTreeAsync,
-} from "../src/prompt/skill-fingerprint.js";
+import { fingerprintResourceTreeAsync } from "../src/prompt/skill-fingerprint.js";
 import { walkResourceTreeAsync } from "../src/prompt/skill-fingerprint-walk.js";
 
 let root = "";
@@ -68,8 +58,6 @@ function writeSkill(rootDir: string, name: string): string {
 beforeEach(() => {
   root = join(tmpdir(), `skill-boundary-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(root, { recursive: true });
-  mocks.loadSkills.mockReturnValue({ skills: [], diagnostics: [] });
-  mocks.loadSkillsFromDir.mockReturnValue({ skills: [], diagnostics: [] });
   mocks.getAgentDir.mockReturnValue(join(root, "agent"));
   mocks.workerRun.mockResolvedValue([]);
   mocks.workerClose.mockResolvedValue(undefined);
@@ -86,9 +74,8 @@ describe("late skill cache and catalog boundaries", () => {
     const target = writeSkill(source, "target");
     if (canCreateSymlinks()) symlinkSync(target, join(source, "linked.md"), "file");
 
-    const sync = fingerprintResourceTree(source);
     const asyncResult = await fingerprintResourceTreeAsync(source);
-    expect(asyncResult).toEqual(sync);
+    expect(asyncResult.stable).toBe(true);
     expect(asyncResult.value).not.toContain(source);
   });
 
@@ -133,13 +120,11 @@ describe("late skill cache and catalog boundaries", () => {
     const source = join(root, "source");
     const skillPath = writeSkill(source, "cached");
     const skill = makeSkill("cached", skillPath);
-    mocks.loadSkillsFromDir.mockReturnValue({ skills: [skill], diagnostics: [] });
+    mocks.workerRun.mockResolvedValue([skill]);
 
-    expect(loadSkillsFromDirCached(source, "user")).toEqual([skill]);
-    expect(loadSkillsFromDirCached(source, "user")).toEqual([skill]);
     await expect(loadSkillsFromDirCachedAsync(source, "user", mocks.workerRun)).resolves.toEqual([skill]);
-    expect(mocks.loadSkillsFromDir).toHaveBeenCalledOnce();
-    expect(mocks.workerRun).not.toHaveBeenCalled();
+    await expect(loadSkillsFromDirCachedAsync(source, "user", mocks.workerRun)).resolves.toEqual([skill]);
+    expect(mocks.workerRun).toHaveBeenCalledOnce();
 
     writeFileSync(skillPath, "changed");
     const changedAt = new Date(Date.now() + 2_000);
@@ -147,7 +132,7 @@ describe("late skill cache and catalog boundaries", () => {
     const changed = makeSkill("cached", skillPath);
     mocks.workerRun.mockResolvedValue([changed]);
     await expect(loadSkillsFromDirCachedAsync(source, "user", mocks.workerRun)).resolves.toEqual([changed]);
-    expect(mocks.workerRun).toHaveBeenCalledOnce();
+    expect(mocks.workerRun).toHaveBeenCalledTimes(2);
 
     const agentsRoot = join(root, "agents");
     const directPath = join(agentsRoot, "root.md");
@@ -155,8 +140,7 @@ describe("late skill cache and catalog boundaries", () => {
     writeFileSync(directPath, "root");
     const direct = makeSkill("root", directPath);
     const nested = makeSkill("nested", nestedPath);
-    mocks.loadSkillsFromDir.mockReturnValue({ skills: [direct, nested], diagnostics: [] });
-    expect(loadSkillsFromDirCached(agentsRoot, "agents")).toEqual([direct, nested]);
+    mocks.workerRun.mockResolvedValue([direct, nested]);
     const budget = createSkillCatalogBudget();
     budget.remaining = 1;
     await expect(loadSkillsFromDirCachedAsync(agentsRoot, "agents", mocks.workerRun, budget))
@@ -164,19 +148,19 @@ describe("late skill cache and catalog boundaries", () => {
     expect(budget.remaining).toBe(0);
   });
 
-  it("fails closed for sync races, worker errors, and exhausted async budgets", async () => {
+  it("fails closed for async races, worker errors, and exhausted budgets", async () => {
     const raceRoot = join(root, "race");
     const raceFile = writeSkill(raceRoot, "race");
-    mocks.loadSkillsFromDir.mockImplementation(() => {
+    mocks.workerRun.mockImplementationOnce(async () => {
       writeFileSync(raceFile, "after");
       const changedAt = new Date(Date.now() + 2_000);
       utimesSync(raceFile, changedAt, changedAt);
-      return { skills: [], diagnostics: [] };
+      return [];
     });
-    expect(() => loadSkillsFromDirCached(raceRoot, "user")).toThrow("changed during Pi discovery");
-    mocks.loadSkillsFromDir.mockReturnValue({ skills: [], diagnostics: [] });
-    expect(loadSkillsFromDirCached(raceRoot, "user")).toEqual([]);
-    expect(mocks.loadSkillsFromDir).toHaveBeenCalledTimes(2);
+    await expect(loadSkillsFromDirCachedAsync(raceRoot, "user", mocks.workerRun))
+      .rejects.toThrow("changed during Pi discovery");
+    mocks.workerRun.mockResolvedValueOnce([]);
+    await expect(loadSkillsFromDirCachedAsync(raceRoot, "user", mocks.workerRun)).resolves.toEqual([]);
 
     const workerRoot = join(root, "worker-error");
     writeSkill(workerRoot, "worker");
@@ -184,17 +168,17 @@ describe("late skill cache and catalog boundaries", () => {
     await expect(loadSkillsFromDirCachedAsync(workerRoot, "user", mocks.workerRun)).rejects.toThrow("worker failed");
     mocks.workerRun.mockResolvedValueOnce([]);
     await expect(loadSkillsFromDirCachedAsync(workerRoot, "user", mocks.workerRun)).resolves.toEqual([]);
-    expect(mocks.workerRun).toHaveBeenCalledTimes(2);
+    expect(mocks.workerRun).toHaveBeenCalledTimes(4);
 
     const budgetRoot = join(root, "budget");
     writeSkill(budgetRoot, "budget");
     const exhausted = { remaining: 0 };
     await expect(loadSkillsFromDirCachedAsync(budgetRoot, "user", mocks.workerRun, exhausted))
       .rejects.toThrow("maximum of 10000 skills");
-    expect(mocks.workerRun).toHaveBeenCalledTimes(2);
+    expect(mocks.workerRun).toHaveBeenCalledTimes(4);
   });
 
-  it("keeps trusted and untrusted default paths separate in sync and async caches", async () => {
+  it("keeps trusted and untrusted default paths separate in async caches", async () => {
     const cwd = join(root, "project");
     const agentDir = join(root, "agent");
     mkdirSync(join(agentDir, "skills"), { recursive: true });
@@ -202,14 +186,6 @@ describe("late skill cache and catalog boundaries", () => {
     const defaultSkill = makeSkill("default", writeSkill(join(agentDir, "skills"), "default"));
     const userSkill = makeSkill("user", writeSkill(join(agentDir, "skills"), "user"));
     mocks.getAgentDir.mockReturnValue(agentDir);
-    mocks.loadSkills.mockReturnValue({ skills: [defaultSkill], diagnostics: [] });
-    mocks.loadSkillsFromDir.mockReturnValue({ skills: [userSkill], diagnostics: [] });
-
-    expect(loadPiDefaultSkillsCached(cwd, agentDir, true)).toEqual([defaultSkill]);
-    expect(loadPiDefaultSkillsCached(cwd, agentDir, false)).toEqual([userSkill]);
-    expect(mocks.loadSkills).toHaveBeenCalledOnce();
-    expect(mocks.loadSkillsFromDir).toHaveBeenCalledOnce();
-
     const asyncCwd = join(root, "async-project");
     mkdirSync(join(asyncCwd, ".pi", "skills"), { recursive: true });
     const asyncDefault = makeSkill("async-default", writeSkill(join(agentDir, "skills"), "async-default"));
@@ -227,21 +203,6 @@ describe("late skill cache and catalog boundaries", () => {
       .resolves.toEqual([asyncUser]);
   });
 
-  it("enforces the synchronous merged catalog bound before publishing results", () => {
-    const project = join(root, "overflow-project");
-    const ancestorRoot = join(project, ".agents", "skills");
-    mkdirSync(join(project, ".git"), { recursive: true });
-    const ancestorSkills = Array.from({ length: 5_000 }, (_, index) =>
-      makeSkill(`ancestor-${index}`, join(ancestorRoot, `${index}`, "SKILL.md")));
-    const defaults = Array.from({ length: 5_001 }, (_, index) =>
-      makeSkill(`default-${index}`, join(root, "agent", "skills", `${index}.md`)));
-    mocks.loadSkillsFromDir.mockImplementation(({ dir }: { dir: string }) =>
-      dir === ancestorRoot ? { skills: ancestorSkills, diagnostics: [] } : { skills: [], diagnostics: [] });
-    mocks.loadSkills.mockReturnValue({ skills: defaults, diagnostics: [] });
-
-    expect(() => loadAllSkills(project, true)).toThrow("Skill catalog exceeds the maximum of 10000 skills");
-  });
-
   it("walks a git-bounded ancestor chain and closes the async worker on errors", async () => {
     const project = join(root, "git-project");
     const cwd = join(project, "child");
@@ -253,11 +214,7 @@ describe("late skill cache and catalog boundaries", () => {
     const ancestor = makeSkill("ancestor", writeSkill(ancestorRoot, "ancestor"));
     const defaultSkill = makeSkill("default", writeSkill(join(agentDir, "skills"), "default"));
     mocks.getAgentDir.mockReturnValue(agentDir);
-    mocks.loadSkills.mockReturnValue({ skills: [defaultSkill], diagnostics: [] });
-    mocks.loadSkillsFromDir.mockImplementation(({ dir }: { dir: string }) =>
-      dir === ancestorRoot ? { skills: [ancestor], diagnostics: [] } : { skills: [], diagnostics: [] });
 
-    expect(loadAllSkills(cwd, true).map(({ name }) => name)).toEqual(["ancestor", "default"]);
     expect(filterRootMdFiles([
       makeSkill("root", join(ancestorRoot, "root.md")),
       ancestor,

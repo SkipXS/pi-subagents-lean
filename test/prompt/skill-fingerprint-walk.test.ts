@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import {
   MAX_RESOURCE_FINGERPRINT_DEPTH,
   MAX_RESOURCE_FINGERPRINT_ENTRIES,
-  walkResourceTree,
   walkResourceTreeAsync,
 } from "../../src/prompt/skill-fingerprint-walk.js";
 
@@ -18,7 +17,7 @@ afterEach(() => {
 }, 30_000);
 
 describe("skill fingerprint walker boundaries", () => {
-  it("rejects the same over-deep root synchronously and asynchronously", async () => {
+  it("rejects an over-deep root asynchronously", async () => {
     const root = mkdtempSync(join(tmpdir(), "skill-fingerprint-deep-"));
     roots.push(root);
     let current = root;
@@ -28,7 +27,6 @@ describe("skill fingerprint walker boundaries", () => {
     }
     const message = `maximum depth ${MAX_RESOURCE_FINGERPRINT_DEPTH}`;
 
-    expect(() => walkResourceTree(root, options)).toThrow(message);
     await expect(walkResourceTreeAsync(root, options)).rejects.toThrow(message);
   });
 
@@ -75,7 +73,6 @@ describe("skill fingerprint walker boundaries", () => {
     }
     const message = `maximum ${MAX_RESOURCE_FINGERPRINT_ENTRIES} visited entries`;
 
-    expect(() => walkResourceTree(root, options)).toThrow(message);
     await expect(walkResourceTreeAsync(root, options)).rejects.toThrow(message);
   }, 30_000);
 });

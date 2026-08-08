@@ -1,20 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 
-const { mockLoadAllSkills, mockLoadAllSkillsAsync } = vi.hoisted(() => ({
-  mockLoadAllSkills: vi.fn(),
+const { mockLoadAllSkillsAsync } = vi.hoisted(() => ({
   mockLoadAllSkillsAsync: vi.fn(),
 }));
 
 vi.mock("../../src/prompt/skill-catalog.ts", () => ({
-  loadAllSkills: mockLoadAllSkills,
   loadAllSkillsAsync: mockLoadAllSkillsAsync,
 }));
 
-import {
-  loadSkillMeta,
-  loadSkillMetaAsync,
-} from "../../src/prompt/skill-loader.ts";
+import { loadSkillMetaAsync } from "../../src/prompt/skill-loader.ts";
 
 const skill: Skill = {
   name: "known",
@@ -26,27 +22,42 @@ const skill: Skill = {
 };
 
 beforeEach(() => {
-  mockLoadAllSkills.mockReturnValue([skill]);
   mockLoadAllSkillsAsync.mockResolvedValue([skill]);
   vi.clearAllMocks();
 });
 
-describe("skill loader public facade", () => {
-  it("maps sync metadata and keeps the public not-found contract", () => {
-    expect(loadSkillMeta(["known", "missing"], "/project")).toEqual([
-      {
-        name: "known",
-        description: "Known skill",
-        location: "/skills/known/SKILL.md",
-        disableModelInvocation: true,
-      },
-      {
-        name: "missing",
-        description: '(Skill "missing" not found)',
-        location: "",
-        disableModelInvocation: false,
-      },
-    ]);
+describe("async skill metadata facade", () => {
+  it("preserves explicit order and the public not-found contract", async () => {
+    const other: Skill = {
+      ...skill,
+      name: "other",
+      disableModelInvocation: false,
+      description: "Other skill",
+      filePath: "/skills/other/SKILL.md",
+    };
+    mockLoadAllSkillsAsync.mockResolvedValueOnce([skill, other]);
+
+    await expect(loadSkillMetaAsync(["other", "missing", "known"], "/project"))
+      .resolves.toEqual([
+        {
+          name: "other",
+          description: "Other skill",
+          location: "/skills/other/SKILL.md",
+          disableModelInvocation: false,
+        },
+        {
+          name: "missing",
+          description: '(Skill "missing" not found)',
+          location: "",
+          disableModelInvocation: false,
+        },
+        {
+          name: "known",
+          description: "Known skill",
+          location: "/skills/known/SKILL.md",
+          disableModelInvocation: true,
+        },
+      ]);
   });
 
   it("maps async metadata without changing exclusion or trust arguments", async () => {
@@ -58,19 +69,34 @@ describe("skill loader public facade", () => {
         disableModelInvocation: true,
       }]);
     expect(mockLoadAllSkillsAsync).toHaveBeenCalledWith("/project", false);
-    expect(mockLoadAllSkills).not.toHaveBeenCalled();
   });
 
-  it("routes all-skills metadata through the same async catalog and excludes afterward", async () => {
+  it("routes all-skills metadata through the async catalog and excludes afterward", async () => {
     await expect(loadSkillMetaAsync(true, "/project", ["known"], true)).resolves.toEqual([]);
     expect(mockLoadAllSkillsAsync).toHaveBeenCalledWith("/project", true);
-    expect(mockLoadAllSkills).not.toHaveBeenCalled();
   });
 
   it("does not load a catalog when all requested names are excluded", async () => {
-    expect(loadSkillMeta(["known"], "/project", ["known"])).toEqual([]);
     await expect(loadSkillMetaAsync(["known"], "/project", ["known"])).resolves.toEqual([]);
-    expect(mockLoadAllSkills).not.toHaveBeenCalled();
     expect(mockLoadAllSkillsAsync).not.toHaveBeenCalled();
+  });
+
+  it("keeps removed synchronous symbols out of internal Skills sources", () => {
+    const sourceNames = [
+      "skill-loader.ts",
+      "skill-catalog.ts",
+      "skill-cache.ts",
+      "skill-fingerprint.ts",
+      "skill-fingerprint-walk.ts",
+    ];
+    const source = sourceNames
+      .map((name) => readFileSync(new URL(`../../src/prompt/${name}`, import.meta.url), "utf8"))
+      .join("\n");
+    expect(source).not.toMatch(/\b(?:loadSkillMeta|loadAllSkills|mergeSkills|loadAncestorAgentsSkills|directoryContainsGitSync|canonicalizePath|loadSkillsFromDirCached|loadPiDefaultSkillsCached|fingerprintResourceTree|targetFileStatsSync|recordRelevantSync|walkResourceTree)\b/);
+    expect(source).not.toMatch(/\b(?:lstatSync|opendirSync|realpathSync|statSync)\b/);
+    expect(source).toMatch(/export async function loadSkillMetaAsync/);
+    expect(source).toMatch(/export async function loadAllSkillsAsync/);
+    expect(source).toMatch(/export async function fingerprintResourceTreeAsync/);
+    expect(source).toMatch(/export async function walkResourceTreeAsync/);
   });
 });

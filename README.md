@@ -184,6 +184,19 @@ Agent Markdown, and the parent session. Skills and extensions follow their
 catalog selection and exclusion rules. Worktree validation, trust, usage
 telemetry, and bounded record retention remain active.
 
+### Skills
+
+Agent definitions may set `skills: true` to advertise all discovered skills,
+an explicit list such as `skills: ["tdd", "debug"]` to advertise selected
+skills in that order, or `skills: false` to omit skill metadata. Use
+`exclude_skills` to subtract names from either enabled selection. Selected
+metadata resolves through a bounded asynchronous worker-backed catalog; child
+startup does not perform a second skill scan.
+
+The supported package surfaces are only the Pi manifest entry and the
+bundled resources documented above. Other modules under `src/` are internal
+implementation details, not supported package surfaces.
+
 ## Development
 
 Use Bun:

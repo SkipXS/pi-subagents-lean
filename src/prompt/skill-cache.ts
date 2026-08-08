@@ -1,19 +1,14 @@
 /**
- * Bounded, detached skill-source caches shared by sync and async catalogs.
+ * Bounded, detached skill-source caches used by the async catalog.
  *
  * A cache entry is reusable only when its complete resource-tree fingerprint is
  * stable. Stored Skill objects are cloned both on insertion and on return so a
  * caller cannot mutate a later warm lookup.
  */
 
-import {
-  loadSkills,
-  loadSkillsFromDir,
-  type Skill,
-} from "@earendil-works/pi-coding-agent";
+import type { Skill } from "@earendil-works/pi-coding-agent";
 import { join, resolve } from "node:path";
 import {
-  fingerprintResourceTree,
   fingerprintResourceTreeAsync,
   ResourceFingerprintLimitError,
   type ResourceFingerprint,
@@ -138,44 +133,6 @@ function setSkillCacheEntry(
   }
 }
 
-export function loadSkillsFromDirCached(dir: string, source: string): Skill[] {
-  const resolvedDir = resolve(dir);
-  const key = `${source}\0${resolvedDir}`;
-  const fingerprintOptions = sourceFingerprintOptions(source);
-  let fingerprint: ReturnType<typeof fingerprintResourceTree>;
-  try {
-    fingerprint = fingerprintResourceTree(resolvedDir, fingerprintOptions);
-  } catch (error) {
-    if (error instanceof ResourceFingerprintLimitError) skillDirectoryCache.delete(key);
-    throw error;
-  }
-  const cached = getSkillCacheEntry(skillDirectoryCache, key);
-  if (fingerprint.stable && cached?.fingerprint === fingerprint.value) {
-    return cached.skills.map(cloneSkill);
-  }
-
-  let skills: Skill[];
-  try {
-    const loaded = loadSkillsFromDir({ dir: resolvedDir, source }).skills;
-    assertBoundedSkillResult(loaded);
-    const after = fingerprintResourceTree(resolvedDir, fingerprintOptions);
-    assertPostLoadFingerprint(resolvedDir, fingerprint, after);
-    skills = loaded.map(cloneSkill);
-  } catch (error) {
-    skillDirectoryCache.delete(key);
-    throw error;
-  }
-  if (fingerprint.stable) {
-    setSkillCacheEntry(skillDirectoryCache, key, {
-      fingerprint: fingerprint.value,
-      skills: skills.map(cloneSkill),
-    }, MAX_SKILL_DIRECTORY_CACHE_ENTRIES);
-  } else {
-    skillDirectoryCache.delete(key);
-  }
-  return skills.map(cloneSkill);
-}
-
 export async function loadSkillsFromDirCachedAsync(
   dir: string,
   source: string,
@@ -239,75 +196,6 @@ export async function loadSkillsFromDirCachedAsync(
   return skills.map(cloneSkill);
 }
 
-export function loadPiDefaultSkillsCached(
-  cwd: string,
-  agentDir: string,
-  projectTrusted: boolean,
-): Skill[] {
-  const resolvedCwd = resolve(cwd);
-  const resolvedAgentDir = resolve(agentDir);
-  const sourceRoots = projectTrusted
-    ? [join(agentDir, "skills"), join(resolvedCwd, ".pi", "skills")]
-    : [join(agentDir, "skills")];
-  const key = `${resolvedAgentDir}\0${resolvedCwd}\0${projectTrusted ? "trusted" : "untrusted"}`;
-  let rootFingerprints: ReturnType<typeof fingerprintResourceTree>[];
-  try {
-    rootFingerprints = sourceRoots.map((root) => fingerprintResourceTree(root, { allowRootMarkdown: true }));
-  } catch (error) {
-    if (error instanceof ResourceFingerprintLimitError) piDefaultSkillCache.delete(key);
-    throw error;
-  }
-  const fingerprint = JSON.stringify([
-    resolvedCwd,
-    resolvedAgentDir,
-    projectTrusted,
-    ...rootFingerprints.map((entry) => entry.value),
-  ]);
-  reserveSkillBudget(
-    undefined,
-    rootFingerprints.reduce((sum, entry) => sum + entry.skillCount, 0),
-    resolvedCwd,
-  );
-  const cached = getSkillCacheEntry(piDefaultSkillCache, key);
-  if (rootFingerprints.every((entry) => entry.stable) && cached?.fingerprint === fingerprint) {
-    return cached.skills.map(cloneSkill);
-  }
-
-  let skills: Skill[];
-  try {
-    skills = projectTrusted
-      ? (() => {
-        const loaded = loadSkills({
-          cwd: resolvedCwd,
-          // Preserve Pi's path verbatim. Resolving a Windows-style configured path
-          // on POSIX would incorrectly prefix the current working directory.
-          agentDir,
-          skillPaths: [],
-          includeDefaults: true,
-        }).skills;
-        assertBoundedSkillResult(loaded);
-        const after = sourceRoots.map((root) => fingerprintResourceTree(root, { allowRootMarkdown: true }));
-        rootFingerprints.forEach((before, index) => assertPostLoadFingerprint(sourceRoots[index]!, before, after[index]!));
-        return loaded.map(cloneSkill);
-      })()
-      // The combined loader also reads <cwd>/.pi/skills. Keep that call out of
-      // the untrusted path so project files are never opened.
-      : loadSkillsFromDirCached(join(agentDir, "skills"), "user");
-  } catch (error) {
-    piDefaultSkillCache.delete(key);
-    throw error;
-  }
-  if (rootFingerprints.every((entry) => entry.stable)) {
-    setSkillCacheEntry(piDefaultSkillCache, key, {
-      fingerprint,
-      skills: skills.map(cloneSkill),
-    }, MAX_PI_DEFAULT_SKILL_CACHE_ENTRIES);
-  } else {
-    piDefaultSkillCache.delete(key);
-  }
-  return skills.map(cloneSkill);
-}
-
 export async function loadPiDefaultSkillsCachedAsync(
   cwd: string,
   agentDir: string,
@@ -349,8 +237,8 @@ export async function loadPiDefaultSkillsCachedAsync(
     if (projectTrusted) {
       const loaded = await runPiSkillLoader("loadSkills", {
         cwd: resolvedCwd,
-        // Preserve Pi's path verbatim for the same cross-platform reason as the
-        // synchronous compatibility path.
+        // Preserve Pi's path verbatim. Resolving a Windows-style configured
+        // path on POSIX would incorrectly prefix the current working directory.
         agentDir,
         skillPaths: [],
         includeDefaults: true,

@@ -45,7 +45,7 @@ export default defineConfig({
         // Cache/fingerprint resource failures are exercised by integration
         // tests, but V8's Windows async-module map leaves a lower branch floor.
         "src/prompt/skill-cache.ts": { statements: 70, branches: 70, functions: 68, lines: 70 },
-        // Sync/async directory adapters expose platform-specific iterator,
+        // Async directory adapters expose platform-specific iterator,
         // filesystem, and worker cleanup paths; keep these floors at the
         // measured cross-platform boundary rather than padding tests.
         "src/prompt/skill-catalog.ts": { statements: 60, branches: 40, functions: 64, lines: 62 },
