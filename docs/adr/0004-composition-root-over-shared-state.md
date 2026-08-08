@@ -10,12 +10,14 @@ loaded snapshot but exposes no session or global model override.
 The shell's `ConfigStore` is constructed when the module is loaded and lives for
 the extension lifetime. `session_start` reloads its config and creates the
 session-scoped `AgentManager` and `SpawnCoordinator`, mounting them on the
-shell. `session_shutdown` clears the stateless coordinator and disposes the
-manager; the store remains and only drops its manager dependency. The session context is
-set at start and cleared at shutdown, while the PI instance is set during
-extension initialization. Owned domain state stays in the module that owns the
-concern: config in ConfigStore, execution records in AgentManager, and foreground
-promise coordination in SpawnCoordinator.
+shell. A repeated `session_start` applies the newly loaded concurrency to the
+existing manager without recreating it. `session_shutdown` clears the
+stateless coordinator and disposes the manager; the store remains as a
+read-only loaded snapshot. The session context is set at start and cleared at
+shutdown, while the PI instance is set during extension initialization. Owned
+domain state stays in the module that owns the concern: config in ConfigStore,
+execution records in AgentManager, and foreground promise coordination in
+SpawnCoordinator.
 
 Getters always read the shell's current fields. The manager and coordinator
 getters return `null` in a child AsyncLocalStorage context, while root-only
@@ -53,8 +55,8 @@ fields have explicit lifecycle boundaries. Before the first `session_start`,
 and after `session_shutdown`, the manager and coordinator are unavailable; the
 ConfigStore still exists. At `session_start` the store is reloaded and the
 session services are mounted. At shutdown the coordinator is claimed and
-disposed, the store's manager dependency is dropped, the manager is disposed
-and cleared, and the session context is cleared. Startup/shutdown epochs prevent
+disposed, the manager is disposed and cleared, and the session context is
+cleared. Startup/shutdown epochs prevent
 an asynchronous startup scan from publishing state after its session ended.
 
 The contract for handlers that need session services is therefore "run during or

@@ -6,12 +6,12 @@ const state = vi.hoisted(() => ({
   coordinator: null as any,
   managers: [] as any[],
   coordinators: [] as any[],
+  managerConfigs: [] as any[],
+  order: [] as string[],
   store: {
     agent: { disableDefaultAgents: false, orchestrationPrompt: true },
     concurrency: { default: 4 },
     reload: vi.fn(),
-    setDeps: vi.fn(),
-    dispose: vi.fn(),
   },
   discover: vi.fn(),
   scanDirs: vi.fn(),
@@ -26,9 +26,16 @@ vi.mock("../src/agents/agent-types.js", () => ({
 vi.mock("../src/agents/agent-manager.js", () => ({
   AgentManager: class {
     dispose = vi.fn();
-    constructor() { state.managers.push(this); }
+    setConcurrency = vi.fn((config: unknown) => {
+      state.order.push("setConcurrency");
+      state.managerConfigs.push(structuredClone(config));
+    });
+    constructor(concurrency: unknown) {
+      state.order.push("construct");
+      state.managerConfigs.push(structuredClone(concurrency));
+      state.managers.push(this);
+    }
     listAgents() { return []; }
-    setConcurrency = vi.fn();
   },
 }));
 vi.mock("../src/spawn/spawn-coordinator.js", () => ({
@@ -54,6 +61,10 @@ function context(): ExtensionContext {
   return { cwd: "/tmp/project", hasUI: false, isProjectTrusted: () => true } as unknown as ExtensionContext;
 }
 
+function normalizedConcurrency(raw: unknown): number {
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 1 && raw <= 64 ? raw : 4;
+}
+
 function listenersFor(bridge = new AgentRenderMetadataBridge()) {
   const listeners = new Map<string, (...args: any[]) => any>();
   setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any, bridge);
@@ -67,9 +78,10 @@ describe("headless extension lifecycle", () => {
     state.coordinator = null;
     state.managers.length = 0;
     state.coordinators.length = 0;
-    state.store.dispose.mockReset();
-    state.store.reload.mockReset();
-    state.store.setDeps.mockReset();
+    state.managerConfigs.length = 0;
+    state.order.length = 0;
+    state.store.concurrency = { default: 4 };
+    state.store.reload.mockReset().mockImplementation(() => { state.order.push("reload"); });
     state.discover.mockReset().mockResolvedValue(0);
     state.scanDirs.mockReset();
     stopAgentRendererTimers();
@@ -95,6 +107,44 @@ describe("headless extension lifecycle", () => {
     expect(patched.details[AGENT_RENDER_DETAILS_KEY]).toEqual(metadata);
     listeners.get("message_end")!({ message: { role: "toolResult", toolCallId: "call", toolName: "Agent", details: patched.details } });
     expect(bridge.pendingCount()).toBe(0);
+  });
+
+  it("reloads before constructing a new manager and passes reloaded concurrency", async () => {
+    state.store.reload.mockImplementationOnce(() => {
+      state.order.push("reload");
+      state.store.concurrency = { default: normalizedConcurrency(9) };
+    });
+    const { listeners } = listenersFor();
+
+    await listeners.get("session_start")!({}, context());
+
+    expect(state.order).toEqual(["reload", "construct"]);
+    expect(state.managerConfigs).toEqual([{ default: 9 }]);
+    await listeners.get("session_shutdown")!({}, context());
+  });
+
+  it("reloads and updates an existing manager without reconstructing it", async () => {
+    state.store.reload
+      .mockImplementationOnce(() => {
+        state.order.push("reload");
+        state.store.concurrency = { default: normalizedConcurrency(2) };
+      })
+      .mockImplementationOnce(() => {
+        state.order.push("reload");
+        state.store.concurrency = { default: normalizedConcurrency(999) };
+      });
+    const { listeners } = listenersFor();
+
+    await listeners.get("session_start")!({}, context());
+    const manager = state.manager;
+    await listeners.get("session_start")!({}, context());
+
+    expect(state.managers).toHaveLength(1);
+    expect(manager.setConcurrency).toHaveBeenCalledOnce();
+    expect(manager.setConcurrency).toHaveBeenCalledWith({ default: 4 });
+    expect(state.managerConfigs).toEqual([{ default: 2 }, { default: 4 }]);
+    expect(state.order).toEqual(["reload", "construct", "reload", "setConcurrency"]);
+    await listeners.get("session_shutdown")!({}, context());
   });
 
   it("clears interactive row timers when a session reloads", async () => {
@@ -153,10 +203,10 @@ describe("headless extension lifecycle", () => {
     await listeners.get("session_start")!({}, context());
     const firstManager = state.manager;
     let releaseDispose!: () => void;
-    state.store.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseDispose = resolve; }));
+    firstManager.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseDispose = resolve; }));
 
     const firstShutdown = listeners.get("session_shutdown")!({}, context());
-    await vi.waitFor(() => expect(state.store.dispose).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(firstManager.dispose).toHaveBeenCalledOnce());
     const secondShutdown = listeners.get("session_shutdown")!({}, context());
     const restart = listeners.get("session_start")!({}, context());
     expect(state.manager).toBe(firstManager);
@@ -179,7 +229,6 @@ describe("headless extension lifecycle", () => {
     expect(state.store.reload).toHaveBeenCalledOnce();
 
     await listeners.get("session_shutdown")!({}, context());
-    expect(state.store.dispose).toHaveBeenCalledOnce();
     expect(state.managers[0].dispose).toHaveBeenCalledOnce();
     expect(state.coordinators[0]).not.toHaveProperty("dispose");
   });

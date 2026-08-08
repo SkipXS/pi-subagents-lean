@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Extension-owned configuration persistence and recovery.** The config store
+  and file adapter now only load and normalize the manually maintained
+  `subagents-lean.json`; settings are changed manually, and existing valid
+  backups remain a non-destructive fallback for invalid or unreadable primary
+  files.
 - **Unused synchronous local skill-loading facade.** Removed the internal parent-thread metadata/catalog path and its sync-only cache and traversal branches. Agent `skills: true`, explicit skill lists, exclusions, trust filtering, caching, coalescing, and worker-backed asynchronous discovery remain supported.
 
 ## [0.3.0] - 2026-08-08
