@@ -38,14 +38,13 @@ describe("Agent render text boundary", () => {
     })).toBe(true);
   });
 
-  it("keeps row indicators separate from content and invalidates cached wrapping", () => {
+  it("caches unchanged text and invalidates when content changes", () => {
     const component = new AgentCallDetailsComponent();
     component.setText("abc");
     expect(visibleLines(component, 20)).toEqual(["abc"]);
-    component.setIndicator("✓");
-    expect(visibleLines(component, 20)).toEqual(["✓ abc"]);
-    expect(component.setIndicator("✓")).toBe(false);
+    expect(component.setText("abc")).toBe(false);
+    expect(visibleLines(component, 20)).toEqual(["abc"]);
     expect(component.setText("updated")).toBe(true);
-    expect(visibleLines(component, 20)).toEqual(["✓ updated"]);
+    expect(visibleLines(component, 20)).toEqual(["updated"]);
   });
 });

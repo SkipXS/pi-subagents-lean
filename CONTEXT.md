@@ -85,11 +85,13 @@ release a slot or mutate a removed record.
 
 Interactive rows are limited to `Agent` and `AgentContinue`. Headers show role,
 canonical ID when known, resolved model, thinking, prompt, and `Run: New` or
-`Run: Continued`. Queued is shown only from an authoritative lifecycle result.
-The custom renderer is static; Pi's pending shell owns open-row presentation,
-and print, HTML, RPC, JSON, and headless calls use no renderer timers. Terminal
-text is escaped and invalidation is guarded against stale, synchronous,
-asynchronous, and detached hosts.
+`Run: Continued`. The extension owns only this informative static content,
+complete results, usage details, terminal escaping, and restored metadata; Pi
+owns the pending, success, and error visual lifecycle. Real queued waits remain
+host-pending because queue state is not sent live to the renderer. The metadata
+bridge and versioned row state retain hydration, while invalidation is guarded
+against stale, synchronous, asynchronous, and detached hosts. Print, HTML, RPC,
+JSON, and headless calls use no renderer timers.
 
 ## Catalog, trust, and handoffs
 

@@ -92,7 +92,7 @@ describe("read-only config I/O with the real filesystem", () => {
     writeFileSync(`${path}.bak`, backupContents, "utf8");
 
     expect(createConfigFileIO(directory).load().concurrency).toEqual({ default: 6 });
-    expect(readFileSync(path)).toEqual(oversized);
+    expect(readFileSync(path).equals(oversized)).toBe(true);
     expect(readFileSync(`${path}.bak`, "utf8")).toBe(backupContents);
   });
 

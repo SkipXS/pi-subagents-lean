@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Static Agent row rendering.** `Agent` and `AgentContinue` retain their informative custom headers, metadata hydration, prompts, results, and terminal markers without extension-owned row timers or lifecycle machinery; Pi owns pending-row presentation.
+- **Pi-owned Agent row lifecycle.** `Agent` and `AgentContinue` retain informative static headers, metadata hydration, complete prompts, results, usage details, and terminal-safe text while Pi owns pending, success, and error row presentation; real queued waits remain host-pending because queue state is not sent live to the renderer.
 
 ## [0.3.0] - 2026-08-08
 

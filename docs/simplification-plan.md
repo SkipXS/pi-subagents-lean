@@ -57,9 +57,9 @@ Parent resumes after both settle
 - Retained history keeps bounded prompt/response/error projections, usage,
   compaction, kind, and status. The full caller response remains on the
   foreground promise, separate from bounded record text.
-- Interactive rows retain escaped text, coalesced invalidation, static
-  lifecycle markers, and Pi's pending shell. All renderer paths remain
-  timer-free.
+- Interactive rows retain escaped static content, metadata hydration, and
+  coalesced invalidation while Pi owns the pending, success, and error visual
+  lifecycle. All renderer paths remain timer-free.
 - Catalog live refresh, project trust, model/thinking resolution, worktrees,
   skills, extensions, and useful timing diagnostics remain covered.
 
@@ -79,7 +79,7 @@ Focused tests cover exact schemas, unknown-property rejection, child exclusion,
 foreground promise identity and terminal races, concurrent calls, FIFO excess,
 parent cancellation, shutdown settlement, continuation validity and retention,
 full caller responses, deterministic history bounds, renderer New/Continued
-headers, queued authority, escaping, static lifecycle markers, invalidation
-safety, live catalog/trust, worktree behavior, and package/Pi loading. Active documentation
-and smoke contracts describe only the two foreground tools; released changelog
-history remains archival.
+headers, Pi-owned lifecycle, escaping, metadata restoration, invalidation
+safety, live catalog/trust, worktree behavior, and package/Pi loading. Active
+documentation and smoke contracts describe only the two foreground tools;
+released changelog history remains archival.
