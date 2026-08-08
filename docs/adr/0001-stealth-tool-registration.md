@@ -1,6 +1,6 @@
 # Fixed tool registration
 
-The four public tools are registered once at extension init with minimal,
+The two public tools, `Agent` and `AgentContinue`, are registered once at extension init with minimal,
 byte-stable parameter schemas and concise static descriptions. They have no
 prompt snippets or guidelines, parameter descriptions, or runtime-generated
 enums. The required `agent` field is always a bare `Type.String()`; it never

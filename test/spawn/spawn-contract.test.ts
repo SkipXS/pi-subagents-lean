@@ -13,7 +13,6 @@ describe("AcceptedSpawn immutability", () => {
       type: "trusted",
       prompt: "task",
       description: "Trusted",
-      runInBackground: false,
       agentConfig: { name: "trusted", description: "Trusted", systemPrompt: "" },
       projectTrusted: true,
       runtimeSettings: {
@@ -24,7 +23,6 @@ describe("AcceptedSpawn immutability", () => {
       type: "untrusted",
       prompt: "task",
       description: "Untrusted",
-      runInBackground: false,
       agentConfig: { name: "untrusted", description: "Untrusted", systemPrompt: "" },
       runtimeSettings: {
         agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
@@ -43,7 +41,6 @@ describe("AcceptedSpawn immutability", () => {
       type: "bounded",
       prompt: "task",
       description: "description",
-      runInBackground: false,
       agentConfig: { name: "bounded", description: "description", systemPrompt: "instructions" },
       runtimeSettings: {
         agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
@@ -85,7 +82,6 @@ describe("AcceptedSpawn immutability", () => {
       type: "nested",
       prompt: "task",
       description: "Nested",
-      runInBackground: false,
       agentConfig,
       runtimeSettings,
       invocation,

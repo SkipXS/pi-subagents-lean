@@ -81,7 +81,7 @@ try {
       if (result.errors.length > 0) throw new Error(JSON.stringify(result.errors));
       if (result.extensions.length !== 1) throw new Error("Expected exactly one loaded extension");
       const extension = result.extensions[0];
-      const expectedToolNames = ["Agent", "AgentContinue", "StopAgent", "AgentStatus"];
+      const expectedToolNames = ["Agent", "AgentContinue"];
       const tools = [...extension.tools.keys()];
       if (JSON.stringify(tools) !== JSON.stringify(expectedToolNames)) {
         throw new Error("Unexpected tools: " + tools.join(","));
@@ -93,33 +93,19 @@ try {
           required: ["prompt", "agent"],
           properties: {
             prompt: { type: "string", maxLength: 262144 },
-            description: { type: "string", maxLength: 8192 },
             agent: { type: "string" },
-            run_in_background: { type: "boolean" },
+            description: { type: "string", maxLength: 8192 },
             worktree_path: { type: "string" },
           },
         },
         AgentContinue: {
           type: "object",
           additionalProperties: false,
-          required: ["agent_id", "prompt", "run_in_background"],
+          required: ["agent_id", "prompt"],
           properties: {
             agent_id: { type: "string", maxLength: 128 },
             prompt: { type: "string", maxLength: 262144 },
-            run_in_background: { type: "boolean" },
           },
-        },
-        StopAgent: {
-          type: "object",
-          additionalProperties: false,
-          required: ["agent_id"],
-          properties: { agent_id: { type: "string", maxLength: 128 } },
-        },
-        AgentStatus: {
-          type: "object",
-          additionalProperties: false,
-          required: [],
-          properties: {},
         },
       };
       function normalizedContract(definition) {

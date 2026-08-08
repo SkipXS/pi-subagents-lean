@@ -1,5 +1,5 @@
 /**
- * agent-execution-service.ts — runner turns, parent abort, and slot cleanup.
+ * agent-execution-service.ts — runner turns, parent cancellation, and slots.
  *
  * AgentManager accepts immutable work and delegates all live execution work to
  * this service. Queue order remains FIFO because the service is the sole owner
@@ -13,7 +13,6 @@ import { AgentExecutionResources } from "./agent-execution-resources.js";
 import type {
   AgentExecutionSummary,
   AgentRecord,
-  StopInitiator,
   ToolActivity,
 } from "../types.js";
 import type { AcceptedSpawn } from "../spawn/spawn-contract.js";
@@ -21,17 +20,15 @@ import { FifoConcurrencyScheduler } from "./concurrency-scheduler.js";
 import { ExecutionTelemetry, type ExecutionBaseline } from "./execution-telemetry.js";
 import { errorMessage } from "../utils.js";
 import { AgentRecordStore } from "./agent-record-store.js";
-import { retainAgentText } from "./agent-string-limits.js";
 
 export type ExecutionStartHandler = (record: AgentRecord) => void;
-export type ExecutionCompleteHandler = (record: AgentRecord, execution: AgentExecutionSummary) => void;
+
 export interface ContinueExecutionRequest {
   record: AgentRecord;
   session: AgentSession;
   executionId: string;
   baseline: ExecutionBaseline;
   prompt: string;
-  isBackground: boolean;
   signal?: AbortSignal;
   onToolActivity?: (activity: ToolActivity) => void;
   onTextDelta?: (delta: string, fullText: string) => void;
@@ -66,17 +63,20 @@ interface ExecutionServiceOptions {
   telemetry: ExecutionTelemetry;
   concurrency: number;
   onStart?: ExecutionStartHandler;
-  onComplete?: ExecutionCompleteHandler;
+  onSettled?: () => void;
   onCost?: (cost: number) => void;
 }
+
 export class AgentExecutionService {
   private readonly scheduler: FifoConcurrencyScheduler<ExecutionTask>;
   private readonly resources: AgentExecutionResources;
   private readonly store: AgentRecordStore;
   private readonly telemetry: ExecutionTelemetry;
   private readonly onStart?: ExecutionStartHandler;
-  private onComplete?: ExecutionCompleteHandler;
+  private readonly onSettled?: () => void;
   private readonly onCost?: (cost: number) => void;
+  private readonly activeTasks = new Map<string, ExecutionTask>();
+  private disposed = false;
 
   constructor(options: ExecutionServiceOptions) {
     this.store = options.store;
@@ -84,9 +84,10 @@ export class AgentExecutionService {
     this.telemetry = options.telemetry;
     this.scheduler = new FifoConcurrencyScheduler(options.concurrency);
     this.onStart = options.onStart;
-    this.onComplete = options.onComplete;
+    this.onSettled = options.onSettled;
     this.onCost = options.onCost;
   }
+
   /** Whether a newly accepted task must wait for a global slot. */
   shouldQueue(): boolean {
     return this.scheduler.shouldQueue();
@@ -104,16 +105,22 @@ export class AgentExecutionService {
       1,
     ));
   }
-  /** Submit a record whose initial lifecycle status already reflects this slot decision. */
+
+  /** Submit a record whose lifecycle already reflects its slot decision. */
   submit(task: ExecutionTask): void {
+    if (this.disposed) {
+      if (task.kind === "continue") task.request.reject(new Error("Agent session shut down"));
+      else task.resolve?.("");
+      return;
+    }
+    this.activeTasks.set(task.id, task);
     if (task.record.lifecycle.status === "queued") {
       this.scheduler.enqueue(task);
-      this.resources.bindParentAbortSignal(task.id, this.signalFor(task), () => this.abort(task.id, "parent"));
-      this.store.notifyActivityObservers();
+      this.resources.bindParentAbortSignal(task.id, this.signalFor(task), () => this.cancel(task.id));
       return;
     }
 
-    this.resources.bindParentAbortSignal(task.id, this.signalFor(task), () => this.abort(task.id, "parent"));
+    this.resources.bindParentAbortSignal(task.id, this.signalFor(task), () => this.cancel(task.id));
     if (task.record.lifecycle.status !== "running") {
       this.finishStoppedBeforeStart(task);
       return;
@@ -123,7 +130,6 @@ export class AgentExecutionService {
     try {
       const promise = this.startTask(task);
       if (task.kind === "spawn" && task.resolve) promise.then(task.resolve);
-      this.store.notifyActivityObservers();
     } catch (error) {
       this.scheduler.releaseSlot();
       if (task.kind === "spawn") {
@@ -138,12 +144,8 @@ export class AgentExecutionService {
       this.startQueuedEntries(this.scheduler.takeNext((entry) => this.canStartQueuedEntry(entry)));
     }
   }
-  abort(id: string, stoppedBy?: StopInitiator): boolean {
-    const record = this.store.get(id);
-    if (!record) return false;
-    return this.stopRecord(record, stoppedBy);
-  }
-  /** Finish a task that did not reach a runner; no scheduler slot is owned. */
+
+  /** Finish work that never reached a runner; no scheduler slot is owned. */
   finishUnstartedExecution(
     record: AgentRecord,
     execution: AgentExecutionSummary,
@@ -152,36 +154,53 @@ export class AgentExecutionService {
   ): boolean {
     const finished = this.store.finishUnstarted(record, execution, status, error);
     if (!finished) return false;
-    if (execution.mode === "background") {
-      this.releaseBackgroundPromiseWhenSettled(record, record.execution.promise);
-    }
+    this.activeTasks.delete(record.id);
     this.telemetry.finalizeUnstartedExecution(execution);
     this.telemetry.forgetExecution(execution.id);
     this.finalizeOutputLog(record);
     this.resources.clearParentAbortSignal(record.id);
-    this.store.notifyActivityObservers();
-    this.safeNotifyComplete(record, execution);
+    this.safeNotifySettled();
     return true;
   }
-  finalizeOutputLog(record: AgentRecord): void { this.resources.finalizeOutputLog(record); }
-  releaseExecution(record: AgentRecord): void { this.resources.releaseExecution(record); }
+
+  finalizeOutputLog(record: AgentRecord): void {
+    this.resources.finalizeOutputLog(record);
+  }
+
+  releaseExecution(record: AgentRecord): void {
+    this.resources.releaseExecution(record);
+  }
+
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     for (const entry of this.scheduler.clear()) {
       if (entry.kind === "continue") entry.request.reject(new Error("Agent session shut down"));
       else entry.resolve?.("");
     }
     this.resources.clearParentAbortSignals();
     const retainedRecords = this.store.list();
-    for (const record of retainedRecords) record.execution.abortController?.abort();
     for (const record of retainedRecords) {
+      const active = this.activeTasks.get(record.id);
+      if (record.lifecycle.status === "queued") {
+        const execution = this.store.activeExecution(record);
+        if (execution) this.finishUnstartedExecution(record, execution, "stopped", "Agent session shut down");
+      } else if (record.lifecycle.status === "running") {
+        record.execution.abortController?.abort();
+        this.store.stopRunning(record);
+        this.store.markSettled(record);
+      }
+      if (active?.kind === "continue") active.request.reject(new Error("Agent session shut down"));
+      else active?.resolve?.("");
+      this.activeTasks.delete(record.id);
       this.telemetry.forgetRecord(record);
       this.releaseExecution(record);
       this.store.remove(record.id);
     }
+    this.activeTasks.clear();
     this.resources.dispose();
-    this.store.notifyActivityObservers();
-    this.store.clearActivityObservers();
   }
+
   private startTask(task: ExecutionTask): Promise<string> {
     return task.kind === "spawn"
       ? this.startSpawn(task)
@@ -192,16 +211,15 @@ export class AgentExecutionService {
     const { id, record, execution, pi, ctx } = task;
     let acceptedSpawn: AcceptedSpawn | undefined = task.acceptedSpawn;
     this.store.beginSpawn(record);
-    this.resources.prepareSpawnOutput(record, id, acceptedSpawn!.prompt);
+    this.resources.prepareSpawnOutput(record, id, acceptedSpawn.prompt);
 
     this.onStart?.(record);
     execution.status = "running";
 
-    let publicPromise = record.execution.promise;
-    const promise = runAgent(ctx, acceptedSpawn!.type, acceptedSpawn!.prompt, {
+    const promise = runAgent(ctx, acceptedSpawn.type, acceptedSpawn.prompt, {
       pi,
       agentId: id,
-      acceptedSpawn: acceptedSpawn!,
+      acceptedSpawn,
       signal: record.execution.abortController!.signal,
       ...this.telemetry.createCallbacks(record, {}, execution.id),
       onSessionCreated: (session) => {
@@ -216,11 +234,7 @@ export class AgentExecutionService {
     })
       .then(({ responseText, session, aborted }) => {
         if (this.telemetry.isCurrentRecord(record)) record.execution.session = session;
-        if (execution.mode === "foreground") execution.deliveredText = retainAgentText(responseText);
         this.finishTurnExecution(record, execution, { responseText, aborted });
-        // Background callers have no foreground consumer. Release the stable
-        // promise after it settles; identity checking protects later turns.
-        if (execution.mode === "background") this.releaseBackgroundPromiseWhenSettled(record, publicPromise);
         acceptedSpawn = undefined;
         return responseText;
       })
@@ -230,16 +244,13 @@ export class AgentExecutionService {
           execution,
           { responseText: "", aborted: false, error: errorMessage(error) },
         );
-        if (execution.mode === "background") this.releaseBackgroundPromiseWhenSettled(record, publicPromise);
         acceptedSpawn = undefined;
         return "";
       });
-    // A queued spawn already owns its stable public promise. An unqueued
-    // legacy/direct service caller gets the runner promise as its identity.
-    if (!record.execution.promise) {
-      record.execution.promise = promise;
-      publicPromise = promise;
-    }
+
+    // The manager normally installs the caller-facing promise at acceptance.
+    // Keep direct service callers functional without replacing an existing one.
+    if (!record.execution.promise) record.execution.promise = promise;
     return promise;
   }
 
@@ -248,7 +259,6 @@ export class AgentExecutionService {
     const {
       session,
       baseline,
-      isBackground,
       signal,
       onToolActivity,
       onTextDelta,
@@ -262,13 +272,11 @@ export class AgentExecutionService {
     this.store.beginContinuation(record, execution);
     record.execution.abortController = new AbortController();
     this.resources.clearParentAbortSignal(id);
-    this.resources.bindParentAbortSignal(id, signal, () => this.abort(id, "parent"));
+    this.resources.bindParentAbortSignal(id, signal, () => this.cancel(id));
 
-    this.resources.prepareContinuationOutput(record, id, promptForExecution!, session);
-
+    this.resources.prepareContinuationOutput(record, id, promptForExecution, session);
     this.onStart?.(record);
-    let publicPromise = record.execution.promise;
-    const promise = executeAgentTurn(session, promptForExecution!, {
+    const promise = executeAgentTurn(session, promptForExecution, {
       signal: record.execution.abortController.signal,
       ...this.telemetry.createCallbacks(record, { onToolActivity }, execution.id),
       onTextDelta: (delta, fullText) => {
@@ -277,9 +285,7 @@ export class AgentExecutionService {
       },
     })
       .then(({ responseText, aborted }) => {
-        if (!isBackground) execution.deliveredText = retainAgentText(responseText);
         this.finishTurnExecution(record, execution, { responseText, aborted }, baseline);
-        if (isBackground) this.releaseBackgroundPromiseWhenSettled(record, publicPromise);
         promptForExecution = undefined;
         resolve(responseText);
         return responseText;
@@ -291,18 +297,14 @@ export class AgentExecutionService {
           { responseText: "", aborted: false, error: errorMessage(error) },
           baseline,
         );
-        if (isBackground) this.releaseBackgroundPromiseWhenSettled(record, publicPromise);
         promptForExecution = undefined;
         resolve("");
         return "";
       });
+
     // AgentManager installs the caller-facing continuation promise before the
-    // task starts. Keep it stable; this internal promise is only the runner
-    // completion chain used for scheduler release.
-    if (!record.execution.promise) {
-      record.execution.promise = promise;
-      publicPromise = promise;
-    }
+    // task starts. The runner promise is only the scheduler completion chain.
+    if (!record.execution.promise) record.execution.promise = promise;
     return promise;
   }
 
@@ -312,7 +314,7 @@ export class AgentExecutionService {
     outcome: { responseText: string; aborted: boolean; error?: string },
     baseline?: ExecutionBaseline,
   ): void {
-    if (record.stats.executions?.at(-1) !== execution) {
+    if (this.disposed || this.store.get(record.id) !== record || record.stats.executions?.at(-1) !== execution) {
       this.telemetry.forgetExecution(execution.id);
       return;
     }
@@ -325,10 +327,10 @@ export class AgentExecutionService {
     this.telemetry.forgetExecution(execution.id);
     this.onCost?.(execution.usage?.cost ?? 0);
     this.store.completeTurn(record, execution, outcome, completedAt);
+    this.activeTasks.delete(record.id);
 
     this.finalizeCompletedExecution(record);
-    this.store.notifyActivityObservers();
-    this.safeNotifyComplete(record, execution);
+    this.safeNotifySettled();
   }
 
   private finalizeCompletedExecution(record: AgentRecord): void {
@@ -365,7 +367,6 @@ export class AgentExecutionService {
       try {
         const promise = this.startTask(entry);
         if (entry.kind === "spawn") promise.then((result) => entry.resolve?.(result));
-        this.store.notifyActivityObservers();
         pending.push(...this.scheduler.takeNext((candidate) => this.canStartQueuedEntry(candidate)));
       } catch (error) {
         this.scheduler.releaseSlot();
@@ -378,7 +379,13 @@ export class AgentExecutionService {
     }
   }
 
-  private stopRecord(record: AgentRecord, stoppedBy?: StopInitiator): boolean {
+  private cancel(id: string): boolean {
+    const record = this.store.get(id);
+    if (!record) return false;
+    return this.cancelRecord(record);
+  }
+
+  private cancelRecord(record: AgentRecord): boolean {
     const wasQueued = record.lifecycle.status === "queued";
     if (!wasQueued && record.lifecycle.status !== "running") return false;
 
@@ -386,7 +393,7 @@ export class AgentExecutionService {
       ? this.scheduler.removeWhere((entry) => entry.id === record.id)
       : [];
     if (wasQueued) {
-      record.lifecycle.stoppedBy = stoppedBy;
+      record.lifecycle.stoppedBy = "parent";
       const activeExecution = this.store.activeExecution(record);
       if (!activeExecution) return false;
       this.finishUnstartedExecution(record, activeExecution, "stopped");
@@ -397,9 +404,8 @@ export class AgentExecutionService {
     }
 
     record.execution.abortController?.abort();
-    this.store.stopRunning(record, stoppedBy);
+    this.store.stopRunning(record);
     this.resources.clearParentAbortSignal(record.id);
-    this.store.notifyActivityObservers();
     return true;
   }
 
@@ -412,34 +418,13 @@ export class AgentExecutionService {
     this.resources.clearParentAbortSignal(task.id);
     this.telemetry.forgetRecord(task.record);
     this.store.remove(task.id);
-    this.store.notifyActivityObservers();
   }
 
-  private releaseBackgroundPromiseWhenSettled(
-    record: AgentRecord,
-    expectedPromise: Promise<string> | undefined,
-  ): void {
-    const promise = expectedPromise;
-    // A stale completion may arrive after a continuation replaced the record's
-    // promise. Never attach cleanup to that newer execution.
-    if (!promise || record.execution.promise !== promise) return;
-    // Register before the service resolves/rejects the public promise so a
-    // foreground observer awaiting the same object sees it cleared afterward.
-    void promise.then(
-      () => this.clearExecutionPromise(record, promise),
-      () => this.clearExecutionPromise(record, promise),
-    );
-  }
-
-  private clearExecutionPromise(record: AgentRecord, promise: Promise<string>): void {
-    if (record.execution.promise === promise) record.execution.promise = undefined;
-  }
-
-  private safeNotifyComplete(record: AgentRecord, execution: AgentExecutionSummary): void {
+  private safeNotifySettled(): void {
     try {
-      this.onComplete?.(record, execution);
+      this.onSettled?.();
     } catch {
-      // Completion observers must not affect lifecycle or scheduler cleanup.
+      // Retention bookkeeping must not affect lifecycle or scheduler cleanup.
     }
   }
 }

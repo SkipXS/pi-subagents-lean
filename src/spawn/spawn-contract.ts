@@ -23,7 +23,6 @@ export interface ResolvedSpawn {
   readonly prompt: string;
   /** Retained/display description; capped at 8 KiB UTF-8. */
   readonly description: string;
-  readonly runInBackground: boolean;
   readonly agentConfig: AgentConfig;
   readonly runtimeSettings: SubagentRuntimeSettings;
   /** Trust snapshot captured before tool-preflight awaits. */
@@ -127,7 +126,6 @@ function snapshotResolvedFields(spawn: ResolvedSpawn): ResolvedSpawn {
     type: spawn.type,
     prompt: spawn.prompt,
     description: retainAgentDescription(spawn.description),
-    runInBackground: spawn.runInBackground,
     agentConfig: freezeAgentConfig(spawn.agentConfig),
     runtimeSettings: snapshotRuntimeSettings(spawn.runtimeSettings),
     projectTrusted: spawn.projectTrusted,

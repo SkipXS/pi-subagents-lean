@@ -25,7 +25,7 @@ import type { AgentConfig } from "../../src/agents/types.js";
 
 describe("EXCLUDED_TOOL_NAMES", () => {
   it("contains every root control and keeps them out regardless of activeTools", () => {
-    expect(EXCLUDED_TOOL_NAMES).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
+    expect(EXCLUDED_TOOL_NAMES).toEqual(["Agent", "AgentContinue"]);
     const controls = [...EXCLUDED_TOOL_NAMES];
     expect(resolveVisibleTools({ activeTools: ["read", ...controls], tools: ["read", ...controls] })).toEqual(["read"]);
     expect(resolveSessionAllowedTools({ registeredTools: ["read", ...controls], tools: undefined })).toEqual(["read"]);

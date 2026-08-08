@@ -8,11 +8,9 @@
 
 import { randomUUID } from "node:crypto";
 import type {
-  AgentExecutionMode,
   AgentExecutionSummary,
   AgentRecord,
-  AgentStatus,
-  StopInitiator,
+  AgentLifecycleStatus,
 } from "../types.js";
 import type { AcceptedSpawn } from "../spawn/spawn-contract.js";
 import {
@@ -36,17 +34,6 @@ export const MAX_RETAINED_EXECUTION_SUMMARIES = 128;
 /** Maximum UTF-8 bytes used by text fields in retained summaries per record. */
 export const MAX_RETAINED_EXECUTION_SUMMARY_TEXT_BYTES = MAX_RETAINED_EXECUTION_TEXT_BUDGET_BYTES;
 
-export interface AgentActivityProjection {
-  readonly agentId: string;
-  readonly type: string;
-  readonly mode: AgentExecutionMode;
-  readonly status: "queued" | "running";
-  readonly executionId: string;
-}
-
-export type AgentActivitySnapshot = readonly AgentActivityProjection[];
-export type AgentActivityObserver = (snapshot: AgentActivitySnapshot) => void;
-
 export interface SpawnRecordResult {
   id: string;
   record: AgentRecord;
@@ -68,7 +55,6 @@ function executionSummaryTextBytes(executions: readonly AgentExecutionSummary[])
   for (const execution of executions) {
     if (typeof execution.prompt === "string") total += utf8ByteLength(execution.prompt);
     if (execution.responseText !== undefined) total += utf8ByteLength(execution.responseText);
-    if (execution.deliveredText !== undefined) total += utf8ByteLength(execution.deliveredText);
     if (execution.error !== undefined) total += utf8ByteLength(execution.error);
   }
   return total;
@@ -77,7 +63,6 @@ function executionSummaryTextBytes(executions: readonly AgentExecutionSummary[])
 export class AgentRecordStore {
   private readonly records = new Map<string, AgentRecord>();
   private readonly recordOrdinals = new Map<string, number>();
-  private readonly activityObservers = new Set<AgentActivityObserver>();
   private readonly createId: () => string;
   private nextRecordOrdinal = 0;
 
@@ -117,7 +102,6 @@ export class AgentRecordStore {
       // The full accepted prompt remains only on the active execution task;
       // retained history keeps a bounded diagnostic projection.
       prompt: retainExecutionPrompt(acceptedSpawn.prompt),
-      mode: acceptedSpawn.runInBackground ? "background" : "foreground",
       kind: "new",
       status,
       startedAt,
@@ -150,7 +134,6 @@ export class AgentRecordStore {
     record: AgentRecord,
     executionId: string,
     prompt: string,
-    mode: AgentExecutionMode,
     status: "queued" | "running",
     startedAt = Date.now(),
   ): AgentExecutionSummary {
@@ -158,7 +141,6 @@ export class AgentRecordStore {
     const execution: AgentExecutionSummary = {
       id: executionId,
       prompt: retainExecutionPrompt(prompt),
-      mode,
       kind: "continued",
       status,
       startedAt,
@@ -234,8 +216,8 @@ export class AgentRecordStore {
     execution: AgentExecutionSummary,
     outcome: TurnOutcome,
     completedAt = Date.now(),
-  ): AgentStatus {
-    const status: AgentStatus = record.lifecycle.status === "stopped"
+  ): AgentLifecycleStatus {
+    const status: AgentLifecycleStatus = record.lifecycle.status === "stopped"
       ? "stopped"
       : outcome.error !== undefined
         ? "error"
@@ -278,9 +260,9 @@ export class AgentRecordStore {
   }
 
   /** Mark an active runner stopped while leaving settlement to its completion callback. */
-  stopRunning(record: AgentRecord, stoppedBy?: StopInitiator, stoppedAt = Date.now()): void {
+  stopRunning(record: AgentRecord, stoppedAt = Date.now()): void {
     record.lifecycle.status = "stopped";
-    record.lifecycle.stoppedBy = stoppedBy;
+    record.lifecycle.stoppedBy = "parent";
     record.lifecycle.completedAt = stoppedAt;
     record.result = undefined;
     const activeExecution = this.activeExecution(record, "running");
@@ -293,11 +275,6 @@ export class AgentRecordStore {
   markSettled(record: AgentRecord): void {
     record.lifecycle.settled = true;
     this.capRetainedStrings(record);
-    this.capExecutionHistory(record);
-  }
-
-  /** Reconcile a projection added by a later delivery boundary. */
-  reconcileExecutionHistory(record: AgentRecord): void {
     this.capExecutionHistory(record);
   }
 
@@ -329,9 +306,6 @@ export class AgentRecordStore {
       execution.responseText = execution.responseText === undefined
         ? undefined
         : retainAgentText(execution.responseText);
-      execution.deliveredText = execution.deliveredText === undefined
-        ? undefined
-        : retainAgentText(execution.deliveredText);
       execution.error = retainAgentError(execution.error);
     }
   }
@@ -360,54 +334,4 @@ export class AgentRecordStore {
     return execution.status === "queued" || execution.status === "running";
   }
 
-  /** Return a detached, sorted projection for footer/status observers. */
-  getActivitySnapshot(): AgentActivitySnapshot {
-    const projections: AgentActivityProjection[] = [];
-    for (const record of this.records.values()) {
-      const status = record.lifecycle.status;
-      if (status !== "running" && status !== "queued") continue;
-      const execution = [...(record.stats.executions ?? [])].reverse().find((candidate) =>
-        candidate.status === status && (candidate.status === "running" || candidate.status === "queued"),
-      );
-      if (!execution) continue;
-      projections.push(Object.freeze({
-        agentId: record.id,
-        type: record.display.type,
-        mode: execution.mode,
-        status,
-        executionId: execution.id,
-      }));
-    }
-    projections.sort((left, right) => left.agentId < right.agentId ? -1 : left.agentId > right.agentId ? 1 : 0);
-    return Object.freeze(projections);
-  }
-
-  subscribeActivity(observer: AgentActivityObserver): () => void {
-    this.activityObservers.add(observer);
-    try {
-      observer(this.getActivitySnapshot());
-    } catch {
-      // Presentation observers must never affect lifecycle work.
-    }
-    let subscribed = true;
-    return () => {
-      if (!subscribed) return;
-      subscribed = false;
-      this.activityObservers.delete(observer);
-    };
-  }
-
-  notifyActivityObservers(): void {
-    for (const observer of [...this.activityObservers]) {
-      try {
-        observer(this.getActivitySnapshot());
-      } catch {
-        // Presentation observers must never affect lifecycle work.
-      }
-    }
-  }
-
-  clearActivityObservers(): void {
-    this.activityObservers.clear();
-  }
 }

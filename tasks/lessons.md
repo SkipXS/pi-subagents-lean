@@ -27,7 +27,7 @@
 ### Verification
 - When merge agent reports success, verify the actual merge commit exists.
 - Don't assume — verify. Code review catches silent production bugs.
-- `ExtensionAPI` (pi) rejects calls to old ctx. Add try-catch around sendMessage for defense-in-depth.
+- Host callbacks can reject stale session context objects. Keep foreground lifecycle cleanup defensive and do not retain host context beyond the active call.
 - A trailing `?? N` fallback on optional config fields looks dead but is forced by `T | undefined` static type. Run typecheck before removing "redundant" fallbacks.
 - Never use `general-purpose` when workflow specifies a specialized agent type. Check workflow docs for exact `agent` values before spawning.
 
@@ -39,16 +39,13 @@
 - Diff old paths before merging to ensure all side effects are preserved.
 - Module-level singletons still require vi.mock(). Accept module singleton as sufficient if composition root goal is otherwise achieved.
 
-### pi-ai API
-- `deliverAs: "steer"` only queues while the parent agent is running. If the agent is idle when the message arrives, pi drops it silently.
-- `deliverAs: "followUp"` waits for the agent to finish, then delivers. Use this for notifications that must arrive regardless of agent state.
-- Check `ctx.isIdle()` at call time to pick the right delivery mode. Don't assume agent state from caller context.
+### Foreground agent API
+- `Agent` and `AgentContinue` are foreground-only and await their complete caller response. The extension has no deferred result delivery or host message-send path; renderer metadata is carried on the normal tool result.
 
 ### Subagent Session Lifecycle
-- Subagents are built with `createAgentSession`, which runs its own `DefaultResourceLoader.reload()` and `session.bindExtensions()`. That re-executes EVERY extension factory and re-fires `session_start`/`session_shutdown` in the subagent's context, NOT just the parent's.
-- An extension that writes parent-owned state in its factory or `session_start` handler (module-level shell singletons like `pi`/`ctx`) will have that state clobbered by every subagent spawn. Last subagent to load wins, so later reads route to a dead/wrong session. Failures are silent because misrouted `sendMessage` swallows internally.
-- Fix: bracket the subagent entry point (`runAgent`) with a nesting-depth flag. Make the factory + `session_start`/`session_shutdown` handlers a no-op while a subagent is in flight. Parent reload still refreshes the shell (flag is false outside `runAgent`). `dispose()` gates deferred work after `session_shutdown`.
-- `AgentSession.dispose()` does NOT emit `session_shutdown` (only host teardown does). So subagent cleanup won't dispose parent state, but subagent `bindExtensions` WILL fire the parent's `session_start` handler.
+- Subagents are built with `createAgentSession`, which runs its own `DefaultResourceLoader.reload()` and `session.bindExtensions()`. That re-executes every extension factory and re-fires `session_start`/`session_shutdown` in the child context, not just the parent's.
+- Parent-owned shell state is protected by the registered `AsyncLocalStorage` child-runtime marker. `src/index.ts` stays inert in that context, and root shell/control guards continue to reject child access.
+- `runAgent` enters the child context with `runWithSubagentRuntime(createSubagentRuntimeContext(), ...)`; no mutable nesting-depth compatibility flag is required. `AgentSession.dispose()` does not emit `session_shutdown`, so child cleanup cannot dispose parent state.
 
 ### Extension Tools
 - Registry/allowlist gates reject before you can patch the result. When tools/resources are silently missing, find the gate first (search where the set is built and filtered), and seed it at construction — pushing names in after construction cannot resurrect filtered-out entries. `setActiveToolsByName` silently ignoring unknown names is the tell that the registry, not activation, is the bug.

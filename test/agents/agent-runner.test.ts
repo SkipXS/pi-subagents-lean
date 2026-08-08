@@ -168,7 +168,6 @@ function runAgent(
     type,
     prompt,
     description: options.description ?? prompt,
-    runInBackground: options.runInBackground ?? options.isBackground === true,
     agentConfig,
     runtimeSettings,
     projectTrusted: options.projectTrusted === true,
@@ -1399,7 +1398,7 @@ describe("tools field — extension tool names and ext/all syntax", () => {
   it("loads extensions while tools=false keeps extension and root tools out of the session", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue([
-      "read", "web_search", "Agent", "StopAgent", "AgentStatus",
+      "read", "web_search", "Agent", "AgentContinue",
     ]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
     mockModules.mockGetAgentConfig.mockReturnValue({
@@ -1682,7 +1681,6 @@ describe("runAgent — context file gating", () => {
       type: "trusted",
       prompt: "trusted prompt",
       description: "Trusted",
-      runInBackground: false,
       agentConfig: config,
       runtimeSettings: {
         agent: { includeContextFiles: false, disableDefaultAgents: false, orchestrationPrompt: true },
@@ -1929,7 +1927,6 @@ describe("runAgent — agent config snapshot", () => {
       type: "accepted",
       prompt: "accepted prompt",
       description: "Accepted",
-      runInBackground: false,
       agentConfig: config,
       runtimeSettings,
       model: model as any,

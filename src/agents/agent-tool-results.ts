@@ -64,8 +64,7 @@ export function finalAgentRenderMetadata(
     if (session?.model) modelKey = `${session.model.provider}/${session.model.id}`;
     if (session?.thinkingLevel) thinking = session.thinkingLevel;
   } catch {
-    // Terminal/legacy records may expose no live session; keep the resolved
-    // preflight values, which are still sufficient to render the row.
+    // Terminal records may expose no live session; keep preflight values.
   }
   const agentId = typeof record?.id === "string" && record.id.length > 0 ? record.id : undefined;
   return {
@@ -87,7 +86,7 @@ function recordModelKey(record: AgentRecord | undefined): string | undefined {
       return `${sessionModel.provider}/${sessionModel.id}`;
     }
   } catch {
-    // A disposed/legacy session may throw while its invocation is still safe.
+    // A disposed session may expose no live model.
   }
   try {
     const persisted = record?.display?.invocation?.modelKey;
@@ -97,24 +96,14 @@ function recordModelKey(record: AgentRecord | undefined): string | undefined {
   }
 }
 
-/**
- * Build renderer metadata for AgentContinue/StopAgent from a retained record.
- * The invocation fallback is important while an accepted agent is queued and
- * has not created its session yet.
- */
+/** Build renderer metadata for AgentContinue from a retained record. */
 export function agentControlRenderMetadata(
   record: AgentRecord | undefined,
   requestedId: string,
   prompt = "",
-  execution?: { mode: "foreground" | "background"; kind: "continued" },
 ): AgentCallRenderMetadata {
   if (!record) {
-    return {
-      agentId: requestedId || "—",
-      role: "—",
-      prompt,
-      ...execution,
-    };
+    return { agentId: requestedId || "—", role: "—", prompt, kind: "continued" };
   }
 
   let role = "—";
@@ -124,24 +113,20 @@ export function agentControlRenderMetadata(
       role = record.display.type;
     }
   } catch {
-    // Legacy/malformed terminal records still render their safe ID and dashes.
+    // Malformed retained records still render their safe ID.
   }
   try {
     const sessionThinking = record.execution?.session?.thinkingLevel;
-    if (typeof sessionThinking === "string" && sessionThinking.length > 0) {
-      thinking = sessionThinking;
-    }
+    if (typeof sessionThinking === "string" && sessionThinking.length > 0) thinking = sessionThinking;
   } catch {
     // Fall back to the persisted invocation below.
   }
   if (thinking === undefined) {
     try {
       const invocationThinking = record.display?.invocation?.thinkingLevel;
-      if (typeof invocationThinking === "string" && invocationThinking.length > 0) {
-        thinking = invocationThinking;
-      }
+      if (typeof invocationThinking === "string" && invocationThinking.length > 0) thinking = invocationThinking;
     } catch {
-      // Keep the dash for malformed legacy records.
+      // Keep the dash for malformed retained records.
     }
   }
 
@@ -153,22 +138,15 @@ export function agentControlRenderMetadata(
     ...(model !== undefined ? { model } : {}),
     ...(thinking !== undefined ? { thinking } : {}),
     prompt,
-    ...execution,
+    kind: "continued",
   };
 }
 
-/**
- * Result text plus status note, for tool delivery.
- *
- * Shared by the foreground tool result and the subagent-result nudge so both
- * callers stay in sync on the nullish default and separator handling — they
- * have diverged before. getStatusNote owns the leading separator.
- */
+/** Full response plus the stable canonical-ID envelope for a foreground call. */
 export function formatResultContent(record: AgentRecord, responseText?: string): string {
   return (responseText ?? record.result ?? "") + getStatusNote(record.lifecycle);
 }
 
-/** Format the shared canonical-ID/response envelope for successful foreground results. */
 export function formatForegroundAgentResultContent(record: AgentRecord, responseText?: string): string {
   return formatAgentIdFirstContent(record.id, `Response:\n${formatResultContent(record, responseText)}`);
 }

@@ -1,1296 +1,197 @@
-/**
- * spawn-coordinator.test.ts — Tests for SpawnCoordinator.
-
- * Verifies: spawn (foreground/background), delayed individual nudges, completion delivery,
- * onAgentComplete, dispose, stale pi protection.
- */
-
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resolvedSpawnFixture, spawnWithResolvedFixture } from "../fixtures.ts";
+import { describe, expect, it, vi } from "vitest";
+import { resolvedSpawnFixture } from "../fixtures.ts";
+import { SpawnCoordinator } from "../../src/spawn/spawn-coordinator.js";
 import type { AgentRecord } from "../../src/types.js";
-import { snapshotResolvedSpawn } from "../../src/spawn/spawn-contract.js";
-import { AgentManager } from "../../src/agents/agent-manager.js";
+import { createSubagentRuntimeContext, runWithSubagentRuntime } from "../../src/shell.js";
 
-// --- Mock modules ---
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
 
-const { mockRunAgent, mockExecuteAgentTurn } = vi.hoisted(() => ({
-  mockRunAgent: vi.fn(),
-  mockExecuteAgentTurn: vi.fn(),
-}));
-
-vi.mock("../../src/spawn/worktree-validator.js", () => ({
-  validateWorktreePath: vi.fn(async () => ({ ok: true, resolvedPath: "/wt", label: "wt" })),
-}));
-
-vi.mock("../../src/agents/agent-runner.js", () => ({
-  runAgent: mockRunAgent,
-}));
-vi.mock("../../src/agents/agent-session-runtime.js", () => ({
-  executeAgentTurn: mockExecuteAgentTurn,
-}));
-
-vi.mock("../../src/config/config-io.js", () => ({
-  loadConfig: vi.fn(() => ({ agent: { default: null }, concurrency: { default: 4 } })),
-  saveConfigAtomic: vi.fn(),
-  DEFAULT_CONFIG: { agent: { default: null }, concurrency: { default: 4 } },
-}));
-
-// Hoist mock pi so shell mock can return it
-const { mockPi, mockGetPiInstance, mockIsIdle } = vi.hoisted(() => ({
-  mockPi: { sendMessage: vi.fn(), sendUserMessage: vi.fn(), exec: vi.fn(), registerTool: vi.fn(), registerCommand: vi.fn(), on: vi.fn() } as unknown as ExtensionAPI & {
-    sendMessage: ReturnType<typeof vi.fn>;
-    sendUserMessage: ReturnType<typeof vi.fn>;
-  },
-  mockGetPiInstance: vi.fn<() => ExtensionAPI | null>(() => null),
-  mockIsIdle: vi.fn(() => true),
-}));
-
-vi.mock("../../src/shell.js", () => ({
-  getSubagentRuntimeContext: () => undefined,
-  getPiInstance: () => mockGetPiInstance(),
-  getSessionCtx: () => ({ isIdle: mockIsIdle }),
-}));
-
-function makeMockManager() {
-  const records = new Map<string, any>();
+function recordWithPromise(promise: Promise<string>): AgentRecord {
   return {
-    spawn: vi.fn((_pi: any, _ctx: any, resolved: any) => {
-      const type = resolved.type;
-      const prompt = resolved.prompt;
-      const options = {
-        description: resolved.description,
-        isBackground: resolved.runInBackground,
-        signal: resolved.signal,
-        projectTrusted: resolved.projectTrusted,
-      };
-      const id = `agent-${records.size}`;
-      const record: any = {
-        id,
-        display: { type, description: options.description },
-        lifecycle: { status: options.isBackground ? "running" : "running", startedAt: Date.now() },
-        execution: { promise: Promise.resolve("done") },
-        stats: {
-          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-
-          compactionCount: 0,
-          executions: [{
-            id: `${id}-execution`,
-            prompt,
-            mode: options.isBackground ? "background" : "foreground",
-            status: "running",
-            startedAt: Date.now(),
-          }],
-        },
-        result: "done",
-      };
-      records.set(id, record);
-      return id;
-    }),
-    getRecord: vi.fn((id: string) => records.get(id)),
-    listAgents: vi.fn(() => [...records.values()]),
-    abort: vi.fn(() => true),
-    steer: vi.fn(async () => true),
-    continueAgent: vi.fn(),
-    getTotalAgentCost: vi.fn(() => 0),
-    getTotalAgentCount: vi.fn(() => 0),
-    pruneRetainedRecords: vi.fn(() => []),
-    setRetentionProtection: vi.fn(),
-    dispose: vi.fn(),
-    onComplete: undefined as any,
-    onStart: undefined as any,
+    id: "canonical-agent-id",
+    lifecycle: { status: "running", startedAt: Date.now(), settled: false },
+    display: { type: "reviewer", description: "review" },
+    execution: { promise },
+    stats: {
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+      compactionCount: 0,
+      cacheRead: 0,
+      executions: [{ id: "execution", prompt: "prompt", kind: "new", status: "running", startedAt: Date.now() }],
+    },
   };
 }
 
-function makeMockCtx() {
-  return { cwd: "/test", model: undefined, modelRegistry: {} } as unknown as ExtensionContext;
-}
-
-/** Current per-execution delivery entries (service-boundary introspection). */
-function deliveryEntries(coordinator: any): any[] {
-  return [...coordinator.deliveryService.backgroundDeliveries.values()];
-}
-
-/** Normalize compact test inputs into the real preflight contract fixture. */
-function toResolvedSpawn(input: Record<string, unknown>): ReturnType<typeof resolvedSpawnFixture> {
-  if (
-    input.agentConfig
-    && input.runtimeSettings
-    && typeof input.projectTrusted === "boolean"
-  ) return input as unknown as ReturnType<typeof resolvedSpawnFixture>;
-  return resolvedSpawnFixture(input as any);
-}
-
-/** The real manager always supplies the completed execution summary. */
-function notifyCompletion(coordinator: any, record: any): void {
-  const execution = record.stats.executions?.at(-1);
-  if (execution) execution.status = record.lifecycle.status;
-  coordinator.onAgentComplete(record, execution);
-}
-
-// --- Tests ---
-
-describe("SpawnCoordinator", () => {
-  // Dynamically import after mocks are set up
-  let SpawnCoordinator: any;
-  let ProductionSpawnCoordinator: any;
-  let manager: ReturnType<typeof makeMockManager>;
-  let ctx: ExtensionContext;
-
-  beforeEach(async () => {
-    vi.useFakeTimers();
-    manager = makeMockManager();
-    ctx = makeMockCtx();
-    mockPi.sendMessage.mockClear();
-    mockRunAgent.mockReset();
-    mockExecuteAgentTurn.mockReset();
-    mockGetPiInstance.mockReturnValue(mockPi);
-    mockIsIdle.mockReturnValue(true);
-    const mod = await import("../../src/spawn/spawn-coordinator.js");
-    ProductionSpawnCoordinator = mod.SpawnCoordinator;
-    SpawnCoordinator = class extends ProductionSpawnCoordinator {
-      spawn(pi: ExtensionAPI, context: ExtensionContext, intent: any, onAccepted?: (record: AgentRecord) => void) {
-        return super.spawn(pi, context, toResolvedSpawn(intent), onAccepted);
-      }
+describe("SpawnCoordinator foreground boundary", () => {
+  it("publishes accepted metadata before awaiting the exact caller promise", async () => {
+    const execution = deferred<string>();
+    const record = recordWithPromise(execution.promise);
+    const manager = {
+      spawn: vi.fn(() => record.id),
+      getRecord: vi.fn(() => record),
+      continueAgent: vi.fn(),
+      releaseExecutionPromise: vi.fn(() => true),
     };
-  });
+    const coordinator = new SpawnCoordinator(manager);
+    const accepted = vi.fn();
+    const pending = coordinator.spawn({} as any, {} as any, resolvedSpawnFixture(), accepted);
 
-
-  it("subscribes delivery observers and detaches them deterministically", () => {
-    const coordinator = new ProductionSpawnCoordinator(manager as any);
-    const observer = vi.fn();
-    const unsubscribe = coordinator.subscribeDeliveryActivity(observer);
-
-    expect(observer).toHaveBeenCalledWith([]);
-    unsubscribe();
-    unsubscribe();
-    coordinator.dispose();
-  });
-
-  it("uses the authoritative production spawn boundary and isolates accepted observers", async () => {
-    const coordinator = new ProductionSpawnCoordinator(manager as any);
-    const resolved = resolvedSpawnFixture({
-      type: "builder",
-      prompt: "direct production spawn",
-      description: "direct",
-      runInBackground: false,
-    });
-    const onAccepted = vi.fn(() => { throw new Error("renderer detached"); });
-
-    const result = await coordinator.spawn(mockPi, ctx, resolved, onAccepted);
-
-    expect(result.record).toBe(manager.getRecord(result.agentId));
-    expect(onAccepted).toHaveBeenCalledWith(result.record);
-    expect(manager.setRetentionProtection).toHaveBeenCalledOnce();
-    const protection = manager.setRetentionProtection.mock.calls[0]![0];
-    expect(protection(result.record)).toBe(false);
-    coordinator.dispose();
-  });
-
-  it("spawns a background agent and returns result", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const result = await coordinator.spawn(mockPi, ctx, {
-      type: "builder",
-      prompt: "do something",
-      description: "Test spawn",
-
-      runInBackground: true,
-    });
-
-    expect(result.agentId).toBeTruthy();
     expect(manager.spawn).toHaveBeenCalledTimes(1);
-    expect(manager.spawn.mock.calls[0][2]).toMatchObject({
-      type: "builder",
-      prompt: "do something",
-      runInBackground: true,
+    expect(accepted).toHaveBeenCalledWith(record);
+    expect(pending).toBeInstanceOf(Promise);
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    execution.resolve("the complete response");
+    await expect(pending).resolves.toMatchObject({
+      agentId: record.id,
+      record,
+      responseText: "the complete response",
     });
+    expect(manager.releaseExecutionPromise).toHaveBeenCalledWith(record, execution.promise);
   });
 
-  it("forwards the parent abort signal to the agent manager", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const signal = new AbortController().signal;
-
-    await coordinator.spawn(mockPi, ctx, {
-      type: "builder",
-      prompt: "do something",
-      description: "Test parent abort forwarding",
-
-      runInBackground: true,
-      signal,
-    });
-
-    expect(manager.spawn.mock.calls[0][2].signal).toBe(signal);
+  it("handles a completion-before-coordinator-observation race", async () => {
+    const execution = Promise.resolve("already complete");
+    const record = recordWithPromise(execution);
+    record.lifecycle.status = "completed";
+    record.lifecycle.settled = true;
+    const manager = {
+      spawn: vi.fn(() => record.id),
+      getRecord: vi.fn(() => record),
+      continueAgent: vi.fn(),
+      releaseExecutionPromise: vi.fn(() => true),
+    };
+    const result = await new SpawnCoordinator(manager).spawn({} as any, {} as any, resolvedSpawnFixture());
+    expect(result.responseText).toBe("already complete");
   });
 
-  it("does not retain or nudge a synchronously parent-aborted background spawn", async () => {
-    const realManager = new AgentManager(undefined, { default: 1 });
-    const coordinator = new SpawnCoordinator(realManager);
-    realManager.setOnComplete((record, execution) => coordinator.onAgentComplete(record, execution));
-    const parent = new AbortController();
-    parent.abort();
-
-    try {
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder",
-        prompt: "do something",
-        description: "Already cancelled",
-
-        runInBackground: true,
-        signal: parent.signal,
-      });
-
-      expect(result.record.lifecycle).toMatchObject({
-        status: "stopped",
-        stoppedBy: "parent",
-        resultConsumed: true,
-      });
-      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
-
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-    } finally {
-      realManager.dispose();
-    }
+  it("rejects root spawning from a child runtime", async () => {
+    const manager = {
+      spawn: vi.fn(() => "child-id"),
+      getRecord: vi.fn(),
+      continueAgent: vi.fn(),
+      releaseExecutionPromise: vi.fn(),
+    };
+    const coordinator = new SpawnCoordinator(manager);
+    await runWithSubagentRuntime(createSubagentRuntimeContext(), async () => {
+      await expect(coordinator.spawn({} as any, {} as any, resolvedSpawnFixture()))
+        .rejects.toThrow("unavailable from a child runtime");
+    });
+    expect(manager.spawn).not.toHaveBeenCalled();
   });
 
-
-  it("snapshots an explicitly resolved agent config before handing it to the manager", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const config = {
-      name: "builder",
-      description: "A-only",
-      systemPrompt: "Use A instructions.",
-      registeredTools: ["read"],
-      tools: ["read"],
-      extensions: ["a-extension"],
-      skills: ["a-skill"],
-    } as any;
-
-    await coordinator.spawn(mockPi, ctx, {
-      type: "builder",
-      prompt: "do something",
-      description: "Test config snapshot",
-      agentConfig: config,
-
-      runInBackground: true,
-    });
-    config.registeredTools.push("bash");
-    config.tools.push("bash");
-
-    const snapshot = manager.spawn.mock.calls[0][2].agentConfig;
-    expect(snapshot).toEqual(expect.objectContaining({
-      systemPrompt: "Use A instructions.",
-      registeredTools: ["read"],
-      tools: ["read"],
-      extensions: ["a-extension"],
-      skills: ["a-skill"],
-    }));
-    expect(snapshot).not.toBe(config);
+  it("rejects an accepted spawn whose record is no longer retained", async () => {
+    const manager = {
+      spawn: vi.fn(() => "missing-id"),
+      getRecord: vi.fn(() => undefined),
+      continueAgent: vi.fn(),
+      releaseExecutionPromise: vi.fn(),
+    };
+    await expect(new SpawnCoordinator(manager).spawn({} as any, {} as any, resolvedSpawnFixture()))
+      .rejects.toThrow("was not retained after acceptance");
   });
 
-  it("passes the authoritative resolved snapshot without resolving again", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const config = {
-      name: "accepted",
-      description: "Accepted config",
-      systemPrompt: "Frozen instructions",
-      tools: ["read"],
-    } as any;
-    const runtimeSettings = {
-      agent: { includeContextFiles: false, disableDefaultAgents: true, orchestrationPrompt: false },
-      agents: { accepted: { model: "settings/model" } },
-    } as any;
-    const model = { provider: "accepted", id: "model" } as any;
-    const resolved = snapshotResolvedSpawn({
-      type: "accepted",
-      prompt: "accepted prompt",
-      description: "accepted description",
-      runInBackground: true,
-      agentConfig: config,
-      runtimeSettings,
-      model,
-      modelKey: "accepted/model",
-      thinkingLevel: "high",
-      invocation: { modelName: "model", modelKey: "accepted/model", thinkingLevel: "high" },
-      projectTrusted: false,
-    });
-
-    await coordinator.spawn(mockPi, ctx, resolved);
-
-    config.tools.push("bash");
-    runtimeSettings.agents.accepted.model = "later/model";
-
-    expect(manager.spawn).toHaveBeenCalledWith(mockPi, ctx, resolved);
-    expect(manager.spawn.mock.calls[0]).toHaveLength(3);
-    expect(manager.spawn.mock.calls[0][2]).toBe(resolved);
+  it("returns a retained result without a caller promise and isolates renderer cleanup", async () => {
+    const record = recordWithPromise(Promise.resolve("ignored"));
+    record.execution.promise = undefined;
+    record.result = "retained response";
+    const manager = {
+      spawn: vi.fn(() => record.id),
+      getRecord: vi.fn(() => record),
+      continueAgent: vi.fn(),
+      releaseExecutionPromise: vi.fn(() => { throw new Error("cleanup raced"); }),
+    };
+    const result = await new SpawnCoordinator(manager).spawn(
+      {} as any,
+      {} as any,
+      resolvedSpawnFixture(),
+      () => { throw new Error("renderer detached"); },
+    );
+    expect(result.responseText).toBe("retained response");
+    expect(manager.releaseExecutionPromise).not.toHaveBeenCalled();
   });
 
-  it("spawns a foreground agent and awaits its promise", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const result = await coordinator.spawn(mockPi, ctx, {
-      type: "builder",
-      prompt: "do something",
-      description: "Test foreground",
-
-      runInBackground: false,
-    });
-
-    expect(result.agentId).toBeTruthy();
-    expect(result.record).toBeTruthy();
-    expect(manager.spawn.mock.calls[0][2].runInBackground).toBe(false);
+  it("isolates continuation renderer callbacks and release failures", async () => {
+    const continuation = Promise.resolve("continued");
+    const record = recordWithPromise(continuation);
+    const manager = {
+      spawn: vi.fn(),
+      getRecord: vi.fn(() => record),
+      continueAgent: vi.fn(() => ({ executionId: "continuation", record, promise: continuation })),
+      releaseExecutionPromise: vi.fn(() => { throw new Error("release raced"); }),
+    };
+    const result = await new SpawnCoordinator(manager).continueAgent(
+      { agentId: record.id, prompt: "follow up" },
+      () => { throw new Error("renderer detached"); },
+    );
+    expect(result.responseText).toBe("continued");
+    expect(manager.releaseExecutionPromise).toHaveBeenCalledWith(record, continuation);
   });
 
-
-  it("tracks a background execution in its delivery entries", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const result = await coordinator.spawn(mockPi, ctx, {
-      type: "builder",
-      prompt: "do something",
-      description: "Test bg",
-
-      runInBackground: true,
-    });
-
-    expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(true);
+  it("does not release a newer promise after an older foreground call settles", async () => {
+    const oldExecution = deferred<string>();
+    const newerExecution = deferred<string>();
+    const record = recordWithPromise(oldExecution.promise);
+    const manager = {
+      spawn: vi.fn(() => record.id),
+      getRecord: vi.fn(() => record),
+      continueAgent: vi.fn(),
+      releaseExecutionPromise: vi.fn((candidate: AgentRecord, promise: Promise<string>) => {
+        if (candidate.execution.promise !== promise) return false;
+        candidate.execution.promise = undefined;
+        return true;
+      }),
+    };
+    const pending = new SpawnCoordinator(manager).spawn({} as any, {} as any, resolvedSpawnFixture());
+    record.execution.promise = newerExecution.promise;
+    oldExecution.resolve("old response");
+    await expect(pending).resolves.toMatchObject({ responseText: "old response" });
+    expect(record.execution.promise).toBe(newerExecution.promise);
+    expect(manager.releaseExecutionPromise).toHaveBeenCalledWith(record, oldExecution.promise);
   });
 
-  it("does not track a foreground execution for background delivery", async () => {
-    const coordinator = new SpawnCoordinator(manager as any);
-    const result = await coordinator.spawn(mockPi, ctx, {
-      type: "builder",
-      prompt: "do something",
-      description: "Test fg",
-
-      runInBackground: false,
+  it("awaits AgentContinue and returns its full response/details record", async () => {
+    const continuation = deferred<string>();
+    const record = recordWithPromise(continuation.promise);
+    record.lifecycle.status = "completed";
+    record.lifecycle.settled = true;
+    const manager = {
+      spawn: vi.fn(),
+      getRecord: vi.fn(() => record),
+      continueAgent: vi.fn(() => ({ executionId: "continuation-id", record, promise: continuation.promise })),
+      releaseExecutionPromise: vi.fn(() => true),
+    };
+    const accepted = vi.fn();
+    const pending = new SpawnCoordinator(manager).continueAgent(
+      { agentId: "canonical-agent-id", prompt: "follow up" },
+      accepted,
+    );
+    expect(accepted).toHaveBeenCalledWith(record);
+    continuation.resolve("complete continuation");
+    await expect(pending).resolves.toMatchObject({
+      executionId: "continuation-id",
+      record,
+      responseText: "complete continuation",
     });
-
-    expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
+    expect(manager.releaseExecutionPromise).toHaveBeenCalledWith(record, continuation.promise);
   });
 
-  describe("nudge scheduling", () => {
-    it("emits one individual nudge after a short delay", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder",
-        prompt: "do something",
-        description: "Test",
-
-        runInBackground: true,
-      });
-
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-
-      // Not yet emitted — timer pending
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-
-      // Advance past the 200ms delivery delay
-      vi.advanceTimersByTime(200);
-
-      // Now the nudge should have been emitted
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-    });
-
-    it("delivers multiple nudges as individual messages after the delay", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      const r1 = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task 1", description: "Test 1", runInBackground: true,
-      });
-      const r2 = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task 2", description: "Test 2", runInBackground: true,
-      });
-
-      r1.record.lifecycle.status = "completed";
-      r2.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, r1.record);
-      notifyCompletion(coordinator, r2.record);
-
-      // Advance past the individual delivery delay
-      vi.advanceTimersByTime(200);
-
-      // Both should be emitted as individual messages
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
-    });
-
-    it("delivers only after the manager reports completion", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Still running", runInBackground: true,
-      });
-
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).toHaveBeenCalledOnce();
-      expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
-    });
-
-    it("delivers a later nudge after its own short delay", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      const r1 = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task 1", description: "Test 1", runInBackground: true,
-      });
-      const r2 = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task 2", description: "Test 2", runInBackground: true,
-      });
-
-      r1.record.lifecycle.status = "completed";
-      r2.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, r1.record);
-
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-
-      // A later execution gets its own delivery delay
-      notifyCompletion(coordinator, r2.record);
-
-      // Not yet emitted
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
-    });
+  it("has no delivery or presentation lifecycle surface", () => {
+    const manager = {
+      spawn: vi.fn(),
+      getRecord: vi.fn(),
+      continueAgent: vi.fn(),
+      releaseExecutionPromise: vi.fn(),
+    };
+    const coordinator = new SpawnCoordinator(manager);
+    expect(coordinator).not.toHaveProperty("dispose");
+    expect(coordinator).not.toHaveProperty("onAgentComplete");
+    expect(coordinator).not.toHaveProperty(["subscribe", "Delivery", "Activity"].join(""));
   });
-
-  describe("continueAgent", () => {
-    function continuedRecord(overrides: Record<string, unknown> = {}): any {
-      return {
-        id: "agent-x",
-        display: { type: "builder", description: "continued" },
-        lifecycle: { status: "running", startedAt: Date.now(), settled: false },
-        stats: {
-          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-          compactionCount: 0,
-        },
-        execution: {},
-        ...overrides,
-      };
-    }
-
-    it("awaits the execution delta for a foreground continuation", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const record = continuedRecord();
-      let resolveExecution!: (value: string) => void;
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-1",
-        record,
-        promise: new Promise<string>((resolve) => { resolveExecution = resolve; }),
-      });
-
-      let settled = false;
-      const pending = coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "wrap up", runInBackground: false,
-      }).then((result: any) => { settled = true; return result; });
-      await Promise.resolve();
-      expect(settled).toBe(false); // foreground callers await the execution
-
-      resolveExecution("final result");
-      const result = await pending;
-      expect(result.record).toBe(record);
-      expect(record.lifecycle.resultConsumed).toBe(true);
-      expect((coordinator as any).deliveryService.backgroundDeliveries.has("exec-1")).toBe(false);
-    });
-
-    it("acknowledges a background continuation immediately", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const record = continuedRecord();
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-1",
-        record,
-        promise: new Promise<string>(() => {}), // never settles in this test
-      });
-
-      const result = await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
-      });
-      expect(result.record).toBe(record);
-      expect(record.delivery).toMatchObject({ state: "pending", attempts: 0 });
-      expect(record.lifecycle.resultConsumed).toBe(false);
-      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === "agent-x" && !entry.completed)).toBe(true);
-      expect((coordinator as any).deliveryService.backgroundDeliveries.has("exec-1")).toBe(true);
-    });
-
-    it("reconciles a synchronously terminal continuation after claiming its execution id", async () => {
-      const realManager = new AgentManager(undefined);
-      const coordinator = new SpawnCoordinator(realManager);
-      realManager.setOnComplete((record, execution) => coordinator.onAgentComplete(record, execution));
-      mockRunAgent.mockResolvedValueOnce({
-        responseText: "initial",
-        session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() },
-        aborted: false,
-
-      });
-      mockExecuteAgentTurn.mockReturnValueOnce({
-        then: (resolve: (result: { responseText: string; aborted: boolean }) => unknown) => {
-          // A conforming thenable may invoke the continuation synchronously;
-          // this completes before SpawnCoordinator can install its claim.
-          resolve({ responseText: "sync continuation", aborted: false });
-          return { catch: () => undefined };
-        },
-        catch: () => undefined,
-      } as any);
-
-      try {
-        const id = spawnWithResolvedFixture(realManager, mockPi, ctx, "builder", "initial", { description: "initial" });
-        await realManager.getRecord(id)!.execution.promise;
-        mockPi.sendMessage.mockReset();
-
-        const result = await coordinator.continueAgent(mockPi, ctx, {
-          agentId: id,
-          prompt: "follow up",
-          runInBackground: true,
-        });
-        vi.advanceTimersByTime(200);
-
-        expect(mockPi.sendMessage).toHaveBeenCalledOnce();
-        expect(mockPi.sendMessage.mock.calls[0]![0].content).toContain("sync continuation");
-        expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
-      } finally {
-        realManager.dispose();
-      }
-    });
-
-    it("delivers a synchronously rejected background continuation exactly once", async () => {
-      const realManager = new AgentManager(
-        undefined,
-        undefined,
-        (record) => {
-          if ((record.stats.executions?.length ?? 0) > 1) throw new Error("sync start boom");
-        },
-      );
-      const coordinator = new SpawnCoordinator(realManager);
-      realManager.setOnComplete((record, execution) => coordinator.onAgentComplete(record, execution));
-      mockRunAgent.mockResolvedValueOnce({
-        responseText: "initial",
-        session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() },
-        aborted: false,
-
-      });
-
-      try {
-        const id = spawnWithResolvedFixture(realManager, mockPi, ctx, "builder", "initial", { description: "initial" });
-        await realManager.getRecord(id)!.execution.promise;
-        mockPi.sendMessage.mockReset();
-
-        const result = await coordinator.continueAgent(mockPi, ctx, {
-          agentId: id,
-          prompt: "fails before turn",
-          runInBackground: true,
-        });
-        vi.advanceTimersByTime(200);
-
-        expect(mockPi.sendMessage).toHaveBeenCalledOnce();
-        expect(mockPi.sendMessage.mock.calls[0]![0].details.currentExecution.error).toBe("sync start boom");
-        expect(result.record.stats.executions?.at(-1)).toMatchObject({
-          status: "error",
-          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
-          compactionCount: 0,
-        });
-        expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
-      } finally {
-        realManager.dispose();
-      }
-    });
-
-    it("delivers exactly one automatic completion per background execution id", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const record = continuedRecord({ result: "bg result" });
-      manager.getRecord.mockReturnValue(record);
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-1",
-        record,
-        promise: new Promise<string>(() => {}),
-      });
-      await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
-      });
-
-      record.lifecycle.status = "completed";
-      const execution = { id: "exec-1", mode: "background", status: "completed", startedAt: Date.now() };
-      coordinator.onAgentComplete(record, execution as any);
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-      expect(mockPi.sendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({ customType: "subagent-result", content: expect.stringContaining("bg result") }),
-        { deliverAs: "followUp", triggerTurn: true },
-      );
-
-      // A duplicate completion for the same generation is ignored.
-      coordinator.onAgentComplete(record, execution as any);
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-
-      // A later continuation with a fresh execution id claims its own delivery.
-      const second = continuedRecord({ result: "second bg result" });
-      manager.getRecord.mockReturnValue(second);
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-2",
-        record: second,
-        promise: new Promise<string>(() => {}),
-      });
-      await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "more", runInBackground: true,
-      });
-      second.lifecycle.status = "completed";
-      coordinator.onAgentComplete(second, { id: "exec-2", mode: "background", status: "completed", startedAt: Date.now() } as any);
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
-      expect(mockPi.sendMessage).toHaveBeenLastCalledWith(
-        expect.objectContaining({ content: expect.stringContaining("second bg result") }),
-        { deliverAs: "followUp", triggerTurn: true },
-      );
-    });
-
-    it("delivers each same-record continuation's frozen result even when the record moves on", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const record = continuedRecord({ result: "first bg result" });
-      manager.getRecord.mockReturnValue(record);
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-1",
-        record,
-        promise: new Promise<string>(() => {}),
-      });
-      await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "first", runInBackground: true,
-      });
-      record.lifecycle.status = "completed";
-      coordinator.onAgentComplete(record, { id: "exec-1", mode: "background", status: "completed", startedAt: Date.now() } as any);
-
-      // The same record is continued again BEFORE the first nudge timer fires;
-      // the record's mutable result now belongs to the second execution.
-      record.result = "second bg result";
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-2",
-        record,
-        promise: new Promise<string>(() => {}),
-      });
-      await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "second", runInBackground: true,
-      });
-      record.lifecycle.status = "completed";
-      coordinator.onAgentComplete(record, { id: "exec-2", mode: "background", status: "completed", startedAt: Date.now() } as any);
-
-      // Both timers fire in order; each delivers its own frozen payload. The
-      // stale first timer can never send the later execution's result.
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(2);
-      const contents = mockPi.sendMessage.mock.calls.map((call) => call[0].content);
-      expect(contents[0]).toContain("first bg result");
-      expect(contents[0]).not.toContain("second bg result");
-      expect(contents[1]).toContain("second bg result");
-      expect(contents[1]).not.toContain("first bg result");
-      // Exactly one success delivery per execution; the projection reflects
-      // the latest execution only.
-      expect(record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
-      expect(deliveryEntries(coordinator)).toHaveLength(0);
-    });
-
-    it("does not mark a failed background handoff as delivered", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const record = continuedRecord({
-        result: "bg result",
-        stats: {
-          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-          compactionCount: 0,
-          executions: [{
-            id: "exec-1", mode: "background", status: "running", startedAt: Date.now(),
-          }],
-        },
-      });
-      manager.getRecord.mockReturnValue(record);
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-1",
-        record,
-        promise: new Promise<string>(() => {}),
-      });
-      await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
-      });
-
-      record.lifecycle.status = "completed";
-      // First attempt fails: no handoff happened, so nothing is marked delivered.
-      mockGetPiInstance.mockReturnValue(null);
-      coordinator.onAgentComplete(record, { id: "exec-1", mode: "background", status: "completed", startedAt: Date.now() } as any);
-      vi.advanceTimersByTime(200);
-      expect(record.delivery).toMatchObject({ state: "failed", attempts: 1 });
-      expect(record.lifecycle.resultConsumed).toBe(false); // never marked consumed without a handoff
-      expect(record.stats.executions![0]!.deliveredText).toBeUndefined();
-
-    });
-
-    it("reports per-execution deltas, not lifetime totals, in background continuation details", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const execution = {
-        id: "exec-1", mode: "background", kind: "continued", status: "completed", startedAt: 10_000, completedAt: 11_250,
-        responseText: "bg result", compactionCount: 1,
-        usage: { input: 20, output: 6, cacheWrite: 1, cacheRead: 4, cost: 0.02 },
-      };
-      const record = continuedRecord({
-        result: "bg result",
-        stats: {
-          lifetimeUsage: { input: 50, output: 12, cacheWrite: 4, cost: 0.05 },
-          compactionCount: 3,
-          cacheRead: 9,
-          executions: [
-            {
-              id: "exec-0", prompt: "initial", mode: "foreground", status: "completed",
-              startedAt: Date.now(), compactionCount: 2,
-              usage: { input: 30, output: 6, cacheWrite: 3, cacheRead: 5, cost: 0.03 },
-            },
-            execution,
-          ],
-        },
-      });
-      manager.getRecord.mockReturnValue(record);
-      manager.continueAgent.mockReturnValueOnce({
-        executionId: "exec-1",
-        record,
-        promise: new Promise<string>(() => {}),
-      });
-      await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
-      });
-
-      record.lifecycle.status = "completed";
-      coordinator.onAgentComplete(record, execution as any);
-      // A later execution may mutate the record before this delivery timer fires.
-      record.result = "later result";
-      record.stats.executions!.push({
-        id: "exec-2", prompt: "later", mode: "foreground", kind: "continued", status: "running", startedAt: 12_000,
-      });
-      vi.advanceTimersByTime(200);
-
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-      const message = mockPi.sendMessage.mock.calls[0]![0];
-      expect(message.content).toContain("Mode: Background | Run: Continued");
-      expect(message.content).toContain("\n\nResponse:\nbg result");
-      expect(message.content).not.toContain("later result");
-      const details = message.details;
-      // The continuation delivery exposes the exact execution summary deltas,
-      // never the cumulative lifetime totals on the record.
-      expect(details.input).toBe(20);
-      expect(details.output).toBe(6);
-      expect(details.cacheRead).toBe(4);
-      expect(details.cacheWrite).toBe(1);
-      expect(details.cost).toBeCloseTo(0.02);
-      expect(details.compactions).toBe(1);
-      expect(details.compactionCount).toBe(1);
-      expect(details.durationMs).toBe(1250);
-      expect(details.currentExecution).toMatchObject({
-        mode: "background", kind: "continued", status: "completed", compactionCount: 1,
-      });
-      // No execution ids or history leak into delivery details.
-      expect((details.currentExecution as Record<string, unknown>).id).toBeUndefined();
-      expect(details.executions).toBeUndefined();
-      expect(record.stats.executions![1]!.deliveredText).toBe("bg result");
-    });
-
-    it("observes a rejected queued background continuation without an unhandled rejection", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const record = continuedRecord();
-      let rejectExecution!: (error: Error) => void;
-      const promise = new Promise<string>((_, reject) => { rejectExecution = reject; });
-      manager.continueAgent.mockReturnValueOnce({ executionId: "exec-1", record, promise });
-
-      await coordinator.continueAgent(mockPi, ctx, {
-        agentId: "agent-x", prompt: "wrap up", runInBackground: true,
-      });
-      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === "agent-x" && !entry.completed)).toBe(true);
-
-      // StopAgent rejects the queued continuation: the coordinator must
-      // observe the rejection (never an unhandled rejection) and the
-      // execution never runs.
-      rejectExecution(new Error("Agent agent-x was stopped"));
-      await Promise.resolve();
-      expect(manager.continueAgent).toHaveBeenCalledOnce();
-      expect((coordinator as any).deliveryService.backgroundDeliveries.has("exec-1")).toBe(true); // claim stays until completion/abandon
-    });
-
-    it("reports a queued background continuation stopped before start exactly once and never runs it", async () => {
-      const realManager = new AgentManager(undefined, { default: 1 });
-      const coordinator = new SpawnCoordinator(realManager);
-      realManager.setOnComplete((record, execution) => coordinator.onAgentComplete(record, execution));
-      try {
-        mockRunAgent.mockResolvedValueOnce({
-          responseText: "done",
-          session: { subscribe: vi.fn(), messages: [], dispose: vi.fn() },
-          aborted: false,
-
-        });
-        const firstId = spawnWithResolvedFixture(realManager, mockPi, ctx, "builder", "first", { description: "first" });
-        await realManager.getRecord(firstId)!.execution.promise;
-        const firstRecord = realManager.getRecord(firstId)!;
-        firstRecord.stats.lifetimeUsage = { input: 11, output: 22, cacheWrite: 33, cost: 0.44 };
-        firstRecord.stats.cacheRead = 55;
-        firstRecord.stats.compactionCount = 8;
-
-        const blocker = new Promise<any>(() => {});
-        mockRunAgent.mockReturnValueOnce(blocker);
-        spawnWithResolvedFixture(realManager, mockPi, ctx, "builder", "blocker", { description: "blocker" });
-
-        coordinator.continueAgent(mockPi, ctx, {
-          agentId: firstId, prompt: "bg follow-up", runInBackground: true,
-        });
-        const record = realManager.getRecord(firstId)!;
-        expect(record.lifecycle.status).toBe("queued");
-
-        realManager.abort(firstId, "agent");
-        await Promise.resolve(); // the coordinator observed the rejection
-        expect(mockExecuteAgentTurn).not.toHaveBeenCalled(); // never runs
-        mockPi.sendMessage.mockClear();
-        vi.advanceTimersByTime(200);
-
-        // Exactly one stopped notification for the stopped execution, never
-        // the prior execution's result text.
-        expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-        const content = mockPi.sendMessage.mock.calls[0]![0].content;
-        expect(content).toContain("stopped");
-        expect(content).not.toContain("done");
-        expect(record.lifecycle).toMatchObject({ status: "stopped", settled: true });
-        expect(record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
-        expect(record.stats.executions![1]).toMatchObject({
-          status: "stopped",
-          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
-          compactionCount: 0,
-        });
-        const deliveryDetails = mockPi.sendMessage.mock.calls[0]![0].details;
-        expect(deliveryDetails).toMatchObject({
-          status: "stopped",
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          cost: 0,
-          compactions: 0,
-          compactionCount: 0,
-          currentExecution: { status: "stopped", compactionCount: 0 },
-        });
-        expect(deliveryDetails.durationMs).toBeGreaterThanOrEqual(0);
-      } finally {
-        realManager.dispose();
-      }
-    });
-  });
-
-  describe("onAgentComplete", () => {
-    it("publishes only completed pending deliveries and isolates observers", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const snapshots: Array<readonly any[]> = [];
-      coordinator.subscribeDeliveryActivity(() => { throw new Error("observer failure"); });
-      const unsubscribe = coordinator.subscribeDeliveryActivity((snapshot: any) => snapshots.push(snapshot));
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", runInBackground: true,
-      });
-      const second = await coordinator.spawn(mockPi, ctx, {
-        type: "reviewer", prompt: "second task", description: "Second", runInBackground: true,
-      });
-
-      // A claimed but still running background execution is not Delivering.
-      expect(coordinator.getDeliveryActivitySnapshot()).toEqual([]);
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-      second.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, second.record);
-
-      const pending = coordinator.getDeliveryActivitySnapshot();
-      expect(pending).toEqual(expect.arrayContaining([
-        expect.objectContaining({ agentId: result.agentId, type: "builder" }),
-        expect.objectContaining({ agentId: second.agentId, type: "reviewer" }),
-      ]));
-      expect(pending).toHaveLength(2);
-      expect(Object.isFrozen(pending)).toBe(true);
-      expect(Object.isFrozen(pending[0])).toBe(true);
-      expect(snapshots.at(-1)).toEqual(pending);
-
-      vi.advanceTimersByTime(200);
-      expect(coordinator.getDeliveryActivitySnapshot()).toEqual([]);
-      unsubscribe();
-      unsubscribe();
-    });
-
-    it("schedules nudge for background agents", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", runInBackground: true,
-      });
-
-      // Simulate completion
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-
-      // Nudge should be scheduled with Pi's custom-message contract.
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-      expect(mockPi.sendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({ customType: "subagent-result", display: true }),
-        { deliverAs: "followUp", triggerTurn: true },
-      );
-
-      // Should be removed from background set
-      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
-    });
-
-    it("delivers a root completion once even when the manager repeats its completion callback", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "duplicate completion", runInBackground: true,
-      });
-      result.record.lifecycle.status = "completed";
-
-      notifyCompletion(coordinator, result.record);
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-
-      expect(mockPi.sendMessage).toHaveBeenCalledOnce();
-      expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
-    });
-
-    it("uses steer delivery while the parent session is busy", async () => {
-      mockIsIdle.mockReturnValue(false);
-      const coordinator = new SpawnCoordinator(manager as any);
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", runInBackground: true,
-      });
-
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-
-      expect(mockPi.sendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({ customType: "subagent-result" }),
-        { deliverAs: "steer", triggerTurn: true },
-      );
-    });
-
-    it("does not schedule nudge for foreground agents", () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      // Foreground executions do not claim background delivery entries.
-
-      coordinator.onAgentComplete(
-        { id: "agent-1" } as AgentRecord,
-        { id: "execution-1", mode: "foreground", status: "completed", startedAt: Date.now() } as any,
-      );
-
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-    });
-
-    it("keeps terminal delivery working when record pruning throws", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      manager.pruneRetainedRecords.mockImplementation(() => { throw new Error("prune race"); });
-
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "prune race", runInBackground: true,
-      });
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-
-      expect(mockPi.sendMessage).toHaveBeenCalledOnce();
-      expect(result.record.delivery).toMatchObject({ state: "accepted", attempts: 1 });
-    });
-
-    it("records sendMessage errors as delivery diagnostics (stale pi)", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", runInBackground: true,
-      });
-
-      // Make sendMessage throw (simulates stale pi)
-      mockPi.sendMessage.mockImplementation(() => { throw new Error("stale context"); });
-      result.record.lifecycle.status = "completed";
-
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-
-      // sendMessage was attempted once; the failed state is diagnostic until session shutdown.
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-      expect(result.record.delivery).toMatchObject({ state: "failed", attempts: 1, lastError: "stale context" });
-    });
-
-    it("skips nudge emission when disposed", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", runInBackground: true,
-      });
-
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-
-      // Dispose before timer fires — should prevent emission
-      coordinator.dispose();
-
-      vi.advanceTimersByTime(500);
-
-      // No sendMessage because disposed
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("dispose", () => {
-    it("clears nudge timer", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", runInBackground: true,
-      });
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-
-      coordinator.dispose();
-
-      // Timer should be cleared — advancing time should not emit
-      vi.advanceTimersByTime(500);
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-    });
-
-  });
-
-  describe("stale pi protection", () => {
-    it("reads pi from shell at nudge time, not from spawn", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", runInBackground: true,
-      });
-
-      // Coordinator no longer stores pi
-      expect((coordinator as any).pi).toBeUndefined();
-
-      // Nudge still works because it reads from shell at call time
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-    });
-
-    it("uses fresh shell pi when shell is updated between spawn and nudge", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test", runInBackground: true,
-      });
-
-      // Simulate shell being updated (e.g. after reload)
-      const freshPi = { ...mockPi, sendMessage: vi.fn() } as unknown as ExtensionAPI;
-      mockGetPiInstance.mockReturnValue(freshPi);
-      result.record.lifecycle.status = "completed";
-
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-
-      // Fresh pi was used, not the original mockPi
-      expect(freshPi.sendMessage).toHaveBeenCalledTimes(1);
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-    });
-
-    it("constructor does not store pi", () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      expect(coordinator).toBeDefined();
-      expect((coordinator as any).pi).toBeUndefined();
-    });
-  });
-
-  describe("nudge message status", () => {
-    it("uses lifecycle status in the nudge message", async () => {
-      const statuses: Array<{ status: string; expected: string }> = [
-        { status: "completed", expected: "completed" },
-        { status: "error", expected: "error" },
-        { status: "aborted", expected: "aborted" },
-        { status: "stopped", expected: "stopped" },
-      ];
-
-      for (const { status, expected } of statuses) {
-        mockPi.sendMessage.mockClear();
-        const coordinator = new SpawnCoordinator(manager as any);
-
-        const result = await coordinator.spawn(mockPi, ctx, {
-          type: "builder", prompt: "task", description: "Test", runInBackground: true,
-        });
-
-        manager.getRecord(result.agentId).lifecycle.status = status;
-        manager.getRecord(result.agentId).result = "Result text";
-
-        notifyCompletion(coordinator, result.record);
-        vi.advanceTimersByTime(200);
-
-        expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-        const message = mockPi.sendMessage.mock.calls[0][0];
-        const content = message.content;
-        const shortId = result.agentId.slice(0, 8);
-        expect(content).toContain(`[${shortId}] (builder) ${expected} | Mode: Background | Run: New`);
-        expect(message.details.agentId).toBe(result.agentId);
-      }
-    });
-  });
-
-  describe("result consumption", () => {
-    it("foreground spawn marks the result as consumed before returning", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "do something", description: "Test fg", runInBackground: false,
-      });
-
-      expect(result.record.lifecycle.resultConsumed).toBe(true);
-    });
-
-    it("background nudge emission marks the result as consumed", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test bg", runInBackground: true,
-      });
-      const record = manager.getRecord(result.agentId);
-      // Reset any sendMessage impl leaked from other tests so this test exercises
-      // the success path (default: returns without throwing).
-      mockPi.sendMessage.mockReset();
-
-      expect(record.lifecycle.resultConsumed).toBeUndefined();
-      record.lifecycle.status = "completed";
-
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-
-      // sendMessage delivered the full result to the LLM — the delivery entry can be cleared.
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-      expect(record.lifecycle.resultConsumed).toBe(true);
-    });
-
-    it("marks delivery failed when Pi is unavailable without consuming the result", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "No Pi", runInBackground: true,
-      });
-      const record = manager.getRecord(result.agentId);
-      mockGetPiInstance.mockReturnValue(null);
-      record.lifecycle.status = "completed";
-
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-
-      expect(record.lifecycle.resultConsumed).toBeUndefined();
-      expect(record.delivery).toMatchObject({ state: "failed", attempts: 1 });
-      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
-    });
-
-    it("marks delivery failed and preserves the result when nudge delivery throws", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Test bg", runInBackground: true,
-      });
-      const record = manager.getRecord(result.agentId);
-
-      // sendMessage throws — LLM never received the result, so the failure
-      // remains diagnostic until session shutdown.
-      mockPi.sendMessage.mockImplementation(() => { throw new Error("stale context"); });
-      record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(200);
-
-      expect(mockPi.sendMessage).toHaveBeenCalledTimes(1);
-      expect(record.lifecycle.resultConsumed).toBeUndefined();
-      expect(record.delivery).toMatchObject({ state: "failed", attempts: 1, lastError: "stale context" });
-      expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
-    });
-
-    it("suppresses a delayed nudge when the parent aborts after onAgentComplete", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const parent = new AbortController();
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "Parent abort after complete",
-        runInBackground: true, signal: parent.signal,
-      });
-
-      notifyCompletion(coordinator, result.record);
-      expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId && e.signal)).toBe(true);
-
-      parent.abort();
-      expect(result.record.lifecycle.resultConsumed).toBe(true);
-      expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId)).toBe(false);
-
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-    });
-
-    it("abandons background delivery without a nudge after its parent aborts", async () => {
-      const realManager = new AgentManager(undefined, { default: 1 });
-      const coordinator = new SpawnCoordinator(realManager);
-      realManager.setOnComplete((record, execution) => coordinator.onAgentComplete(record, execution));
-      const parent = new AbortController();
-      const runner = new Promise<any>(() => {});
-      mockRunAgent.mockReturnValue(runner);
-
-      try {
-        const result = await coordinator.spawn(mockPi, ctx, {
-          type: "builder", prompt: "task", description: "Parent abort",
-          runInBackground: true, signal: parent.signal,
-        });
-        parent.abort();
-
-        expect(result.record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent", resultConsumed: true });
-        expect(result.record.delivery).toMatchObject({ state: "abandoned" });
-        expect(deliveryEntries(coordinator).some((entry) => entry.agentId === result.agentId && !entry.completed)).toBe(false);
-        expect(deliveryEntries(coordinator).some((e) => e.agentId === result.agentId)).toBe(false);
-
-        vi.advanceTimersByTime(200);
-        expect(mockPi.sendMessage).not.toHaveBeenCalled();
-      } finally {
-        realManager.dispose();
-      }
-    });
-  });
-
-    it("abandons pending or failed delivery on parent abort, but cannot retract an accepted handoff", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const parent = new AbortController();
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "abort", runInBackground: true, signal: parent.signal,
-      });
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-      parent.abort();
-      vi.advanceTimersByTime(200);
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-      expect(result.record.delivery?.state).toBe("abandoned");
-      expect((coordinator as any).deliveryService.backgroundDeliveries.size).toBe(0);
-
-      const acceptedParent = new AbortController();
-      const accepted = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "accepted", runInBackground: true, signal: acceptedParent.signal,
-      });
-      accepted.record.lifecycle.status = "completed";
-      mockPi.sendMessage.mockReset();
-      notifyCompletion(coordinator, accepted.record);
-      vi.advanceTimersByTime(200);
-      expect(accepted.record.delivery?.state).toBe("accepted");
-      acceptedParent.abort();
-      expect(accepted.record.delivery?.state).toBe("accepted");
-      expect(mockPi.sendMessage).toHaveBeenCalledOnce();
-    });
-
-    it("marks pending records abandoned when dispose races completion and leaves no timer or listener tracking", async () => {
-      const coordinator = new SpawnCoordinator(manager as any);
-      const parent = new AbortController();
-      const result = await coordinator.spawn(mockPi, ctx, {
-        type: "builder", prompt: "task", description: "dispose", runInBackground: true, signal: parent.signal,
-      });
-      coordinator.dispose();
-      result.record.lifecycle.status = "completed";
-      notifyCompletion(coordinator, result.record);
-      vi.advanceTimersByTime(500);
-
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-      expect(result.record.delivery?.state).toBe("abandoned");
-      expect((coordinator as any).deliveryService.backgroundDeliveries.size).toBe(0);
-    });
-
-
 });

@@ -10,14 +10,13 @@ const metadata: AgentCallRenderMetadata = {
   model: "openai/gpt-4o",
   thinking: "high",
   prompt: "inspect everything",
-  mode: "background",
   kind: "new",
 };
 
 function message(
   toolCallId: string,
   details: unknown,
-  toolName: "Agent" | "AgentContinue" | "StopAgent" = "Agent",
+  toolName: "Agent" | "AgentContinue" = "Agent",
 ): Record<string, unknown> {
   return {
     role: "toolResult",
@@ -89,57 +88,53 @@ describe("Agent render metadata bridge", () => {
     expect(bridge.pendingCount()).toBe(0);
   });
 
-  it("supports parallel AgentContinue/StopAgent rows while ignoring AgentStatus", () => {
+  it("supports parallel Agent and AgentContinue rows while ignoring unrelated tools", () => {
     const bridge = new AgentRenderMetadataBridge();
     bridge.startSession();
     bridge.start("continue", "AgentContinue");
-    bridge.start("stop", "StopAgent");
-    bridge.start("status", "AgentStatus");
+    bridge.start("new", "Agent");
+    bridge.start("unrelated", "OtherTool");
     bridge.update("continue", {
       ...metadata,
       agentId: "full-continue",
       prompt: "follow up",
       kind: "continued",
     });
-    bridge.update("stop", {
-      role: metadata.role,
-      model: metadata.model,
-      thinking: metadata.thinking,
-      agentId: "full-stop",
-      prompt: "",
+    bridge.update("new", {
+      ...metadata,
+      agentId: "full-new",
+      prompt: "new task",
+      kind: "new",
     });
 
     expect(bridge.pendingCount()).toBe(2);
     expect(bridge.metadataFor("continue")).toMatchObject({
       agentId: "full-continue",
       prompt: "follow up",
-      mode: "background",
       kind: "continued",
     });
-    expect(bridge.metadataFor("stop")).toMatchObject({ agentId: "full-stop", prompt: "" });
-    expect(bridge.metadataFor("stop")).not.toHaveProperty("mode");
-    expect(bridge.metadataFor("stop")).not.toHaveProperty("kind");
-    expect(bridge.metadataFor("status")).toBeUndefined();
+    expect(bridge.metadataFor("new")).toMatchObject({ agentId: "full-new", prompt: "new task", kind: "new" });
+    expect(bridge.metadataFor("new")).not.toHaveProperty("mode");
+    expect(bridge.metadataFor("unrelated")).toBeUndefined();
 
     const continued = bridge.onToolResult({
       toolName: "AgentContinue",
       toolCallId: "continue",
       details: { downstream: true },
     });
-    const stopped = bridge.onToolResult({
-      toolName: "StopAgent",
-      toolCallId: "stop",
+    const created = bridge.onToolResult({
+      toolName: "Agent",
+      toolCallId: "new",
       details: { downstream: true },
     });
     expect(continued?.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({
       agentId: "full-continue",
-      mode: "background",
       kind: "continued",
     });
-    expect(stopped?.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({ agentId: "full-stop" });
+    expect(created?.details[AGENT_RENDER_DETAILS_KEY]).toMatchObject({ agentId: "full-new", kind: "new" });
 
     bridge.onMessageEnd({ message: message("continue", continued?.details, "AgentContinue") });
-    bridge.onMessageEnd({ message: message("stop", stopped?.details, "StopAgent") });
+    bridge.onMessageEnd({ message: message("new", created?.details, "Agent") });
     expect(bridge.pendingCount()).toBe(0);
   });
 

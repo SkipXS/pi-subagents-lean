@@ -10,11 +10,12 @@ loaded snapshot but exposes no session or global model override.
 The shell's `ConfigStore` is constructed when the module is loaded and lives for
 the extension lifetime. `session_start` reloads its config and creates the
 session-scoped `AgentManager` and `SpawnCoordinator`, mounting them on the
-shell. `session_shutdown` disposes and clears the coordinator and manager; the
-store remains and only drops its manager dependency. The session context is
+shell. `session_shutdown` clears the stateless coordinator and disposes the
+manager; the store remains and only drops its manager dependency. The session context is
 set at start and cleared at shutdown, while the PI instance is set during
 extension initialization. Owned domain state stays in the module that owns the
-concern: config in ConfigStore and background delivery in SpawnCoordinator.
+concern: config in ConfigStore, execution records in AgentManager, and foreground
+promise coordination in SpawnCoordinator.
 
 Getters always read the shell's current fields. The manager and coordinator
 getters return `null` in a child AsyncLocalStorage context, while root-only

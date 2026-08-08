@@ -20,7 +20,6 @@ function makeRecord(session: any = {}): AgentRecord {
       executions: [{
         id: "execution-1",
         prompt: "task",
-        mode: "foreground",
         status: "running",
         startedAt: 1,
       }],
@@ -53,7 +52,7 @@ describe("ExecutionTelemetry", () => {
     expect(telemetry.delta(record, "execution-1", baseline)!.usage.cost).toBeCloseTo(0.25);
 
     record.stats.executions!.push({
-      id: "execution-2", prompt: "next", mode: "foreground", status: "running", startedAt: 2,
+      id: "execution-2", prompt: "next", status: "running", startedAt: 2,
     });
     callbacks.onAssistantUsage({ input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
     expect(record.stats.lifetimeUsage.input).toBe(35);

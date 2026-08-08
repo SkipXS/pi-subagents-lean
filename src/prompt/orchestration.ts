@@ -18,7 +18,7 @@ New agents lack parent history/tool results and peer output. For substantive spa
 
 Do not duplicate delegated work. Re-enter the same area only for incomplete or conflicting results or a bounded follow-up. Never run concurrent writers or overlapping changes. Give the same writer at most one focused correction per subsystem; then take over or re-plan with a new owner.
 
-Run dependent work in the foreground and independent read-only work in the background. run_in_background returns immediately. After a background spawn, do useful independent work; never poll or sleep. Resume dependent work only after its completion notification.
+Run dependent stages sequentially. Parallelize independent read-only work by issuing multiple foreground Agent calls in the same turn; Pi submits the batch concurrently and the configured root limit controls execution.
 
 AgentContinue reuses a finished session; send new instructions plus unseen parent/peer evidence. Running, queued, stopped, aborted, or failed agents cannot be continued.
 
