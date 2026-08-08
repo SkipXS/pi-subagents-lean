@@ -86,10 +86,10 @@ release a slot or mutate a removed record.
 Interactive rows are limited to `Agent` and `AgentContinue`. Headers show role,
 canonical ID when known, resolved model, thinking, prompt, and `Run: New` or
 `Run: Continued`. Queued is shown only from an authoritative lifecycle result.
-Pi's working spinner is interactive-only; print, HTML, RPC, JSON, and headless
-calls use no process-live renderer timer. Terminal text is escaped and
-invalidation is guarded against stale, synchronous, asynchronous, and detached
-hosts.
+The custom renderer is static; Pi's pending shell owns open-row presentation,
+and print, HTML, RPC, JSON, and headless calls use no renderer timers. Terminal
+text is escaped and invalidation is guarded against stale, synchronous,
+asynchronous, and detached hosts.
 
 ## Catalog, trust, and handoffs
 

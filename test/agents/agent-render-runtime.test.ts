@@ -1,35 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { formatAgentCallText } from "../../src/agents/agent-render-format.js";
+import { formatAgentCallText, formatAgentContinueCallText } from "../../src/agents/agent-render-format.js";
 import {
-  AGENT_WORKING_SPINNER_FRAMES,
-  AGENT_WORKING_SPINNER_INTERVAL_MS,
   getAgentRendererState,
   renderCallWithFormatter,
   runtimeFor,
-  stopAgentRendererTimers,
   type AgentRendererContext,
 } from "../../src/agents/agent-render-runtime.js";
 
-function context(
-  args: unknown = {},
-  lifecycle: Pick<AgentRendererContext, "executionStarted" | "isPartial" | "isError"> = {},
-): AgentRendererContext {
+function context(args: unknown = {}): AgentRendererContext {
   return {
     args,
     state: {},
     lastComponent: undefined,
     invalidate: vi.fn(),
-    ...lifecycle,
   };
 }
 
 afterEach(() => {
-  stopAgentRendererTimers();
   vi.useRealTimers();
 });
 
 describe("Agent render runtime boundary", () => {
-  it("keeps one WeakMap runtime per row state and no state across rows", () => {
+  it("keeps one row runtime per state object and no state across rows", () => {
     const first = context({ agent: "first", prompt: "one" });
     const second = context({ agent: "second", prompt: "two" });
 
@@ -39,46 +31,24 @@ describe("Agent render runtime boundary", () => {
     expect(getAgentRendererState(second)).toEqual({ version: 0, callVersion: -1, indicator: "" });
   });
 
-  it("keeps noninteractive/direct rows timer-free after capability probing", () => {
+  it("keeps Agent and AgentContinue calls static and timer-free", () => {
     vi.useFakeTimers();
-    const row = context(
-      { agent: "scout", prompt: "inspect" },
-      { executionStarted: false, isPartial: true },
-    );
+    const rows: Array<[
+      "Agent" | "AgentContinue",
+      unknown,
+      (metadata: any, args: unknown) => string,
+    ]> = [
+      ["Agent", { agent: "scout", prompt: "inspect" }, formatAgentCallText],
+      ["AgentContinue", { agent_id: "agent-full-id", prompt: "continue" }, formatAgentContinueCallText],
+    ];
 
-    const component = renderCallWithFormatter("Agent", row.args, row, formatAgentCallText);
-    expect(component.render(200)[0]).toContain("Role: scout");
-    expect(vi.getTimerCount()).toBe(0);
-    expect(runtimeFor(row).capability).toBe("noninteractive");
-  });
-
-  it("starts, advances, and shuts down only the interactive spinner", () => {
-    vi.useFakeTimers();
-    expect(AGENT_WORKING_SPINNER_FRAMES[0]).toBe("⠋");
-    expect(AGENT_WORKING_SPINNER_INTERVAL_MS).toBe(80);
-
-    const row = context(
-      { agent: "scout", prompt: "inspect" },
-      { executionStarted: false, isPartial: true },
-    );
-    row.invalidate = vi.fn(() => {
-      renderCallWithFormatter("Agent", row.args, row, formatAgentCallText);
-    });
-
-    const unopened = renderCallWithFormatter("Agent", row.args, row, formatAgentCallText);
-    row.lastComponent = unopened;
-    row.executionStarted = true;
-    const call = renderCallWithFormatter("Agent", row.args, row, formatAgentCallText);
-
-    expect(call.render(200)[0]).toContain("⠋ Role: scout");
-    expect(vi.getTimerCount()).toBe(1);
-    vi.advanceTimersByTime(AGENT_WORKING_SPINNER_INTERVAL_MS);
-    expect(row.invalidate).toHaveBeenCalled();
-    expect(call.render(200)[0]).toContain("⠙ Role: scout");
-
-    stopAgentRendererTimers();
-    expect(vi.getTimerCount()).toBe(0);
-    expect(call.render(200)[0]).toContain("Role: scout");
-    expect(call.render(200)[0]).not.toContain("⠙");
+    for (const [toolName, args, format] of rows) {
+      const row = context(args);
+      const component = renderCallWithFormatter(toolName, args, row, format);
+      expect(component.render(200)[0]).toContain(toolName === "Agent" ? "Role: scout" : "Agent ID: agent-full-id");
+      expect(component.render(200).join("\n")).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(runtimeFor(row)).toEqual({ callComponent: component });
+    }
   });
 });

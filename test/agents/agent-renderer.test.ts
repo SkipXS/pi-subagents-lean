@@ -2,27 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_RENDER_DETAILS_KEY,
   AgentCallDetailsComponent,
-  AGENT_WORKING_SPINNER_FRAMES,
-  AGENT_WORKING_SPINNER_INTERVAL_MS,
   renderAgentCall,
   renderAgentContinueCall,
   renderAgentResult,
-  stopAgentRendererTimers,
 } from "../../src/agents/agent-renderer.js";
 
 const theme = { fg: (_name: string, text: string) => text };
 
-function context(
-  args: unknown = {},
-  lifecycle: { executionStarted?: boolean; isPartial?: boolean; isError?: boolean } = {},
-): any {
+function context(args: unknown = {}, lifecycle: { isError?: boolean } = {}): any {
   return { args, state: {}, lastComponent: undefined, invalidate: vi.fn(), ...lifecycle };
-}
-
-function interactiveContext(args: unknown, render: (args: unknown, theme: unknown, context: any) => unknown = renderAgentCall): any {
-  const ctx = context(args, { executionStarted: false, isPartial: true });
-  ctx.invalidate = vi.fn(() => render(ctx.args, theme, ctx));
-  return ctx;
 }
 
 function lines(component: { render(width: number): string[] }, width = 240): string[] {
@@ -43,7 +31,6 @@ const usage = {
 };
 
 afterEach(() => {
-  stopAgentRendererTimers();
   vi.useRealTimers();
 });
 
@@ -96,7 +83,7 @@ describe("Agent and AgentContinue row renderer", () => {
     ]);
   });
 
-  it("uses authoritative queued status and the four-argument result seam", () => {
+  it("uses only authoritative queued status and keeps the four-argument result seam", () => {
     const ctx = context({ agent: "scout", prompt: "queued" });
     const call = renderAgentCall(ctx.args, theme, ctx);
     renderAgentResult(
@@ -104,85 +91,111 @@ describe("Agent and AgentContinue row renderer", () => {
       { isPartial: false }, theme, { ...ctx, lastComponent: undefined },
     );
     expect(lines(call)[0]).toContain("◷");
+    expect(lines(call)[0]).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u);
   });
 
-  it("animates only an interactive open Agent row and stops safely on completion", () => {
+  it("keeps open rows static and uses terminal markers for success, error, and abort", () => {
     vi.useFakeTimers();
-    expect(AGENT_WORKING_SPINNER_FRAMES).toEqual(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
-    expect(AGENT_WORKING_SPINNER_INTERVAL_MS).toBe(80);
-
-    const ctx = interactiveContext({ agent: "scout", prompt: "inspect" });
-    const unopened = renderAgentCall(ctx.args, theme, ctx);
-    ctx.lastComponent = unopened;
-    ctx.executionStarted = true;
+    const ctx = context({ agent: "scout", prompt: "inspect" });
     const call = renderAgentCall(ctx.args, theme, ctx);
-    ctx.invalidate.mockClear();
-    expect(lines(call)[0]).toContain("⠋ Role: scout");
-    expect(vi.getTimerCount()).toBe(1);
-    vi.advanceTimersByTime(AGENT_WORKING_SPINNER_INTERVAL_MS);
-    expect(ctx.invalidate).toHaveBeenCalledOnce();
-    expect(lines(renderAgentCall(ctx.args, theme, { ...ctx, lastComponent: call }))[0]).toContain("⠙ Role: scout");
+    expect(lines(call)[0]).toBe("Role: scout | Model: — | Thinking: — | Run: New");
+    expect(vi.getTimerCount()).toBe(0);
 
     renderAgentResult(
       { content: [{ type: "text", text: "done" }] },
-      { isPartial: false }, theme, { ...ctx, lastComponent: undefined, isPartial: false }, "Agent",
+      { isPartial: false }, theme, { ...ctx, lastComponent: undefined }, "Agent",
     );
     expect(vi.getTimerCount()).toBe(0);
     expect(lines(call)[0]).toContain("✓ Role: scout");
+
+    const errorContext = context({ agent: "reviewer", prompt: "stop" });
+    const errorCall = renderAgentCall(errorContext.args, theme, errorContext);
+    renderAgentResult(
+      { content: [{ type: "text", text: "cancelled" }], details: { status: "aborted" } },
+      { isPartial: false }, theme, { ...errorContext, lastComponent: undefined, isError: true }, "Agent",
+    );
+    expect(lines(errorCall)[0]).toContain("✗ Role: reviewer");
+    expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("stops a spinner when Pi replaces the active row component", () => {
-    vi.useFakeTimers();
-    const ctx = interactiveContext({ agent_id: "agent", prompt: "continue" }, renderAgentContinueCall);
-    const unopened = renderAgentContinueCall(ctx.args, theme, ctx);
-    ctx.lastComponent = unopened;
-    ctx.executionStarted = true;
-    const active = renderAgentContinueCall(ctx.args, theme, ctx);
-    expect(vi.getTimerCount()).toBe(1);
+  it("restores the authoritative static marker on a later row render", () => {
+    const ctx = context({ agent_id: "agent-full-id", prompt: "continue" });
+    const call = renderAgentContinueCall(ctx.args, theme, ctx);
+    renderAgentResult(
+      { content: [], details: { currentExecution: { status: "queued" } } },
+      { isPartial: false }, theme, { ...ctx, lastComponent: undefined }, "AgentContinue",
+    );
 
-    const replacement = renderAgentContinueCall(ctx.args, theme, {
+    const restored = renderAgentContinueCall(ctx.args, theme, {
       ...ctx,
-      lastComponent: new AgentCallDetailsComponent(),
+      lastComponent: undefined,
     });
-    expect(replacement).toBeInstanceOf(AgentCallDetailsComponent);
-    expect(vi.getTimerCount()).toBe(0);
-    expect(lines(active)[0]).toContain("Role: — | Agent ID: agent");
+    expect(restored).toBeInstanceOf(AgentCallDetailsComponent);
+    expect(lines(call)[0]).toContain("◷ Role: — | Agent ID: agent-full-id");
+    expect(lines(restored)[0]).toContain("◷ Role: — | Agent ID: agent-full-id");
   });
 
-  it("never starts timers for headless rows and invalidates once per metadata generation", () => {
-    vi.useFakeTimers();
-    const headless = context({ agent: "scout", prompt: "headless" }, { executionStarted: true, isPartial: true });
-    renderAgentCall(headless.args, theme, headless);
-    expect(vi.getTimerCount()).toBe(0);
-
-    headless.invalidate.mockClear();
+  it("hydrates metadata once with synchronous, asynchronous, no-op, and throwing invalidation", async () => {
+    const modes = ["sync", "async", "noop", "throwing"] as const;
     const details = {
       [AGENT_RENDER_DETAILS_KEY]: {
-        role: "scout", model: "provider/model", thinking: "medium", prompt: "headless", kind: "new",
+        role: "reviewer",
+        agentId: "canonical-full-id",
+        model: "provider/model",
+        thinking: "medium",
+        prompt: "hydrated prompt",
+        kind: "new",
       },
     };
-    renderAgentResult({ content: [], details }, { isPartial: true }, theme, headless);
-    renderAgentResult({ content: [], details }, { isPartial: false }, theme, headless);
-    expect(headless.invalidate).toHaveBeenCalledTimes(1);
+
+    for (const mode of modes) {
+      const ctx = context({ agent: "alias", prompt: "initial" });
+      if (mode === "sync") {
+        ctx.invalidate = vi.fn(() => {
+          renderAgentCall(ctx.args, theme, ctx);
+        });
+      } else if (mode === "async") {
+        ctx.invalidate = vi.fn(() => {
+          queueMicrotask(() => renderAgentCall(ctx.args, theme, ctx));
+        });
+      } else if (mode === "throwing") {
+        ctx.invalidate = vi.fn(() => {
+          throw new Error("detached");
+        });
+      } else {
+        ctx.invalidate = vi.fn();
+      }
+
+      const first = renderAgentResult(
+        { content: [{ type: "text", text: "result" }], details },
+        { isPartial: false }, theme, ctx, "Agent",
+      );
+      const second = renderAgentResult(
+        { content: [{ type: "text", text: "result" }], details },
+        { isPartial: false }, theme, ctx, "Agent",
+      );
+      await Promise.resolve();
+
+      expect(ctx.invalidate, mode).toHaveBeenCalledOnce();
+      expect(lines(second), mode).toEqual(["result"]);
+      expect(lines(renderAgentCall(ctx.args, theme, { ...ctx, lastComponent: undefined }))[0], mode)
+        .toContain("✓ Role: reviewer | Agent ID: canonical-full-id | Model: provider/model | Thinking: medium | Run: New");
+      expect(lines(first).join("\n").match(/result/g) ?? []).toHaveLength(mode === "sync" ? 0 : 1);
+    }
   });
 
-  it("keeps row state isolated and handles terminal errors without a live timer", () => {
-    vi.useFakeTimers();
-    const first = interactiveContext({ agent: "first", prompt: "one" });
-    const second = interactiveContext({ agent: "second", prompt: "two" });
+  it("keeps row state isolated and terminal errors do not affect another row", () => {
+    const first = context({ agent: "first", prompt: "one" });
+    const second = context({ agent: "second", prompt: "two" });
     const firstCall = renderAgentCall(first.args, theme, first);
     const secondCall = renderAgentCall(second.args, theme, second);
     expect(firstCall).toBeInstanceOf(AgentCallDetailsComponent);
     expect(lines(secondCall)[0]).toContain("Role: second");
 
-    first.lastComponent = firstCall;
-    first.executionStarted = true;
-    renderAgentCall(first.args, theme, first);
     renderAgentResult(
       { content: [{ type: "text", text: "cancelled" }], details: { status: "aborted" } },
-      { isPartial: false }, theme, { ...first, lastComponent: undefined, isPartial: false }, "Agent",
+      { isPartial: false }, theme, { ...first, lastComponent: undefined }, "Agent",
     );
-    expect(vi.getTimerCount()).toBe(0);
     expect(lines(firstCall)[0]).toContain("✗ Role: first");
     expect(lines(secondCall)[0]).not.toContain("✗");
   });

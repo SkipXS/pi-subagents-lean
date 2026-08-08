@@ -7,7 +7,6 @@ import {
   createAgentRenderMetadataBridge,
   type AgentRenderMetadataBridge,
 } from "./agents/agent-render-bridge.js";
-import { stopAgentRendererTimers } from "./agents/agent-render-runtime.js";
 import { getOrchestrationPromptUpdate } from "./prompt/orchestration.js";
 import {
   getCoordinator,
@@ -123,7 +122,6 @@ export function setupEventListeners(
    * inherits stale manager, coordinator, or store references.
    */
   const cleanupSessionRuntime = async (cleanupEpoch: number): Promise<void> => {
-    stopAgentRendererTimers();
     renderBridge.clear();
     let cleanupError: unknown;
     const attempt = async (work: () => void | Promise<void>) => {
@@ -177,9 +175,6 @@ export function setupEventListeners(
   pi.on("session_start", async (_event: unknown, ctx: ExtensionContext) => {
     // session_start also covers Pi reload/session replacement.
     if (cleanupPromise) await cleanupPromise;
-    // Stop any row timer left by a prior renderer generation before accepting
-    // new rows.
-    stopAgentRendererTimers();
     renderBridge.startSession();
     const startupEpoch = ++sessionEpoch;
     setSessionCtx(ctx);
@@ -204,7 +199,6 @@ export function setupEventListeners(
 
   // session_shutdown — abort all root executions and dispose the manager.
   pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
-    stopAgentRendererTimers();
     ++sessionEpoch;
     // Invalidate pending parent scans before asynchronous cleanup. Worktree
     // catalogs are invocation-local and do not need to be cleared here.

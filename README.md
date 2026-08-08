@@ -73,7 +73,7 @@ A prefix is accepted only when it resolves to one retained root record. The
 record must have completed successfully, be settled, and still have its live
 session. The continuation reuses that session, model, and working directory.
 
-## Interactive rows and results
+## Agent rows and results
 
 Interactive `Agent` and `AgentContinue` rows show, in order:
 
@@ -85,10 +85,10 @@ complete prompt
 
 The canonical full ID replaces a prefix after acceptance. A new row uses
 `Run: New`; a continuation uses `Run: Continued`. Queued is shown only when
-Pi supplies an authoritative queued lifecycle state. Interactive open rows use
-Pi's ten-frame working spinner at 80 ms per frame; terminal rows use success or
-error markers. HTML, print, RPC, JSON, and headless paths do not create timers.
-Prompt and result text is escaped before terminal rendering, and row
+Pi supplies an authoritative queued lifecycle state. The custom renderer is
+static: Pi owns the pending shell, while terminal rows use static success or
+error markers. HTML, print, RPC, JSON, and headless paths create no renderer
+timers. Prompt and result text is escaped before terminal rendering, and row
 invalidation is coalesced and safe when the host invalidates synchronously,
 asynchronously, or not at all.
 

@@ -23,14 +23,11 @@ import {
 import type { PlaintextComponent } from "./agent-render-text.js";
 import {
   AGENT_RENDER_CALL_VERSION_KEY,
-  canAnimateForeground,
   getAgentRendererState,
   isExecutionTool,
   persistAgentRendererState,
   renderCallWithFormatter,
-  runtimeFor,
   setRowIndicator,
-  stopAgentRendererTimers,
 } from "./agent-render-runtime.js";
 import type { AgentRendererContext } from "./agent-render-runtime.js";
 
@@ -42,7 +39,6 @@ export {
   formatAgentUsageLine,
   getAgentCallRenderMetadata,
   withAgentCallRenderMetadata,
-  stopAgentRendererTimers,
 };
 export type {
   AgentCallRenderMetadata,
@@ -51,11 +47,6 @@ export type {
 };
 export { AgentCallDetailsComponent, escapeTerminalText, visibleWidth };
 export type { PlaintextComponent, AgentRendererContext };
-export {
-  AGENT_WORKING_SPINNER_FRAMES,
-  AGENT_WORKING_SPINNER_INTERVAL_MS,
-} from "./agent-render-runtime.js";
-
 interface AgentResultLike {
   content?: unknown;
   details?: unknown;
@@ -158,20 +149,11 @@ export function renderAgentResult(
   const partial = options.isPartial === true;
   const failed = resultIsFailure(safeResult, context, executionTool);
   const queued = resultIsQueued(safeResult, executionTool);
-  const runtime = runtimeFor(context);
-
   if (failed) {
     setRowIndicator(context, state, "error");
   } else if (queued) {
     setRowIndicator(context, state, "queued");
-  } else if (partial) {
-    if (
-      (state.indicator === "" || state.indicator === "working")
-      && canAnimateForeground(resolvedToolName, state.metadata, context.args, context, runtime)
-    ) {
-      setRowIndicator(context, state, "working");
-    }
-  } else {
+  } else if (!partial) {
     setRowIndicator(context, state, "success");
   }
 
