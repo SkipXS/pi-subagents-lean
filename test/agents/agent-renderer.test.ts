@@ -83,56 +83,69 @@ describe("Agent and AgentContinue row renderer", () => {
     ]);
   });
 
-  it("uses only authoritative queued status and keeps the four-argument result seam", () => {
+  it("leaves queued waits host-pending and preserves generic result text", () => {
     const ctx = context({ agent: "scout", prompt: "queued" });
     const call = renderAgentCall(ctx.args, theme, ctx);
-    renderAgentResult(
+    const result = renderAgentResult(
       { content: [{ type: "text", text: "queued" }], details: { status: "queued" } },
       { isPartial: false }, theme, { ...ctx, lastComponent: undefined },
     );
-    expect(lines(call)[0]).toContain("◷");
-    expect(lines(call)[0]).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u);
+    expect(lines(call)[0]).toBe("Role: scout | Model: — | Thinking: — | Run: New");
+    expect(lines(result)).toEqual(["queued"]);
+    expect(lines(call)[0]).not.toMatch(/[\u25f7\u2713\u2717]/u);
   });
 
-  it("keeps open rows static and uses terminal markers for success, error, and abort", () => {
+  it("leaves success and error lifecycle to Pi while keeping rows static", () => {
     vi.useFakeTimers();
     const ctx = context({ agent: "scout", prompt: "inspect" });
     const call = renderAgentCall(ctx.args, theme, ctx);
     expect(lines(call)[0]).toBe("Role: scout | Model: — | Thinking: — | Run: New");
     expect(vi.getTimerCount()).toBe(0);
 
-    renderAgentResult(
+    const result = renderAgentResult(
       { content: [{ type: "text", text: "done" }] },
-      { isPartial: false }, theme, { ...ctx, lastComponent: undefined }, "Agent",
+      { isPartial: false }, theme, { ...ctx, lastComponent: undefined },
     );
     expect(vi.getTimerCount()).toBe(0);
-    expect(lines(call)[0]).toContain("✓ Role: scout");
+    expect(lines(call)[0]).toBe("Role: scout | Model: — | Thinking: — | Run: New");
+    expect(lines(result)).toEqual(["done"]);
 
     const errorContext = context({ agent: "reviewer", prompt: "stop" });
     const errorCall = renderAgentCall(errorContext.args, theme, errorContext);
-    renderAgentResult(
+    const errorResult = renderAgentResult(
       { content: [{ type: "text", text: "cancelled" }], details: { status: "aborted" } },
-      { isPartial: false }, theme, { ...errorContext, lastComponent: undefined, isError: true }, "Agent",
+      { isPartial: false }, theme, { ...errorContext, lastComponent: undefined, isError: true },
     );
-    expect(lines(errorCall)[0]).toContain("✗ Role: reviewer");
+    expect(lines(errorCall)[0]).toBe("Role: reviewer | Model: — | Thinking: — | Run: New");
+    expect(lines(errorResult)).toEqual(["cancelled"]);
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("restores the authoritative static marker on a later row render", () => {
+  it("ignores legacy row status data while restoring metadata", () => {
     const ctx = context({ agent_id: "agent-full-id", prompt: "continue" });
-    const call = renderAgentContinueCall(ctx.args, theme, ctx);
-    renderAgentResult(
-      { content: [], details: { currentExecution: { status: "queued" } } },
-      { isPartial: false }, theme, { ...ctx, lastComponent: undefined }, "AgentContinue",
-    );
+    const legacyIndicatorKey = `${AGENT_RENDER_DETAILS_KEY}:indicator`;
+    ctx.state[legacyIndicatorKey] = "queued";
+    ctx.state[AGENT_RENDER_DETAILS_KEY] = {
+      role: "reviewer",
+      agentId: "canonical-full-id",
+      model: "provider/model",
+      thinking: "high",
+      prompt: "restored prompt",
+      kind: "continued",
+    };
 
     const restored = renderAgentContinueCall(ctx.args, theme, {
       ...ctx,
       lastComponent: undefined,
     });
     expect(restored).toBeInstanceOf(AgentCallDetailsComponent);
-    expect(lines(call)[0]).toContain("◷ Role: — | Agent ID: agent-full-id");
-    expect(lines(restored)[0]).toContain("◷ Role: — | Agent ID: agent-full-id");
+    expect(lines(restored)).toEqual([
+      "Role: reviewer | Agent ID: canonical-full-id | Model: provider/model | Thinking: high | Run: Continued",
+      "",
+      "Prompt:",
+      "restored prompt",
+    ]);
+    expect(ctx.state[legacyIndicatorKey]).toBe("queued");
   });
 
   it("hydrates metadata once with synchronous, asynchronous, no-op, and throwing invalidation", async () => {
@@ -168,18 +181,18 @@ describe("Agent and AgentContinue row renderer", () => {
 
       const first = renderAgentResult(
         { content: [{ type: "text", text: "result" }], details },
-        { isPartial: false }, theme, ctx, "Agent",
+        { isPartial: false }, theme, ctx,
       );
       const second = renderAgentResult(
         { content: [{ type: "text", text: "result" }], details },
-        { isPartial: false }, theme, ctx, "Agent",
+        { isPartial: false }, theme, ctx,
       );
       await Promise.resolve();
 
       expect(ctx.invalidate, mode).toHaveBeenCalledOnce();
       expect(lines(second), mode).toEqual(["result"]);
       expect(lines(renderAgentCall(ctx.args, theme, { ...ctx, lastComponent: undefined }))[0], mode)
-        .toContain("✓ Role: reviewer | Agent ID: canonical-full-id | Model: provider/model | Thinking: medium | Run: New");
+        .toBe("Role: reviewer | Agent ID: canonical-full-id | Model: provider/model | Thinking: medium | Run: New");
       expect(lines(first).join("\n").match(/result/g) ?? []).toHaveLength(mode === "sync" ? 0 : 1);
     }
   });
@@ -194,9 +207,9 @@ describe("Agent and AgentContinue row renderer", () => {
 
     renderAgentResult(
       { content: [{ type: "text", text: "cancelled" }], details: { status: "aborted" } },
-      { isPartial: false }, theme, { ...first, lastComponent: undefined }, "Agent",
+      { isPartial: false }, theme, { ...first, lastComponent: undefined },
     );
-    expect(lines(firstCall)[0]).toContain("✗ Role: first");
-    expect(lines(secondCall)[0]).not.toContain("✗");
+    expect(lines(firstCall)[0]).toBe("Role: first | Model: — | Thinking: — | Run: New");
+    expect(lines(secondCall)[0]).toBe("Role: second | Model: — | Thinking: — | Run: New");
   });
 });

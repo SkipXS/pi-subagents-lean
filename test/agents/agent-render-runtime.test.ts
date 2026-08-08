@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { formatAgentCallText, formatAgentContinueCallText } from "../../src/agents/agent-render-format.js";
 import {
+  AGENT_RENDER_DETAILS_KEY,
+  formatAgentCallText,
+  formatAgentContinueCallText,
+} from "../../src/agents/agent-render-format.js";
+import {
+  AGENT_RENDER_CALL_VERSION_KEY,
+  AGENT_RENDER_VERSION_KEY,
   getAgentRendererState,
   renderCallWithFormatter,
-  runtimeFor,
   type AgentRendererContext,
 } from "../../src/agents/agent-render-runtime.js";
 
@@ -21,14 +26,21 @@ afterEach(() => {
 });
 
 describe("Agent render runtime boundary", () => {
-  it("keeps one row runtime per state object and no state across rows", () => {
+  it("keeps metadata versions in each row's persisted state", () => {
     const first = context({ agent: "first", prompt: "one" });
     const second = context({ agent: "second", prompt: "two" });
+    first.state[AGENT_RENDER_DETAILS_KEY] = {
+      role: "reviewer",
+      prompt: "hydrated",
+      kind: "new",
+    };
 
-    expect(runtimeFor(first)).toBe(runtimeFor(first));
-    expect(runtimeFor(first)).not.toBe(runtimeFor(second));
-    expect(getAgentRendererState(first)).toEqual({ version: 0, callVersion: -1, indicator: "" });
-    expect(getAgentRendererState(second)).toEqual({ version: 0, callVersion: -1, indicator: "" });
+    expect(getAgentRendererState(first)).toEqual({
+      metadata: { role: "reviewer", prompt: "hydrated", kind: "new" },
+      version: 0,
+      callVersion: -1,
+    });
+    expect(getAgentRendererState(second)).toEqual({ version: 0, callVersion: -1 });
   });
 
   it("keeps Agent and AgentContinue calls static and timer-free", () => {
@@ -44,11 +56,15 @@ describe("Agent render runtime boundary", () => {
 
     for (const [toolName, args, format] of rows) {
       const row = context(args);
-      const component = renderCallWithFormatter(toolName, args, row, format);
+      const component = renderCallWithFormatter(args, row, format);
       expect(component.render(200)[0]).toContain(toolName === "Agent" ? "Role: scout" : "Agent ID: agent-full-id");
       expect(component.render(200).join("\n")).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u);
+      expect(component.render(200).join("\n")).not.toMatch(/[\u25f7\u2713\u2717]/u);
       expect(vi.getTimerCount()).toBe(0);
-      expect(runtimeFor(row)).toEqual({ callComponent: component });
+      expect(row.state).toMatchObject({
+        [AGENT_RENDER_VERSION_KEY]: 0,
+        [AGENT_RENDER_CALL_VERSION_KEY]: 0,
+      });
     }
   });
 });

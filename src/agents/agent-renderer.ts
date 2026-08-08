@@ -24,10 +24,8 @@ import type { PlaintextComponent } from "./agent-render-text.js";
 import {
   AGENT_RENDER_CALL_VERSION_KEY,
   getAgentRendererState,
-  isExecutionTool,
   persistAgentRendererState,
   renderCallWithFormatter,
-  setRowIndicator,
 } from "./agent-render-runtime.js";
 import type { AgentRendererContext } from "./agent-render-runtime.js";
 
@@ -50,7 +48,6 @@ export type { PlaintextComponent, AgentRendererContext };
 interface AgentResultLike {
   content?: unknown;
   details?: unknown;
-  isError?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -63,7 +60,7 @@ export function renderAgentCall(
   _theme: unknown,
   context: AgentRendererContext,
 ): PlaintextComponent {
-  return renderCallWithFormatter("Agent", args, context, formatAgentCallText);
+  return renderCallWithFormatter(args, context, formatAgentCallText);
 }
 
 /** Render the AgentContinue call header and complete prompt. */
@@ -74,7 +71,6 @@ export function renderAgentControlCall(
   context: AgentRendererContext,
 ): PlaintextComponent {
   return renderCallWithFormatter(
-    toolName,
     args,
     context,
     (metadata, rawArgs) => formatAgentControlCallText(toolName, metadata, rawArgs),
@@ -89,30 +85,6 @@ export function renderAgentContinueCall(
   return renderAgentControlCall("AgentContinue", args, theme, context);
 }
 
-function failureStatus(value: unknown): boolean {
-  return value === "error" || value === "aborted" || value === "stopped" || value === "cancelled";
-}
-
-function resultIsFailure(result: AgentResultLike, context: AgentRendererContext, executionTool: boolean): boolean {
-  if (context.isError === true || result.isError === true) return true;
-  if (!executionTool || !isRecord(result.details)) return false;
-  if (failureStatus(result.details.status)) return true;
-  const currentExecution = isRecord(result.details.currentExecution)
-    ? result.details.currentExecution
-    : undefined;
-  return failureStatus(currentExecution?.status);
-}
-
-/** Only an explicit lifecycle status qualifies as an authoritative queue marker. */
-function resultIsQueued(result: AgentResultLike, executionTool: boolean): boolean {
-  if (!executionTool || !isRecord(result.details)) return false;
-  if (result.details.status === "queued") return true;
-  const currentExecution = isRecord(result.details.currentExecution)
-    ? result.details.currentExecution
-    : undefined;
-  return currentExecution?.status === "queued";
-}
-
 /**
  * Hydrate row-local state from partial/final details and keep Pi's text result
  * rendering intact. Invalidation is guarded by value equality so repeated
@@ -123,16 +95,10 @@ export function renderAgentResult(
   options: { expanded?: boolean; isPartial?: boolean },
   _theme: unknown,
   context: AgentRendererContext,
-  toolName?: AgentRenderToolName,
 ): PlaintextComponent {
   const safeResult = isRecord(result) ? result as AgentResultLike : {};
   const state = getAgentRendererState(context);
   const incoming = getAgentCallRenderMetadata(safeResult.details);
-  const inferredExecutionTool = isExecutionTool(toolName, state.metadata, context.args);
-  const resolvedToolName: AgentRenderToolName = toolName
-    ?? (inferredExecutionTool && isRecord(context.args) && typeof context.args.agent_id === "string"
-      ? "AgentContinue"
-      : "Agent");
   let synchronouslyRedrawn = false;
   let metadataChanged = false;
 
@@ -145,17 +111,7 @@ export function renderAgentResult(
     }
   }
 
-  const executionTool = isExecutionTool(resolvedToolName, state.metadata, context.args);
   const partial = options.isPartial === true;
-  const failed = resultIsFailure(safeResult, context, executionTool);
-  const queued = resultIsQueued(safeResult, executionTool);
-  if (failed) {
-    setRowIndicator(context, state, "error");
-  } else if (queued) {
-    setRowIndicator(context, state, "queued");
-  } else if (!partial) {
-    setRowIndicator(context, state, "success");
-  }
 
   if (metadataChanged) {
     persistAgentRendererState(context, state);

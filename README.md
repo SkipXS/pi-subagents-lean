@@ -84,12 +84,12 @@ complete prompt
 ```
 
 The canonical full ID replaces a prefix after acceptance. A new row uses
-`Run: New`; a continuation uses `Run: Continued`. Queued is shown only when
-Pi supplies an authoritative queued lifecycle state. The custom renderer is
-static: Pi owns the pending shell, while terminal rows use static success or
-error markers. HTML, print, RPC, JSON, and headless paths create no renderer
-timers. Prompt and result text is escaped before terminal rendering, and row
-invalidation is coalesced and safe when the host invalidates synchronously,
+`Run: New`; a continuation uses `Run: Continued`. The extension keeps
+informative static headers, prompts, results, usage details, and terminal-safe
+text while Pi owns the pending, success, and error visual lifecycle. Real
+queued waits remain host-pending because queue state is not sent live to the
+renderer. HTML, print, RPC, JSON, and headless paths create no renderer timers;
+row invalidation is coalesced and safe when the host invalidates synchronously,
 asynchronously, or not at all.
 
 A successful result includes the canonical full ID, the complete response, and

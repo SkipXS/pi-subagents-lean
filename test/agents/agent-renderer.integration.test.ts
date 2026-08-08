@@ -20,8 +20,7 @@ describe("Agent renderer with Pi's ToolExecutionComponent", () => {
       description: "test",
       parameters: {},
       renderCall: renderAgentCall,
-      renderResult: (result: any, options: any, actualTheme: any, context: any) =>
-        renderAgentResult(result, options, actualTheme, context, "Agent"),
+      renderResult: renderAgentResult,
     } as any;
     const renderer = createToolHtmlRenderer({
       getToolDefinition: (name: string) => name === "Agent" ? toolDefinition : undefined,
@@ -43,8 +42,7 @@ describe("Agent renderer with Pi's ToolExecutionComponent", () => {
       description: "test",
       parameters: {},
       renderCall: renderAgentCall,
-      renderResult: (result: any, options: any, actualTheme: any, context: any) =>
-        renderAgentResult(result, options, actualTheme, context, "Agent"),
+      renderResult: renderAgentResult,
     } as any;
     const renderer = createToolHtmlRenderer({
       getToolDefinition: (name: string) => name === "Agent" ? toolDefinition : undefined,
@@ -85,8 +83,7 @@ describe("Agent renderer with Pi's ToolExecutionComponent", () => {
       description: "test",
       parameters: {},
       renderCall: renderAgentCall,
-      renderResult: (result: any, options: any, actualTheme: any, context: any) =>
-        renderAgentResult(result, options, actualTheme, context, "Agent"),
+      renderResult: renderAgentResult,
     } as any;
     const component = new ToolExecutionComponent(
       "Agent",
@@ -102,6 +99,7 @@ describe("Agent renderer with Pi's ToolExecutionComponent", () => {
     const pending = component.render(200).join("\n");
     expect(pending).toContain("Role: scout");
     expect(pending).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u);
+    expect(pending).not.toMatch(/[\u25f7\u2713\u2717]/u);
     expect(vi.getTimerCount()).toBe(0);
 
     component.updateResult({
@@ -127,18 +125,20 @@ describe("Agent renderer with Pi's ToolExecutionComponent", () => {
       isError: false,
     }, false);
     const success = component.render(200).join("\n");
-    expect(success).toContain("✓ Role: reviewer | Agent ID: canonical-full-id");
+    expect(success).toContain("Role: reviewer | Agent ID: canonical-full-id");
+    expect(success).not.toMatch(/[\u25f7\u2713\u2717]/u);
     expect(success.match(/done/gu)).toHaveLength(1);
     expect(success).not.toBe(pending);
     expect(vi.getTimerCount()).toBe(0);
 
     component.updateResult({
       content: [{ type: "text", text: "failed" }],
-      details: undefined,
+      details: { status: "aborted" },
       isError: true,
     }, false);
     const error = component.render(200).join("\n");
-    expect(error).toContain("✗ Role: reviewer | Agent ID: canonical-full-id");
+    expect(error).toContain("Role: reviewer | Agent ID: canonical-full-id");
+    expect(error).not.toMatch(/[\u25f7\u2713\u2717]/u);
     expect(error).not.toBe(success);
     expect(vi.getTimerCount()).toBe(0);
   });

@@ -93,7 +93,6 @@ export function escapeTerminalText(value: string, preserveNewlines = false): str
 /** A small stateful plaintext component with conservative Unicode wrapping. */
 export class AgentCallDetailsComponent implements PlaintextComponent {
   private value = "";
-  private indicator = "";
   private cachedWidth: number | undefined;
   private cachedValue: string | undefined;
   private cachedLines: string[] | undefined;
@@ -107,25 +106,13 @@ export class AgentCallDetailsComponent implements PlaintextComponent {
     return true;
   }
 
-  /** Set the row-local status marker without mixing it into tool text. */
-  setIndicator(indicator: string): boolean {
-    const safeIndicator = escapeTerminalText(indicator);
-    if (this.indicator === safeIndicator) return false;
-    this.indicator = safeIndicator;
-    this.invalidate();
-    return true;
-  }
-
   render(width: number): string[] {
     const safeWidth = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
-    const displayValue = this.indicator.length > 0
-      ? `${this.indicator} ${this.value}`
-      : this.value;
-    if (this.cachedLines && this.cachedValue === displayValue && this.cachedWidth === safeWidth) {
+    if (this.cachedLines && this.cachedValue === this.value && this.cachedWidth === safeWidth) {
       return this.cachedLines;
     }
-    const lines = wrapPlaintext(displayValue, safeWidth);
-    this.cachedValue = displayValue;
+    const lines = wrapPlaintext(this.value, safeWidth);
+    this.cachedValue = this.value;
     this.cachedWidth = safeWidth;
     this.cachedLines = lines;
     return lines;
