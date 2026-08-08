@@ -92,8 +92,10 @@ explicit lists through the async metadata worker and `noSkills:true` in the
 child loader while preserving arrays/false, exclusion, precedence, and trust
 semantics. Context tests cover root-to-cwd ordering, 256/512 KiB
 file/total limits, deep ancestor bounds, lstat identity races, and trust.
-Config tests cover the 1 MiB pre-parse rejection, bounded override count, and
-multibyte name/model strings. Record tests cover the 64 KiB prompt/response
+Config tests cover the read-only 1 MiB pre-parse rejection, bounded override
+count, multibyte name/model strings, valid/missing/invalid/unreadable primary
+selection, non-destructive backup fallback, session reload, and frozen
+accepted snapshots. Record tests cover the 64 KiB prompt/response
 projections, full multi-MiB foreground response return, identity-safe promise
 release, shutdown cleanup, and deterministic 1 MiB summary-text pruning.
 Foreground execution lifecycle tests cover parent-signal binding and cleanup,

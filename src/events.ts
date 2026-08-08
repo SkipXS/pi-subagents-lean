@@ -27,14 +27,14 @@ import {
  * Idempotent — safe to call on every session_start.
  */
 export function ensureManagerAndCoordinator(): void {
+  const store = getStore();
   let manager = getManager();
 
   if (!manager) {
-    manager = new AgentManager(
-      getStore().concurrency as unknown as ConstructorParameters<typeof AgentManager>[0],
-    );
+    manager = new AgentManager(store.concurrency);
     setManager(manager);
-    getStore().setDeps({ manager });
+  } else {
+    manager.setConcurrency(store.concurrency);
   }
 
   if (!getCoordinator()) {
@@ -138,9 +138,9 @@ export function setupEventListeners(
     // shutdown can clean the remaining collaborators while this one is blocked.
     setCoordinator(null);
 
-    // ConfigStore, AgentManager, and session context are global. Serialize
-    // this part independently so a newer session waits for older global
-    // cleanup before mutating the shared runtime.
+    // The ConfigStore remains a read-only process-wide snapshot. Serialize
+    // manager and session cleanup independently so a newer session waits for
+    // older global cleanup before changing the shared runtime.
     const previousGlobalCleanup = globalCleanupPromise;
     const globalCleanup = (async () => {
       if (previousGlobalCleanup) {
@@ -152,12 +152,11 @@ export function setupEventListeners(
       }
       if (sessionEpoch !== cleanupEpoch) return;
 
-      await attempt(() => getStore().dispose());
-      if (sessionEpoch !== cleanupEpoch) return;
-
       const manager = getManager();
-      setManager(null);
-      if (manager) await attempt(() => manager.dispose());
+      if (manager) {
+        await attempt(() => manager.dispose());
+        setManager(null);
+      }
       if (sessionEpoch === cleanupEpoch) setSessionCtx(null);
     })();
     // Preserve this handler's rejection for its caller while allowing a newer

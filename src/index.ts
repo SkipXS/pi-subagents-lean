@@ -11,8 +11,8 @@
  *     they are not public Agent-tool parameters
  *
  * Config:
- *   - Loaded from ~/.pi/agent/subagents-lean.json at session_start
- *   - ConfigStore owns current config + persistence + runtime side effects
+ *   - Manually read from ~/.pi/agent/subagents-lean.json at session_start
+ *   - ConfigStore owns the normalized in-memory snapshot only
  *
  * Events:
  *   - before_agent_start: Refresh the parent catalog and orchestration prompt

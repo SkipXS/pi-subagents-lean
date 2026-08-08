@@ -4,8 +4,9 @@
  * Per ADR 0004, the shell is the process-local mutable container for the
  * long-lived ConfigStore and current per-session state. The manager and
  * coordinator are mounted at session_start and disposed/cleared at
- * session_shutdown. Handler modules read from shell via getter functions — no
- * separate module-level mutable globals.
+ * session_shutdown. The ConfigStore is a read-only normalized snapshot that
+ * reloads at session_start. Handler modules read from shell via getter
+ * functions — no separate module-level mutable globals.
  *
  * index.ts sets the PI instance at init and lifecycle handlers populate/clear
  * session fields; handler modules import getManager() / getCoordinator() / etc.
@@ -66,7 +67,7 @@ export function getManager(): AgentManager | null {
   return subagentRuntime.getStore() ? null : shell.manager;
 }
 
-/** The ConfigStore (lives for the lifetime of the extension). */
+/** The read-only ConfigStore snapshot (lives for the extension lifetime). */
 export function getStore(): ConfigStore {
   if (subagentRuntime.getStore()) denyRootAccess("Root ConfigStore");
   return shell.store;
