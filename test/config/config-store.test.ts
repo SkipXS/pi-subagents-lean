@@ -13,40 +13,55 @@ function defaultConfig(): SubagentsConfig {
   };
 }
 
-function memIO(initial: Partial<SubagentsConfig> = {}): {
+function mutableIO(initial: Partial<SubagentsConfig> = {}): {
   io: ConfigIO;
-  saves: SubagentsConfig[];
-  current: () => SubagentsConfig;
+  underlying: SubagentsConfig;
 } {
-  let current = structuredClone({
-    ...defaultConfig(),
-    ...initial,
-    agent: { ...defaultConfig().agent, ...(initial.agent ?? {}) },
-    concurrency: { ...defaultConfig().concurrency, ...(initial.concurrency ?? {}) },
-  });
-  const saves: SubagentsConfig[] = [];
+  const defaults = defaultConfig();
+  const underlying: SubagentsConfig = {
+    agent: { ...defaults.agent, ...(initial.agent ?? {}) },
+    concurrency: { ...defaults.concurrency, ...(initial.concurrency ?? {}) },
+    ...(initial.agents ? { agents: structuredClone(initial.agents) } : {}),
+  };
   return {
-    io: {
-      load: () => structuredClone(current),
-      save: (config) => {
-        current = structuredClone(config);
-        saves.push(structuredClone(config));
-      },
-    },
-    saves,
-    current: () => current,
+    // Deliberately return the same mutable object on every load. ConfigStore
+    // must detach each accepted snapshot from this host-owned value.
+    io: { load: () => underlying },
+    underlying,
   };
 }
 
-function managerStub(): { manager: any; concurrencies: unknown[] } {
-  const concurrencies: unknown[] = [];
-  const manager = { setConcurrency: (config: unknown) => concurrencies.push(config) };
-  return { manager, concurrencies };
-}
-
 describe("ConfigStore runtime settings", () => {
+  it("normalizes scalar and per-agent values from a load-only adapter", () => {
+    const { io } = mutableIO({
+      agent: {
+        includeContextFiles: false,
+        disableDefaultAgents: "yes" as any,
+        ignoredRole: "provider/model",
+      } as any,
+      concurrency: { default: 1.5 as any },
+      agents: {
+        Scout: { model: "provider/first", thinking: "high", ignored: true },
+        scout: { thinking: "medium" },
+        reviewer: { model: "provider/reviewer", thinking: "invalid" },
+      } as any,
+    });
+    const store = new ConfigStore(io);
+
+    expect(store.agent).toEqual({
+      includeContextFiles: false,
+      disableDefaultAgents: false,
+      orchestrationPrompt: true,
+    });
+    expect(store.concurrency).toEqual({ default: 4 });
+    expect(store.createSubagentRuntimeSettings().agents).toEqual({
+      scout: { thinking: "medium" },
+      reviewer: { model: "provider/reviewer" },
+    });
+  });
+
   it("captures normalized per-agent overrides in the accepted-spawn snapshot", () => {
-    const { io } = memIO({
+    const { io } = mutableIO({
       agents: {
         Scout: { model: "provider/model", thinking: "high" },
         scout: { thinking: "medium" },
@@ -55,8 +70,9 @@ describe("ConfigStore runtime settings", () => {
     const store = new ConfigStore(io);
     const snapshot = store.createSubagentRuntimeSettings();
 
-    expect(store.agents).toEqual({ scout: { thinking: "medium" } });
     expect(snapshot.agents).toEqual({ scout: { thinking: "medium" } });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.agent)).toBe(true);
     expect(Object.isFrozen(snapshot.agents)).toBe(true);
     expect(Object.isFrozen(snapshot.agents?.scout)).toBe(true);
   });
@@ -70,7 +86,7 @@ describe("ConfigStore runtime settings", () => {
         (_, index) => [`agent-${index}`, { model: `provider/model-${index}` }],
       )),
     };
-    const { io } = memIO({ agents: many as any });
+    const { io } = mutableIO({ agents: many as any });
     const snapshot = new ConfigStore(io).createSubagentRuntimeSettings();
 
     expect(Object.keys(snapshot.agents ?? {}).length).toBeLessThanOrEqual(256);
@@ -81,168 +97,58 @@ describe("ConfigStore runtime settings", () => {
     }
   });
 
-  it("captures a frozen stable snapshot of current settings", () => {
-    const { io } = memIO({ agent: { includeContextFiles: false } });
+  it("keeps an accepted snapshot stable while the underlying adapter changes", () => {
+    const { io, underlying } = mutableIO({ agent: { includeContextFiles: false } });
     const store = new ConfigStore(io);
     const snapshot = store.createSubagentRuntimeSettings();
 
-    expect(Object.isFrozen(snapshot)).toBe(true);
-    expect(Object.isFrozen(snapshot.agent)).toBe(true);
-    expect(snapshot.agent).toEqual({
-      includeContextFiles: false,
+    underlying.agent.includeContextFiles = true;
+    underlying.concurrency.default = 2;
+    underlying.agents = { reviewer: { thinking: "high" } };
+
+    expect(store.agent.includeContextFiles).toBe(false);
+    expect(store.concurrency).toEqual({ default: 4 });
+    expect(snapshot.agent.includeContextFiles).toBe(false);
+    expect(snapshot.agents).toBeUndefined();
+  });
+
+  it("reloads a detached normalized snapshot from the mutable adapter", () => {
+    const { io, underlying } = mutableIO({ concurrency: { default: 2 } });
+    const store = new ConfigStore(io);
+
+    underlying.agent.disableDefaultAgents = true;
+    underlying.concurrency.default = 99;
+    underlying.agents = { Scout: { thinking: "low" } };
+    store.reload();
+
+    expect(store.agent.disableDefaultAgents).toBe(true);
+    expect(store.concurrency).toEqual({ default: 4 });
+    expect(store.createSubagentRuntimeSettings().agents).toEqual({ scout: { thinking: "low" } });
+  });
+
+  it("uses complete defaults for missing scalar sections and unknown keys", () => {
+    const { io } = mutableIO({
+      agent: { unknown: true } as any,
+      concurrency: {} as any,
+      agents: { invalid: { unknown: true } } as any,
+    });
+    const store = new ConfigStore(io);
+
+    expect(store.agent).toEqual({
+      includeContextFiles: true,
       disableDefaultAgents: false,
       orchestrationPrompt: true,
     });
-
-    store.mutate.agent.setIncludeContextFiles(true);
-    expect(snapshot.agent.includeContextFiles).toBe(false);
+    expect(store.concurrency).toEqual({ default: 4 });
+    expect(store.createSubagentRuntimeSettings().agents).toBeUndefined();
   });
-});
 
-describe("ConfigStore persistence and manager effects", () => {
-  it("persists only current runtime settings", () => {
-    const { io, current, saves } = memIO();
+  it("accepts an adapter with only load and exposes no runtime controls", () => {
+    const io: ConfigIO = { load: defaultConfig };
     const store = new ConfigStore(io);
 
-    store.mutate.agent.setIncludeContextFiles(false);
-    store.mutate.agent.setDisableDefaultAgents(true);
-    store.mutate.agent.setOrchestrationPrompt(false);
-
-    expect(saves).toHaveLength(3);
-    expect(current()).toEqual({
-      agent: { includeContextFiles: false, disableDefaultAgents: true, orchestrationPrompt: false },
-      concurrency: { default: 4 },
-    });
-  });
-
-  it.each([Number.POSITIVE_INFINITY, 1.5, 0, -1, 65, Number.MAX_SAFE_INTEGER, 1e100])(
-    "normalizes unsafe loaded and mutated concurrency values %p",
-    (loadedValue) => {
-      const { io, current } = memIO({ concurrency: { default: loadedValue } as any });
-      const { manager, concurrencies } = managerStub();
-      const store = new ConfigStore(io);
-      store.setDeps({ manager });
-      concurrencies.length = 0;
-
-      expect(store.concurrency).toEqual({ default: 4 });
-      store.mutate.concurrency.setDefault(loadedValue);
-
-      expect(store.concurrency).toEqual({ default: 4 });
-      expect(current().concurrency).toEqual({ default: 4 });
-      expect(concurrencies).toEqual([{ default: 4 }]);
-    },
-  );
-
-  it("updates valid concurrency through the manager", () => {
-    const { io } = memIO();
-    const { manager, concurrencies } = managerStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ manager });
-    concurrencies.length = 0;
-
-    store.mutate.concurrency.setDefault(2);
-    expect(concurrencies.at(-1)).toEqual({ default: 2 });
-  });
-
-  it("rolls back in-memory state when persistence fails", () => {
-    const store = new ConfigStore({
-      load: () => structuredClone(defaultConfig()),
-      save: () => { throw new Error("disk full"); },
-    });
-
-    expect(() => store.mutate.agent.setIncludeContextFiles(false)).toThrow("disk full");
+    expect(Object.keys(io)).toEqual(["load"]);
     expect(store.agent.includeContextFiles).toBe(true);
-  });
-
-  it("rolls back an update failure and refreshes persistence health", () => {
-    const { io, current } = memIO();
-    let updateFailed = false;
-    io.load = () => updateFailed
-      ? { config: structuredClone(current()), health: "using-backup", canRepair: true }
-      : { config: structuredClone(current()), health: "healthy", canRepair: false };
-    io.update = () => {
-      updateFailed = true;
-      throw new Error("disk full");
-    };
-    const store = new ConfigStore(io);
-
-    expect(() => store.mutate.agent.setIncludeContextFiles(false)).toThrow("disk full");
-
-    expect(store.agent.includeContextFiles).toBe(true);
-    expect(store.health).toBe("using-backup");
-    expect(store.canRepair).toBe(true);
-  });
-
-  it("does not persist unknown agent keys or interpret them as models", () => {
-    const { io, current } = memIO();
-    const store = new ConfigStore(io);
-    (store as any).config.agent.ignoredRole = "provider/model";
-    store.mutate.agent.setOrchestrationPrompt(false);
-
-    expect(current().agent).not.toHaveProperty("ignoredRole");
-    expect(store.agent).not.toHaveProperty("defaultModel");
-  });
-});
-
-describe("ConfigStore lifecycle", () => {
-  it("re-reads settings on reload", () => {
-    const { io, current } = memIO();
-    const store = new ConfigStore(io);
-    store.mutate.agent.setIncludeContextFiles(false);
-    current().agent.includeContextFiles = true;
-    store.reload();
-    expect(store.agent.includeContextFiles).toBe(true);
-  });
-
-  it("reloads health and concurrency and re-syncs the manager", () => {
-    const { io, current } = memIO();
-    let useBackup = false;
-    io.load = () => useBackup
-      ? { config: structuredClone(current()), health: "using-backup", canRepair: true }
-      : { config: structuredClone(current()), health: "healthy", canRepair: false };
-    const { manager, concurrencies } = managerStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ manager });
-    concurrencies.length = 0;
-
-    current().concurrency.default = 2;
-    useBackup = true;
-    store.reload();
-
-    expect(store.health).toBe("using-backup");
-    expect(store.canRepair).toBe(true);
-    expect(store.concurrency).toEqual({ default: 2 });
-    expect(concurrencies).toEqual([{ default: 2 }]);
-  });
-
-  it("preserves a newer disk snapshot during a transactional update", () => {
-    const { io, current } = memIO();
-    io.update = (change) => {
-      const latest = current();
-      change(latest);
-      return { config: structuredClone(latest), health: "healthy", canRepair: false };
-    };
-    const store = new ConfigStore(io);
-
-    current().agent.disableDefaultAgents = true;
-    current().agent.orchestrationPrompt = false;
-    current().concurrency.default = 9;
-    store.mutate.agent.setIncludeContextFiles(false);
-
-    expect(current()).toEqual({
-      agent: { includeContextFiles: false, disableDefaultAgents: true, orchestrationPrompt: false },
-      concurrency: { default: 9 },
-    });
-  });
-
-  it("drops the manager dependency on dispose", () => {
-    const { io } = memIO();
-    const { manager, concurrencies } = managerStub();
-    const store = new ConfigStore(io);
-    store.setDeps({ manager });
-    store.dispose();
-    concurrencies.length = 0;
-    store.mutate.concurrency.setDefault(10);
-    expect(concurrencies).toEqual([]);
+    expect(store.concurrency).toEqual({ default: 4 });
   });
 });

@@ -27,6 +27,15 @@ role definition, runtime settings, model/thinking resolution, trust decision,
 worktree selection, prompt, and caller signal. The manager snapshots it once as
 `AcceptedSpawn`; queued work never consults mutable catalogs or settings again.
 
+**Configuration**
+
+`~/.pi/agent/subagents-lean.json` is a manually maintained, read-only input.
+The ConfigStore loads and normalizes a detached snapshot; it has no manager
+lifecycle coupling or file ownership dependency. `session_start` reloads the store before
+creating a manager or applying its normalized concurrency to an existing one.
+Accepted runtime settings are detached and frozen, so a later reload cannot
+reinterpret an already accepted spawn.
+
 **Child isolation**
 
 AsyncLocalStorage marks every child setup and turn. Root shell access and both
@@ -108,6 +117,7 @@ useful; dependent stages must wait for their prerequisite result.
   message renderer, static activity footer, or execution-mode projection is
   part of the active surface.
 
-The persistent configuration, model/thinking resolution, skills/extensions,
-worktrees, usage telemetry, and bounded retention contracts remain active. See
+The manually maintained configuration, model/thinking resolution,
+skills/extensions, worktrees, usage telemetry, and bounded retention contracts
+remain active. See
 `README.md`, `docs/coverage.md`, and the ADRs for operational and test detail.

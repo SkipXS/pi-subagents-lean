@@ -179,6 +179,16 @@ itself is the join point.
 | `agents.<name>.model` | absent | Per-role provider/model override, bounded and registry-checked. |
 | `agents.<name>.thinking` | absent | Per-role reasoning override with provider capability normalization. |
 
+Configuration is read-only from the extension's perspective. Edit
+`~/.pi/agent/subagents-lean.json` manually, then reload or start a new Pi
+session; the extension only reads this file and never changes or recreates
+it. A 1 MiB bound applies before JSON parsing. A missing primary uses defaults even
+when `.bak` exists. If an existing primary is invalid or unreadable, a valid
+`.bak` is used in memory and both files are left unchanged; otherwise defaults
+are used so manual recovery remains possible. Each accepted `Agent` call gets
+a detached, frozen settings snapshot, so later edits and reloads affect only
+later accepted calls.
+
 Model and thinking are resolved from persistent per-role settings, effective
 Agent Markdown, and the parent session. Skills and extensions follow their
 catalog selection and exclusion rules. Worktree validation, trust, usage

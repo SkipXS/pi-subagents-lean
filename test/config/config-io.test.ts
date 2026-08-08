@@ -1,18 +1,25 @@
-import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { join } from "node:path";
 import { MAX_SUBAGENTS_CONFIG_BYTES } from "../../src/config/types.ts";
 
-const { mockGetAgentDir, mockMkdirSync, mockWriteFileSync, mockRenameSync, mockUnlinkSync, mockReadFileSync, mockRmSync, mockOpenSync, mockFsyncSync, mockCloseSync } = vi.hoisted(() => ({
+const {
+  mockGetAgentDir,
+  mockLstatSync,
+  mockReadFileSync,
+  mockWriteFileSync,
+  mockRenameSync,
+  mockUnlinkSync,
+  mockRmSync,
+  mockMkdirSync,
+} = vi.hoisted(() => ({
   mockGetAgentDir: vi.fn(),
-  mockMkdirSync: vi.fn(),
+  mockLstatSync: vi.fn(),
+  mockReadFileSync: vi.fn(),
   mockWriteFileSync: vi.fn(),
   mockRenameSync: vi.fn(),
   mockUnlinkSync: vi.fn(),
-  mockReadFileSync: vi.fn(),
   mockRmSync: vi.fn(),
-  mockOpenSync: vi.fn(() => 1),
-  mockFsyncSync: vi.fn(),
-  mockCloseSync: vi.fn(),
+  mockMkdirSync: vi.fn(),
 }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -20,22 +27,51 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 }));
 
 vi.mock("node:fs", () => ({
-  mkdirSync: mockMkdirSync,
+  lstatSync: mockLstatSync,
+  readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
   renameSync: mockRenameSync,
   unlinkSync: mockUnlinkSync,
-  readFileSync: mockReadFileSync,
   rmSync: mockRmSync,
-  openSync: mockOpenSync,
-  fsyncSync: mockFsyncSync,
-  closeSync: mockCloseSync,
+  mkdirSync: mockMkdirSync,
 }));
 
+const configDir = "/tmp/pi-agent";
+const primaryPath = join(configDir, "subagents-lean.json");
+const backupPath = `${primaryPath}.bak`;
+const files = new Map<string, string | Buffer | Error>();
+
+function missingError(): NodeJS.ErrnoException {
+  return Object.assign(new Error("missing"), { code: "ENOENT" });
+}
+
+function fileError(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(code), { code });
+}
+
+function setFile(filePath: string, contents: string | Buffer | Error): void {
+  files.set(filePath, contents);
+}
+
+function fileBytes(value: string | Buffer): Buffer {
+  return Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
+}
+
 beforeEach(() => {
-  mockReadFileSync.mockImplementation(() => {
-    const err = new Error("missing") as NodeJS.ErrnoException;
-    err.code = "ENOENT";
-    throw err;
+  files.clear();
+  mockGetAgentDir.mockReturnValue(configDir);
+  mockLstatSync.mockImplementation((filePath: string) => {
+    const value = files.get(filePath);
+    if (value === undefined) throw missingError();
+    if (value instanceof Error) throw value;
+    const bytes = fileBytes(value);
+    return { isFile: () => true, size: bytes.byteLength };
+  });
+  mockReadFileSync.mockImplementation((filePath: string) => {
+    const value = files.get(filePath);
+    if (value === undefined) throw missingError();
+    if (value instanceof Error) throw value;
+    return value;
   });
 });
 
@@ -44,352 +80,142 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe("config I/O paths", () => {
-  it("defaults global concurrency to four", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({ agent: { default: null } }));
-    vi.resetModules();
+async function loadModule() {
+  vi.resetModules();
+  return import("../../src/config/config-io.ts");
+}
 
-    const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().config.concurrency).toEqual({ default: 4 });
-  });
-
-  it("rejects an oversized config before JSON.parse", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(Buffer.alloc(MAX_SUBAGENTS_CONFIG_BYTES + 1, 0x7b));
-    const parse = vi.spyOn(JSON, "parse");
-    vi.resetModules();
-
-    try {
-      const { loadConfig } = await import("../../src/config/config-io.ts");
-      const loaded = loadConfig();
-      expect(loaded.config).toMatchObject({
-        agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
-        concurrency: { default: 4 },
-      });
-      expect(loaded.health).toBe("unrecoverable");
-      expect(parse).not.toHaveBeenCalled();
-    } finally {
-      parse.mockRestore();
-    }
-  });
-
-  it("does not offer repair for an oversized primary even with a valid backup", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockImplementation((file) => String(file).endsWith(".bak")
-      ? JSON.stringify({ agent: {}, concurrency: { default: 3 } })
-      : Buffer.alloc(MAX_SUBAGENTS_CONFIG_BYTES + 1, 0x7b));
-    vi.resetModules();
-
-    const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig()).toMatchObject({
-      health: "using-backup",
-      canRepair: false,
-      config: { concurrency: { default: 3 } },
-    });
-  });
-
-  it.each([
-    Number.NaN,
-    Number.POSITIVE_INFINITY,
-    "2",
-    { value: 2 },
-    1.5,
-    0,
-    -1,
-    65,
-    Number.MAX_SAFE_INTEGER,
-    1e100,
-  ] as unknown[]) ("falls back to four for invalid persisted concurrency %p", async (value) => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({ concurrency: { default: value } }));
-    vi.resetModules();
-
-    const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().config.concurrency).toEqual({ default: 4 });
-  });
-
-  it("accepts only current known agent settings at the file boundary", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({
+describe("read-only config I/O", () => {
+  it("loads a valid primary with scalar and per-agent normalization", async () => {
+    setFile(primaryPath, JSON.stringify({
       agent: {
         includeContextFiles: false,
         disableDefaultAgents: true,
         orchestrationPrompt: false,
         ignoredRole: "provider/model",
-        anotherIgnoredRole: "provider/reviewer",
-        ignoredRoot: { reviewer: "high" },
       },
-      concurrency: { default: 4 },
-    }));
-    vi.resetModules();
-
-    const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().config).toEqual({
-      agent: { includeContextFiles: false, disableDefaultAgents: true, orchestrationPrompt: false },
-      concurrency: { default: 4 },
-    });
-  });
-
-  it("loads normalized per-agent model/thinking overrides", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(JSON.stringify({
       agents: {
         Scout: { model: "provider/first", thinking: "high", ignored: true },
         scout: { thinking: "low" },
         reviewer: { model: "provider/reviewer", thinking: "invalid" },
-        invalid: { model: 42, thinking: "ultra" },
       },
-      agent: {},
-      concurrency: { default: 4 },
+      concurrency: { default: 2 },
     }));
-    vi.resetModules();
+    const { createConfigFileIO, loadConfig } = await loadModule();
 
-    const { loadConfig } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().config).toEqual({
-      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+    const expected = {
+      agent: { includeContextFiles: false, disableDefaultAgents: true, orchestrationPrompt: false },
       agents: {
         scout: { thinking: "low" },
         reviewer: { model: "provider/reviewer" },
       },
+      concurrency: { default: 2 },
+    };
+    expect(loadConfig()).toEqual(expected);
+    expect(createConfigFileIO(configDir).load()).toEqual(expected);
+  });
+
+  it("returns defaults for a missing primary without consulting a valid backup", async () => {
+    setFile(backupPath, JSON.stringify({ concurrency: { default: 9 } }));
+    const { loadConfig } = await loadModule();
+
+    expect(loadConfig()).toEqual({
+      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
       concurrency: { default: 4 },
     });
+    expect(mockLstatSync).not.toHaveBeenCalledWith(backupPath);
+    expect(mockReadFileSync).not.toHaveBeenCalledWith(backupPath);
   });
 
-  it("rejects repair when neither a primary nor backup config exists", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    vi.resetModules();
+  it.each(["{broken", "null", "42", "[]", JSON.stringify({ agent: "not-an-object" })])(
+    "returns defaults for an invalid primary without changing its bytes (%j)",
+    async (contents) => {
+      setFile(primaryPath, contents);
+      const { loadConfig } = await loadModule();
 
-    const { repairConfig } = await import("../../src/config/config-io.ts");
-    expect(() => repairConfig()).toThrow("Cannot repair config");
-  });
-
-  it("uses Pi's agent directory for the renamed config when HOME is unset", async () => {
-    const agentDir = "C:\\Users\\Pi User\\.pi\\agent";
-    vi.stubEnv("HOME", "");
-    mockGetAgentDir.mockReturnValue(agentDir);
-    vi.resetModules();
-
-    const { saveConfigAtomic } = await import("../../src/config/config-io.ts");
-    saveConfigAtomic({ agent: {}, concurrency: { default: 4 } });
-
-    const configPath = join(agentDir, "subagents-lean.json");
-    expect(mockGetAgentDir).toHaveBeenCalledOnce();
-    expect(mockMkdirSync).toHaveBeenCalledWith(agentDir, { recursive: true });
-    const tmpPath = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."))![0] as string;
-    expect(tmpPath.startsWith(`${configPath}.`)).toBe(true);
-    expect(tmpPath.endsWith(".tmp")).toBe(true);
-    expect(mockRenameSync).toHaveBeenCalledWith(tmpPath, configPath);
-  });
-
-  it("uses a distinct temporary file for each save", async () => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    vi.resetModules();
-
-    const { saveConfigAtomic } = await import("../../src/config/config-io.ts");
-    saveConfigAtomic({ agent: {} as any, concurrency: {} as any });
-    saveConfigAtomic({ agent: {} as any, concurrency: {} as any });
-
-    const tempWrites = mockWriteFileSync.mock.calls.filter(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."));
-    expect(tempWrites[0]![0]).not.toBe(tempWrites[1]![0]);
-  });
-
-  it.each([
-    ["write", mockWriteFileSync],
-    ["open", mockOpenSync],
-    ["fsync", mockFsyncSync],
-  ])("preserves a %s failure, cleans its temp file, and releases the lock", async (_stage, failingCall) => {
-    const agentDir = "/tmp/pi-agent";
-    const configPath = join(agentDir, "subagents-lean.json");
-    const lockPath = `${configPath}.lock`;
-    const failure = new Error(`${_stage} failed`);
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    mockGetAgentDir.mockReturnValue(agentDir);
-    if (_stage === "write") {
-      failingCall.mockImplementation((file) => {
-        if (String(file).endsWith(".tmp")) throw failure;
+      expect(loadConfig()).toEqual({
+        agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+        concurrency: { default: 4 },
       });
-    } else {
-      failingCall.mockImplementationOnce(() => { throw failure; });
-    }
-    mockReadFileSync.mockImplementation((file) => {
-      if (String(file) === join(lockPath, "owner.json")) {
-        const ownerWrite = mockWriteFileSync.mock.calls.find(([candidate]) => String(candidate).endsWith("owner.json"));
-        return ownerWrite?.[1] ?? "{}";
-      }
-      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      expect(files.get(primaryPath)).toBe(contents);
+    },
+  );
+
+  it("uses a valid backup for an invalid primary and leaves both candidates unchanged", async () => {
+    setFile(primaryPath, "{broken");
+    const backup = JSON.stringify({ agent: {}, concurrency: { default: 7 } });
+    setFile(backupPath, backup);
+    const { loadConfig } = await loadModule();
+
+    expect(loadConfig()).toEqual({
+      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+      concurrency: { default: 7 },
     });
-    vi.resetModules();
-
-    try {
-      const { createConfigFileIO } = await import("../../src/config/config-io.ts");
-      expect(() => createConfigFileIO(agentDir).update(() => undefined)).toThrow(failure);
-      const tempWrite = mockWriteFileSync.mock.calls.find(([file]) => String(file).includes("subagents-lean.json.") && String(file).endsWith(".tmp"));
-      if (tempWrite) expect(mockUnlinkSync).toHaveBeenCalledWith(tempWrite[0]);
-      expect(mockRmSync).toHaveBeenCalledWith(lockPath, { recursive: true, force: true });
-    } finally {
-      error.mockRestore();
-    }
+    expect(files.get(primaryPath)).toBe("{broken");
+    expect(files.get(backupPath)).toBe(backup);
   });
 
-  it("preserves a close-only failure, cleans its temp file, releases the lock, and permits a retry", async () => {
-    const agentDir = "/tmp/pi-agent";
-    const configPath = join(agentDir, "subagents-lean.json");
-    const lockPath = `${configPath}.lock`;
-    const closeFailure = new Error("close failed");
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    mockGetAgentDir.mockReturnValue(agentDir);
-    mockCloseSync.mockImplementationOnce(() => { throw closeFailure; });
-    mockReadFileSync.mockImplementation((file) => {
-      if (String(file) === join(lockPath, "owner.json")) {
-        const ownerWrites = mockWriteFileSync.mock.calls.filter(([candidate]) => String(candidate).endsWith("owner.json"));
-        return ownerWrites.at(-1)?.[1] ?? "{}";
-      }
-      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+  it("uses a valid backup for an unreadable primary", async () => {
+    setFile(primaryPath, fileError("EACCES"));
+    setFile(backupPath, JSON.stringify({ concurrency: { default: 3 } }));
+    const { loadConfig } = await loadModule();
+
+    expect(loadConfig().concurrency).toEqual({ default: 3 });
+    expect(mockReadFileSync).toHaveBeenCalledWith(primaryPath);
+    expect(files.get(primaryPath)).toBeInstanceOf(Error);
+  });
+
+  it("rejects an oversized primary before reading or parsing it", async () => {
+    setFile(primaryPath, Buffer.alloc(MAX_SUBAGENTS_CONFIG_BYTES + 1, 0x7b));
+    const parse = vi.spyOn(JSON, "parse");
+    const { loadConfig } = await loadModule();
+
+    expect(loadConfig()).toEqual({
+      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+      concurrency: { default: 4 },
     });
-    vi.resetModules();
-
-    try {
-      const { createConfigFileIO } = await import("../../src/config/config-io.ts");
-      const io = createConfigFileIO(agentDir);
-      let thrown: unknown;
-      try {
-        io.update(() => undefined);
-      } catch (err) {
-        thrown = err;
-      }
-
-      expect(thrown).toBe(closeFailure);
-      const failedTemp = mockWriteFileSync.mock.calls.find(([file]) => String(file).includes("subagents-lean.json.") && String(file).endsWith(".tmp"))![0];
-      expect(mockUnlinkSync).toHaveBeenCalledWith(failedTemp);
-      expect(mockRmSync).toHaveBeenCalledWith(lockPath, { recursive: true, force: true });
-
-      expect(() => io.update((config) => { config.concurrency.default = 3; })).not.toThrow();
-      expect(mockRenameSync.mock.calls.filter(([, target]) => target === configPath)).toHaveLength(1);
-      expect(mockRmSync.mock.calls.filter(([file]) => file === lockPath)).toHaveLength(2);
-    } finally {
-      error.mockRestore();
-    }
+    expect(mockReadFileSync).not.toHaveBeenCalledWith(primaryPath);
+    expect(parse).not.toHaveBeenCalled();
+    parse.mockRestore();
   });
 
-  it("preserves the fsync error when close and cleanup also fail", async () => {
-    const agentDir = "/tmp/pi-agent";
-    const syncFailure = new Error("fsync primary");
-    mockGetAgentDir.mockReturnValue(agentDir);
-    mockFsyncSync.mockImplementationOnce(() => { throw syncFailure; });
-    mockCloseSync.mockImplementationOnce(() => { throw new Error("close secondary"); });
-    mockUnlinkSync.mockImplementationOnce(() => { throw new Error("cleanup secondary"); });
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.resetModules();
+  it("falls back from an oversized primary to a valid backup without writing", async () => {
+    setFile(primaryPath, Buffer.alloc(MAX_SUBAGENTS_CONFIG_BYTES + 1, 0x7b));
+    setFile(backupPath, JSON.stringify({ concurrency: { default: 6 } }));
+    const { createConfigFileIO } = await loadModule();
 
-    const { createConfigFileIO } = await import("../../src/config/config-io.ts");
-    expect(() => createConfigFileIO(agentDir).update(() => undefined)).toThrow(syncFailure);
+    expect(createConfigFileIO(configDir).load().concurrency).toEqual({ default: 6 });
+    expect(mockReadFileSync).not.toHaveBeenCalledWith(primaryPath);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(mockRenameSync).not.toHaveBeenCalled();
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
+    expect(mockRmSync).not.toHaveBeenCalled();
+    expect(mockMkdirSync).not.toHaveBeenCalled();
   });
 
-  it("releases the lock when the mutator throws and permits a retry", async () => {
-    const agentDir = "/tmp/pi-agent";
-    const configPath = join(agentDir, "subagents-lean.json");
-    const lockPath = `${configPath}.lock`;
-    mockGetAgentDir.mockReturnValue(agentDir);
-    mockReadFileSync.mockImplementation((file) => {
-      if (String(file) === join(lockPath, "owner.json")) {
-        const ownerWrites = mockWriteFileSync.mock.calls.filter(([candidate]) => String(candidate).endsWith("owner.json"));
-        return ownerWrites.at(-1)?.[1] ?? "{}";
-      }
-      throw Object.assign(new Error("missing"), { code: "ENOENT" });
-    });
-    vi.resetModules();
+  it("classifies an unreadable primary as defaults when no valid backup exists", async () => {
+    setFile(primaryPath, fileError("EACCES"));
+    const { loadConfig } = await loadModule();
 
-    const { createConfigFileIO } = await import("../../src/config/config-io.ts");
-    const io = createConfigFileIO(agentDir);
-    const mutationFailure = new Error("mutation failed");
-    expect(() => io.update(() => { throw mutationFailure; })).toThrow(mutationFailure);
-    expect(() => io.update((config) => { config.concurrency.default = 3; })).not.toThrow();
-    expect(mockRmSync.mock.calls.filter(([file]) => file === lockPath)).toHaveLength(2);
+    expect(loadConfig().concurrency).toEqual({ default: 4 });
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(mockRenameSync).not.toHaveBeenCalled();
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
+    expect(mockRmSync).not.toHaveBeenCalled();
+    expect(mockMkdirSync).not.toHaveBeenCalled();
   });
 
-  it("reports rename failures and removes the temporary config file", async () => {
-    const agentDir = "/tmp/pi-agent";
-    const renameError = new Error("simulated rename failure");
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const configPath = join(agentDir, "subagents-lean.json");
-    mockGetAgentDir.mockReturnValue(agentDir);
-    mockRenameSync.mockImplementation((_source, target) => {
-      if (target === configPath) throw renameError;
-    });
-    vi.resetModules();
+  it("exposes only a load operation and performs no filesystem writes", async () => {
+    setFile(primaryPath, JSON.stringify({ agent: {}, concurrency: { default: 4 } }));
+    const { createConfigFileIO } = await loadModule();
+    const io = createConfigFileIO(configDir);
 
-    try {
-      const { saveConfigAtomic } = await import("../../src/config/config-io.ts");
-      expect(() => saveConfigAtomic({ agent: {} as any, concurrency: {} as any })).toThrow(renameError);
-      const tmpPath = mockWriteFileSync.mock.calls.find(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."))![0];
-      expect(mockUnlinkSync).toHaveBeenCalledWith(tmpPath);
-      expect(error).toHaveBeenCalledWith(expect.stringContaining("simulated rename failure"));
-    } finally {
-      error.mockRestore();
-    }
-  });
-
-  it("classifies Bun's EPERM pending-lock publish collision as contention after the destination disappears", async () => {
-    const agentDir = "/tmp/pi-agent";
-    const configPath = join(agentDir, "subagents-lean.json");
-    const lockPath = `${configPath}.lock`;
-    const eperm = Object.assign(new Error("destination exists"), { code: "EPERM" });
-    mockGetAgentDir.mockReturnValue(agentDir);
-    mockRenameSync.mockImplementation((_source, target) => {
-      if (target === lockPath) throw eperm;
-    });
-    vi.resetModules();
-
-    const { ConfigLockTimeoutError, createConfigFileIO } = await import("../../src/config/config-io.ts");
-    expect(() => createConfigFileIO(agentDir, {
-      lockTimeoutMs: 0,
-      now: () => 0,
-      hostname: () => "local-host",
-    }).update(() => undefined)).toThrow(ConfigLockTimeoutError);
-
-    const pendingPath = mockMkdirSync.mock.calls.find(([candidate]) => String(candidate).startsWith(`${lockPath}.pending-`))![0];
-    expect(mockRmSync).toHaveBeenCalledWith(pendingPath, { recursive: true, force: true });
-    expect(mockRmSync).not.toHaveBeenCalledWith(lockPath, expect.anything());
-  });
-
-  it("propagates EPERM from the final config publish rename after acquiring the lock", async () => {
-    const agentDir = "/tmp/pi-agent";
-    const configPath = join(agentDir, "subagents-lean.json");
-    const lockPath = `${configPath}.lock`;
-    const eperm = Object.assign(new Error("config destination is protected"), { code: "EPERM" });
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    mockGetAgentDir.mockReturnValue(agentDir);
-    mockRenameSync.mockImplementation((_source, target) => {
-      if (target === configPath) throw eperm;
-    });
-    vi.resetModules();
-
-    try {
-      const { ConfigLockTimeoutError, createConfigFileIO } = await import("../../src/config/config-io.ts");
-      let thrown: unknown;
-      try {
-        createConfigFileIO(agentDir, { lockTimeoutMs: 0 }).update(() => undefined);
-      } catch (err) {
-        thrown = err;
-      }
-      expect(mockRenameSync.mock.calls.some(([, target]) => target === lockPath)).toBe(true);
-      expect(thrown).toBe(eperm);
-      expect(thrown).not.toBeInstanceOf(ConfigLockTimeoutError);
-    } finally {
-      error.mockRestore();
-    }
-  });
-
-  it.each(["{broken", "null", "42", "[]", JSON.stringify({ agent: "not-an-object" })])("uses defaults and blocks saves for corrupt primary config %j", async (contents) => {
-    mockGetAgentDir.mockReturnValue("/tmp/pi-agent");
-    mockReadFileSync.mockReturnValue(contents);
-    vi.resetModules();
-
-    const { loadConfig, saveConfigAtomic } = await import("../../src/config/config-io.ts");
-    expect(loadConfig().config).toMatchObject({ concurrency: { default: 4 }, agent: { orchestrationPrompt: true } });
-    expect(() => saveConfigAtomic({ agent: {} as any, concurrency: {} as any }))
-      .toThrow("primary config is corrupt");
-    expect(mockWriteFileSync.mock.calls.some(([file]) => String(file).endsWith(".tmp") && !String(file).includes(".bak."))).toBe(false);
+    expect(Object.keys(io)).toEqual(["load"]);
+    io.load();
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(mockRenameSync).not.toHaveBeenCalled();
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
+    expect(mockRmSync).not.toHaveBeenCalled();
+    expect(mockMkdirSync).not.toHaveBeenCalled();
   });
 });
