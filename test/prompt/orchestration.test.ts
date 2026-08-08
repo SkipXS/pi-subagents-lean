@@ -31,35 +31,23 @@ describe("parent orchestration prompt", () => {
     expect(prompt).toContain("`shipper` — Prepare release notes");
     expect(prompt).not.toContain("internal");
     expect(prompt).toBe(`${ORCHESTRATION_PROMPT_MARKER}
-Prefer delegation for substantive work, but handle small, obvious, low-risk tasks directly when that is clearly more efficient.
+Delegate substantive work; handle small, obvious, low-risk tasks directly when scope is known and a few focused tool calls suffice. Direct work may include targeted reads, simple fact checks, minor single-location edits, synthesis, and bounded follow-ups.
 
-You may work directly when the relevant scope is already known, no meaningful design decision or investigation is required, and the task can be completed safely in a few focused tool calls. This includes targeted reads, simple fact checks, minor single-location edits, result synthesis, and small follow-up adjustments.
+Delegate broad discovery, root-cause investigation, cross-component design, uncertain or multiple changes, independent review, or substantial verification. If scope or risk is unclear, use the matching role. Use only roles that add value; never force a full pipeline.
 
-Delegate when work requires broad repository discovery, focused root-cause investigation, cross-component design, multiple or uncertain changes, independent review, or substantial verification. If the scope or risk is unclear, delegate to the matching agent.
+Own planning, decomposition, sequencing, decisions, result reconciliation, integration, validation, and the final response. For large tasks, investigate first, then split work into bounded, non-overlapping stages instead of handing one agent the whole request.
 
-Your responsibilities are routing, sequencing dependent work, running independent read-only work in parallel, reconciling results, resolving decisions, completing small remaining steps, and producing the final response.
+New agents lack parent history/tool results and peer output. For substantive spawns, use concise, decision-relevant sections: Goal; State/evidence/decisions; Scope/files/symbols; Constraints/non-goals; Acceptance criteria; Expected result.
 
-Agents lack parent/peer context. For each substantive call, use sections: Goal; Current state/evidence/decisions; Scope; Constraints/non-goals; Acceptance criteria; Expected result.
+Do not duplicate delegated work. Re-enter the same area only for incomplete or conflicting results or a bounded follow-up. Never run concurrent writers or overlapping changes. Give the same writer at most one focused correction per subsystem; then take over or re-plan with a new owner.
 
-The orchestrator owns planning and decomposition. For large or complex tasks, do not pass the whole request to one agent as an unbounded package. Use appropriate agents to investigate scope and dependencies, then split the work into bounded, cohesive stages with clear outcomes. The orchestrator sequences handoffs, prevents overlap, and remains responsible for integration and validation.
+Run dependent work in the foreground and independent read-only work in the background. run_in_background returns immediately. After a background spawn, do useful independent work; never poll or sleep. Resume dependent work only after its completion notification.
 
-Do not duplicate work already delegated. Inspect or modify the same area yourself only when an agent result is incomplete, conflicting, or leaves a clearly bounded follow-up.
+Use AgentContinue only for finished agents; it reuses their session, so send only the new delta. Running, queued, stopped, aborted, or failed agents cannot be continued.
 
-Treat writer delegation as a bounded trial. Allow the same writer at most one focused correction in a subsystem. If a material issue remains, needs redesign, or you understand the fix better, take over directly or re-plan with a new owner.
+For external APIs, lifecycle/concurrency ordering, and integrations, require installed or upstream evidence and a representative real sequence; synthetic mocks alone are insufficient for critical paths.
 
-For external APIs, lifecycle or concurrency ordering, and integration behavior, require installed or upstream evidence plus a representative real sequence; critical paths cannot rely only on synthetic mocks.
-
-Before repeated reviews, set acceptance criteria and the blocker bar. Validate findings without automatic scope expansion. After two independent no-blocker reviews and no material code change, stop broad re-review unless checks fail or new evidence appears.
-
-Use only the roles required for the task. Do not force an unnecessary full agent pipeline.
-
-Run dependent work in the foreground. Independent read-only work may run in the background. Never run concurrent writers or allow overlapping repository changes.
-
-After starting a background agent, continue only with independent useful work; never poll its status or run sleep/no-op commands to wait. Resume dependent work only after its automatic completion notification.
-
-Continue finished agents with AgentContinue to reuse their session; run_in_background returns immediately, while running, queued, stopped, aborted, or failed agents cannot be continued.
-
-Retain responsibility for the overall task and final answer. Delegate the substantial specialist work, but directly complete trivial or tightly bounded work when delegation would add more overhead than value.
+Do not repeat broad review by default. If repeated review is justified, set acceptance criteria and a blocker bar, and validate findings without scope expansion. After two independent no-blocker reviews and no material change, stop unless checks fail or new evidence appears.
 Agents: \`reviewer\` — Review changes carefully.; \`shipper\` — Prepare release notes
 ${ORCHESTRATION_PROMPT_END_MARKER}`);
 
@@ -71,6 +59,18 @@ ${ORCHESTRATION_PROMPT_END_MARKER}`);
     const prompt = buildOrchestrationPrompt(DEFAULT_AGENTS.values())!;
 
     for (const name of DEFAULT_AGENTS.keys()) expect(prompt).toContain(`\`${name}\` —`);
+    expect(prompt).not.toContain("omitted");
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(MAX_ORCHESTRATION_PROMPT_LENGTH - 1024);
+  });
+
+  it("keeps bundled and custom roles visible within the expanded catalog capacity", () => {
+    const customAgents = Array.from({ length: 10 }, (_, i) =>
+      agent(`custom-${i.toString().padStart(2, "0")}`, `Specialized role ${i} for bounded project work.`),
+    );
+    const agents = [...DEFAULT_AGENTS.values(), ...customAgents];
+    const prompt = buildOrchestrationPrompt(agents)!;
+
+    for (const { name } of agents) expect(prompt).toContain(`\`${name}\` —`);
     expect(prompt).not.toContain("omitted");
     expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(MAX_ORCHESTRATION_PROMPT_LENGTH);
   });
