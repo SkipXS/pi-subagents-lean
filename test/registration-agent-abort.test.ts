@@ -35,7 +35,6 @@ vi.mock("../src/agents/usage.js", () => ({
   getSessionUsageSnapshot: vi.fn(),
 }));
 
-vi.mock("../src/agents/agent-status.js", () => ({ executeAgentStatusTool: vi.fn() }));
 
 import { registerTools } from "../src/registration.js";
 

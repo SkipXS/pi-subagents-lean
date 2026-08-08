@@ -197,8 +197,6 @@ export async function runSpawnPreflight(input: SpawnPreflightInput): Promise<Spa
       || prompt.split("\n")[0].slice(0, 80)
       || prompt.slice(0, 80);
     const description = retainAgentDescription(rawDescription);
-    const runInBackground = params.run_in_background as boolean | undefined;
-
     // Persisted per-agent settings are applied above the effective merged
     // Markdown definition. The runtime snapshot keeps the accepted spawn
     // stable if config is reloaded while it waits for a concurrency slot.
@@ -206,7 +204,6 @@ export async function runSpawnPreflight(input: SpawnPreflightInput): Promise<Spa
       ? store.createSubagentRuntimeSettings()
       : undefined;
     const runtimeSettings = snapshotRuntimeSettings(runtimeSettingsSnapshot);
-    const shouldRunInBackground = runInBackground === true;
     const resolvedTunables = resolveAgentTunables({
       agentName: resolvedType,
       agentConfig,
@@ -223,7 +220,6 @@ export async function runSpawnPreflight(input: SpawnPreflightInput): Promise<Spa
       type: resolvedType,
       prompt,
       description,
-      runInBackground: shouldRunInBackground,
       agentConfig,
       runtimeSettings,
       projectTrusted,

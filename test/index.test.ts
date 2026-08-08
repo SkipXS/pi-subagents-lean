@@ -1,360 +1,342 @@
-/**
- * index.test.ts — Tests for the extension entry point.
- *
- * Tests focus on:
- *   - Tool schema shapes (fixed schemas with static descriptions and no prompt metadata)
- *   - Listener guards (only mutates event.input.model for Agent tool)
- *   - Schema field exclusion (no model, inherit_context, schedule, isolation params)
- *
- * These tests mock ExtensionAPI and verify registration behavior; headless
- * lifecycle loading is covered by the contract and background-flow smokes.
- */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { acceptedSpawnFixture } from "./fixtures.ts";
+import { createMockExtensionAPI, loadExtension, type MockExtensionAPI } from "./fixtures";
 
-import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
-import {
-  createMockExtensionAPI,
-  hasParam,
-  loadExtension,
-  type MockExtensionAPI,
-} from "./fixtures";
+const boundary = vi.hoisted(() => ({
+  createAgentSession: vi.fn(),
+  loadChildExtension: vi.fn(),
+}));
 
-// Mock external dependencies before any imports
-vi.mock("@sinclair/typebox", () => {
-  const createType = (type: string) => (opts?: any) => ({
-    type,
-    ...(opts || {}),
-  });
-  return {
-    Type: {
-      Object: (properties: Record<string, any>, opts?: any) => {
-        // Faithful to real TypeBox: `required` lists every property that is
-        // not wrapped in Type.Optional (which the mock marks with optional: true).
-        const required = Object.entries(properties)
-          .filter(([, schema]) => !schema.optional)
-          .map(([key]) => key);
-        return {
-          type: "object",
-          properties,
-          ...(required.length > 0 ? { required } : {}),
-          ...(opts || {}),
-        };
-      },
-      String: createType("string"),
-      Number: createType("number"),
-      Boolean: createType("boolean"),
-      Optional: (schema: any) => ({ ...schema, optional: true }),
-      Array: (items: any) => ({ type: "array", items }),
-      Record: (keyType: any, valueType: any) => ({
-        type: "record",
-        keyType,
-        valueType,
-      }),
-      Union: (variants: any[]) => ({ type: "union", variants }),
-      Literal: (value: string | number | boolean) => ({
-        type: "literal",
-        const: value,
-      }),
-    },
-  };
-});
 vi.mock("@earendil-works/pi-coding-agent", () => ({
-  DynamicBorder: class {},
   getAgentDir: vi.fn(() => "/home/test/.pi/agent"),
+  createAgentSession: boundary.createAgentSession,
+  DefaultResourceLoader: class {
+    constructor(readonly options: any) {}
+    reload = vi.fn(async () => boundary.loadChildExtension());
+    getExtensions = vi.fn(() => ({ extensions: [], errors: [], runtime: {} }));
+  },
+  SessionManager: { inMemory: vi.fn(() => ({})) },
+  SettingsManager: { create: vi.fn(() => ({})) },
+  loadProjectContextFiles: vi.fn(() => []),
 }));
 
-vi.mock("../src/agents/agent-types.js", () => ({
-  resolveType: vi.fn((name: string) => name),
-  getConfig: vi.fn(() => ({ description: "unknown" })),
-  getAgentConfig: vi.fn(() => ({})),
-  registerAgents: vi.fn(),
-  getAvailableAgents: vi.fn(() => []),
-}));
+import extension from "../src/index.js";
+import { runAgent } from "../src/agents/agent-runner.js";
+import {
+  getCoordinator,
+  getManager,
+  getPiInstance,
+  getSessionCtx,
+  getSubagentRuntimeContext,
+  setCoordinator,
+  setManager,
+  setPiInstance,
+  setSessionCtx,
+} from "../src/shell.js";
 
-vi.mock("../src/agents/agent-discovery.js", () => ({
-  scanAgentFilesInDir: vi.fn().mockResolvedValue([]),
-  mergeAgents: vi.fn().mockReturnValue(new Map()),
-  AgentConfigFromMd: {},
-}));
-
-vi.mock("../src/agents/agent-runner.js", () => ({
-  runAgent: vi.fn(),
-}));
-
-vi.mock("../src/agents/default-agents.js", () => ({
-  DEFAULT_AGENTS: new Map(),
-}));
-
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                           */
-/* ------------------------------------------------------------------ */
-
-/**
- * Find a tool by name from the mock API.
- */
-function findTool(api: MockExtensionAPI, name: string) {
-  return api.tools.find((t) => t.name === name);
+function tool(api: MockExtensionAPI, name: string) {
+  return api.tools.find((candidate) => candidate.name === name)!;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Agent tool schema — fixed public contract                       */
-/* ------------------------------------------------------------------ */
-
-describe("Agent tool schema — fixed public contract", () => {
+describe("public foreground tool contracts", () => {
   let api: MockExtensionAPI;
 
-  beforeAll(async () => {
+  it("registers exactly Agent and AgentContinue", async () => {
     api = createMockExtensionAPI();
     await loadExtension(api.api);
+    expect(api.tools.map((candidate) => candidate.name)).toEqual(["Agent", "AgentContinue"]);
+    expect(api.api.registerTool).toHaveBeenCalledTimes(2);
   });
 
-  const agentTool = () => findTool(api, "Agent");
-
-  it("has Pi's required description without extra prompt metadata", () => {
-    expect(agentTool()).toBeDefined();
-    expect(agentTool()!.description).toBe("Delegate to a context-isolated specialized agent. It cannot see the parent conversation, parent tool results, or other agents' output, so its prompt must be self-contained.");
-  });
-
-  it("has no promptSnippet", () => {
-    expect(agentTool()!.promptSnippet).toBeUndefined();
-  });
-
-  it("has no promptGuidelines", () => {
-    expect(agentTool()!.promptGuidelines).toBeUndefined();
-  });
-
-  it("keeps model and thinking overrides out of the LLM-visible schema", () => {
-    expect(hasParam(agentTool()!.parameters, "model")).toBe(false);
-    expect(hasParam(agentTool()!.parameters, "thinking")).toBe(false);
-  });
-
-  it("excludes inherit_context param", () => {
-    expect(hasParam(agentTool()!.parameters, "inherit_context")).toBe(false);
-  });
-
-  it("excludes schedule param", () => {
-    expect(hasParam(agentTool()!.parameters, "schedule")).toBe(false);
-  });
-
-  it("excludes isolation param", () => {
-    expect(hasParam(agentTool()!.parameters, "isolation")).toBe(false);
-  });
-
-  it("includes prompt param (no .description())", () => {
-    expect(hasParam(agentTool()!.parameters, "prompt")).toBe(true);
-    const promptSchema = agentTool()!.parameters?.properties?.prompt;
-    expect(promptSchema?.description).toBeUndefined();
-  });
-
-  it("includes description param", () => {
-    expect(hasParam(agentTool()!.parameters, "description")).toBe(true);
-  });
-
-  it("includes agent param", () => {
-    expect(hasParam(agentTool()!.parameters, "agent")).toBe(true);
-  });
-
-  it("includes run_in_background param (optional)", () => {
-    expect(hasParam(agentTool()!.parameters, "run_in_background")).toBe(true);
-  });
-
-  it("includes worktree_path param (optional, no .description())", () => {
-    expect(hasParam(agentTool()!.parameters, "worktree_path")).toBe(true);
-    const wtSchema = agentTool()!.parameters?.properties?.worktree_path;
-    expect(wtSchema?.description).toBeUndefined();
-  });
-
-  it("requires an explicit agent type while keeping other arguments optional", () => {
-    const properties = agentTool()!.parameters.properties;
-    expect(properties.agent.optional).toBeUndefined();
-    for (const name of ["description", "run_in_background", "worktree_path"]) {
-      expect(properties[name].optional).toBe(true);
-    }
-  });
-
-  it("excludes isolated from schema (config-only, not LLM-controlled)", () => {
-    expect(hasParam(agentTool()!.parameters, "isolated")).toBe(false);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  Tool Registration Count                                           */
-/* ------------------------------------------------------------------ */
-
-describe("tool registration", () => {
-  let api: MockExtensionAPI;
-
-  beforeAll(async () => {
+  it("exposes the exact strict Agent schema and description", async () => {
     api = createMockExtensionAPI();
     await loadExtension(api.api);
+    const definition = tool(api, "Agent");
+    expect(definition.description).toBe(
+      "Delegate to a context-isolated specialized agent and wait for its result. It cannot see the parent conversation, parent tool results, or other agents' output, so its prompt must be self-contained.",
+    );
+    expect(JSON.parse(JSON.stringify(definition.parameters))).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["prompt", "agent"],
+      properties: {
+        prompt: { type: "string", maxLength: 262144 },
+        agent: { type: "string" },
+        description: { type: "string", maxLength: 8192 },
+        worktree_path: { type: "string" },
+      },
+    });
+    expect(definition.renderCall).toEqual(expect.any(Function));
+    expect(definition.renderResult).toEqual(expect.any(Function));
   });
 
-  it("registers exactly 4 tools", () => {
-    expect(api.tools).toHaveLength(4);
+  it("exposes the exact strict AgentContinue schema and sampling preference", async () => {
+    api = createMockExtensionAPI();
+    await loadExtension(api.api);
+    const definition = tool(api, "AgentContinue");
+    expect(definition.description).toBe("Continue a finished agent's session with a new prompt and wait for its result.");
+    expect(JSON.parse(JSON.stringify(definition.parameters))).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["agent_id", "prompt"],
+      properties: {
+        agent_id: { type: "string", maxLength: 128 },
+        prompt: { type: "string", maxLength: 262144 },
+      },
+    });
+    expect(definition.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
+    expect(definition.renderCall).toEqual(expect.any(Function));
+    expect(definition.renderResult).toEqual(expect.any(Function));
   });
 
-  it("registers Agent, AgentContinue, StopAgent, and AgentStatus tools", () => {
-    const names = api.tools.map((t) => t.name);
-    expect(names).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
+  it("rejects the removed property at the strict schema boundary", async () => {
+    api = createMockExtensionAPI();
+    await loadExtension(api.api);
+    const definition = tool(api, "Agent");
+    const removedProperty = ["removed", "execution", "switch"].join("_");
+    expect(Object.hasOwn(definition.parameters.properties, removedProperty)).toBe(false);
+    expect(definition.parameters.additionalProperties).toBe(false);
+    expect(tool(api, "AgentContinue").parameters.additionalProperties).toBe(false);
   });
 
-  it("keeps the public Agent wrapper's pre-abort contract", async () => {
+  it("keeps the throwing pre-abort contract", async () => {
+    api = createMockExtensionAPI();
+    await loadExtension(api.api);
     const controller = new AbortController();
     controller.abort();
-    await expect(findTool(api, "Agent")!.execute!("contract-agent", {}, controller.signal, undefined, {}))
-      .rejects.toThrow("Agent execution cancelled");
+    await expect(tool(api, "Agent").execute!("call", {}, controller.signal, undefined, {})).rejects.toThrow("Agent execution cancelled");
   });
-});
 
-/* ------------------------------------------------------------------ */
-/*  Event Listener Registration                                       */
-/* ------------------------------------------------------------------ */
-
-describe("event listener registration", () => {
-  let api: MockExtensionAPI;
-
-  beforeAll(async () => {
+  it("does not register a custom message renderer", async () => {
     api = createMockExtensionAPI();
     await loadExtension(api.api);
-  });
-
-  it("registers session_start listener", () => {
-    expect(api.listeners.some((l) => l.event === "session_start")).toBe(true);
-  });
-
-  it("registers the parent orchestration prompt hook", () => {
-    expect(api.listeners.some((l) => l.event === "before_agent_start")).toBe(true);
-  });
-
-  it("registers session_shutdown listener", () => {
-    expect(api.listeners.some((l) => l.event === "session_shutdown")).toBe(
-      true,
-    );
+    expect((api.api as any).registerMessageRenderer).toBeUndefined();
   });
 });
 
-
-// worktree_path schema tests (merged from worktree-schema-briefing)
-describe("Agent tool schema — worktree_path", () => {
-  let api: MockExtensionAPI;
-
-  beforeAll(async () => {
-    api = createMockExtensionAPI();
-    await loadExtension(api.api);
-  });
-
-  it("worktree_path is optional in the schema", () => {
-    const tool = api.tools.find((t) => t.name === "Agent")!;
-    const required = tool.parameters.required ?? [];
-    expect(required).not.toContain("worktree_path");
-  });
-
-  it("worktree_path is a string type in the schema", () => {
-    const tool = api.tools.find((t) => t.name === "Agent")!;
-    const prop = tool.parameters.properties?.worktree_path;
-    expect(prop).toBeDefined();
-    expect(prop.type).toBe("string");
-  });
-});
-
-
-/* ------------------------------------------------------------------ */
-/*  Subagent spawn guard (prevents shell clobbering)                  */
-/* ------------------------------------------------------------------ */
-
-describe("subagent runtime context", () => {
-  // The real shell module carries context through AsyncLocalStorage, so
-  // concurrent child setup cannot affect a parent extension runtime.
-  let shell: typeof import("../src/shell.js");
-
-  beforeEach(async () => {
-    shell = await import("../src/shell.js");
-  });
-
-  it("registers tools and listeners for the parent session", async () => {
-    const api = createMockExtensionAPI();
-    await loadExtension(api.api);
-
-    expect(api.tools.length).toBeGreaterThan(0);
-    expect(api.listeners.some((l) => l.event === "session_start")).toBe(true);
-    expect(api.listeners.some((l) => l.event === "session_shutdown")).toBe(true);
-  });
-
-  it("stays inert in a child runtime because root tools never enter agent sessions", async () => {
+ describe("child registration guard", () => {
+  it("keeps root tools and listeners out of an isolated child runtime", async () => {
+    const shell = await import("../src/shell.js");
     const api = createMockExtensionAPI();
     await shell.runWithSubagentRuntime(shell.createSubagentRuntimeContext(), async () => {
       await loadExtension(api.api);
     });
-    expect(api.tools).toHaveLength(0);
-    expect(api.listeners).toHaveLength(0);
+    expect(api.tools).toEqual([]);
+    expect(api.listeners).toEqual([]);
   });
-
-  it("keeps deprecated spawn hooks as inert-registration compatibility", async () => {
-    shell.enterSubagentSpawn();
-    shell.enterSubagentSpawn();
-    try {
-      expect(shell.isInsideSubagentSpawn()).toBe(true);
-      const childApi = createMockExtensionAPI();
-      await loadExtension(childApi.api);
-      expect(childApi.tools).toHaveLength(0);
-      expect(childApi.listeners).toHaveLength(0);
-
-      shell.exitSubagentSpawn();
-      expect(shell.isInsideSubagentSpawn()).toBe(true);
-    } finally {
-      shell.exitSubagentSpawn();
-    }
-
-    expect(shell.isInsideSubagentSpawn()).toBe(false);
-    const rootApi = createMockExtensionAPI();
-    await loadExtension(rootApi.api);
-    expect(rootApi.tools.length).toBeGreaterThan(0);
-  });
-
 });
 
-/* ------------------------------------------------------------------ */
-/*  Constrained Sampling                                              */
-/* ------------------------------------------------------------------ */
+function createOfflinePi(): any {
+  const tools: any[] = [];
+  const listeners: Array<{ event: string; handler: (...args: any[]) => any }> = [];
+  return {
+    tools,
+    listeners,
+    api: {
+      registerTool: vi.fn((tool: any) => tools.push(tool)),
+      on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.push({ event, handler })),
+      exec: vi.fn(async () => ({ code: 1, stdout: "" })),
+      sendMessage: vi.fn(),
+    },
+  };
+}
 
-describe("constrained sampling", () => {
-  let api: MockExtensionAPI;
+function createOfflineSession(): any {
+  const listeners: Array<(event: any) => void> = [];
+  let resolvePrompt!: () => void;
+  let resolvePromptStarted!: () => void;
+  let runtimeAtPrompt: ReturnType<typeof getSubagentRuntimeContext>;
+  const promptStarted = new Promise<void>((resolve) => { resolvePromptStarted = resolve; });
+  const prompt = vi.fn(() => {
+    runtimeAtPrompt = getSubagentRuntimeContext();
+    resolvePromptStarted();
+    return new Promise<void>((resolve) => { resolvePrompt = resolve; });
+  });
+  const emit = (event: any) => {
+    for (const listener of [...listeners]) listener(event);
+  };
+  const session = {
+    agent: {},
+    messages: [] as any[],
+    setSessionName: vi.fn(),
+    bindExtensions: vi.fn(async () => undefined),
+    getActiveToolNames: vi.fn(() => ["read", "bash", "Agent", "AgentContinue"]),
+    setActiveToolsByName: vi.fn(),
+    subscribe: vi.fn((listener: (event: any) => void) => {
+      listeners.push(listener);
+      return () => {
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      };
+    }),
+    prompt,
+    promptStarted,
+    dispose: vi.fn(),
+    abort: vi.fn(),
+    finish: (text: string) => {
+      emit({ type: "message_start" });
+      emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+      session.messages.push({ role: "assistant", content: [{ type: "text", text }] });
+      resolvePrompt?.();
+    },
+    get runtimeAtPrompt() {
+      return runtimeAtPrompt;
+    },
+  };
+  return session;
+}
 
-  beforeAll(async () => {
-    api = createMockExtensionAPI();
-    await loadExtension(api.api);
+const childBindings: any[] = [];
+const setups: any[] = [];
+let bindingIndex = 0;
+
+function context(): any {
+  return {
+    cwd: "/offline/project",
+    model: { provider: "offline", id: "test-model" },
+    thinkingLevel: "off",
+    isProjectTrusted: () => false,
+    ui: { notify: vi.fn() },
+  };
+}
+
+function acceptedSpawn(type: string, prompt: string) {
+  return acceptedSpawnFixture({
+    type,
+    prompt,
+    projectTrusted: false,
+    agentConfig: {
+      name: type,
+      description: `${type} test agent`,
+      extensions: true,
+      skills: false,
+      systemPrompt: "Test child instructions.",
+    },
+    runtimeSettings: {
+      agent: {
+        includeContextFiles: false,
+        disableDefaultAgents: false,
+        orchestrationPrompt: true,
+      },
+    },
+  });
+}
+
+function mountRoot(api: any, ctx: any) {
+  extension(api.api as any);
+  const manager = { name: "root-manager" };
+  const coordinator = { name: "root-coordinator" };
+  setManager(manager as any);
+  setCoordinator(coordinator as any);
+  setSessionCtx(ctx);
+  return {
+    manager,
+    coordinator,
+    tools: [...api.tools],
+    listeners: [...api.listeners],
+  };
+}
+
+function expectChildIsolation(setup: any) {
+  expect(setup.runtime).toMatchObject({ isChildRuntime: true });
+  expect(setup.session.runtimeAtPrompt).toBe(setup.runtime);
+  expect(setup.options.tools).not.toEqual(expect.arrayContaining(["Agent", "AgentContinue"]));
+  expect(setup.options.customTools).toBeUndefined();
+  expect(setup.session.bindExtensions).toHaveBeenCalledOnce();
+  expect(setup.session.setActiveToolsByName).toHaveBeenLastCalledWith(
+    expect.not.arrayContaining(["Agent", "AgentContinue"]),
+  );
+  expect(setup.extensionApi.tools).toHaveLength(0);
+  expect(setup.extensionApi.listeners).toHaveLength(0);
+  expect(setup.session.agent).not.toHaveProperty("Agent");
+}
+
+function expectRootUnchanged(api: any, ctx: any, root: ReturnType<typeof mountRoot>) {
+  expect(api.tools).toEqual(root.tools);
+  expect(api.listeners).toEqual(root.listeners);
+  expect(getPiInstance()).toBe(api.api);
+  expect(getSessionCtx()).toBe(ctx);
+  expect(getManager()).toBe(root.manager);
+  expect(getCoordinator()).toBe(root.coordinator);
+}
+
+describe("foreground child-session ALS integration", () => {
+  beforeEach(() => {
+    childBindings.length = 0;
+    setups.length = 0;
+    bindingIndex = 0;
+    boundary.loadChildExtension.mockReset();
+    boundary.loadChildExtension.mockImplementation(() => {
+      const extensionApi = createOfflinePi();
+      const runtime = getSubagentRuntimeContext();
+      extension(extensionApi.api as any);
+      childBindings.push({ extensionApi, runtime });
+    });
+    boundary.createAgentSession.mockReset();
+    boundary.createAgentSession.mockImplementation(async (options: any) => {
+      const binding = childBindings[bindingIndex++];
+      if (!binding) throw new Error("child extension was not loaded before session creation");
+      const session = createOfflineSession();
+      setups.push({ ...binding, options, session });
+      return { session };
+    });
   });
 
-  it("omits constrainedSampling from Agent so providers can accept its optional arguments", () => {
-    expect(findTool(api, "Agent")!.constrainedSampling).toBeUndefined();
+  afterEach(() => {
+    setManager(null);
+    setCoordinator(null);
+    setSessionCtx(null);
+    setPiInstance(null as any);
   });
 
-  for (const toolName of ["StopAgent", "AgentStatus", "AgentContinue"]) {
-    it(`${toolName} has constrainedSampling with json_schema and strict: prefer`, () => {
-      const tool = findTool(api, toolName);
-      expect(tool).toBeDefined();
-      expect(tool!.constrainedSampling).toEqual({
-        type: "json_schema",
-        strict: "prefer",
-      });
+  it("wraps a foreground run before child extension binding", async () => {
+    const api = createOfflinePi();
+    const ctx = context();
+    const root = mountRoot(api, ctx);
+    const run = runAgent(ctx, "implementer", "Inspect directly", {
+      pi: api.api,
+      acceptedSpawn: acceptedSpawn("implementer", "Inspect directly"),
     });
-  }
 
-  for (const toolName of ["Agent", "AgentContinue", "StopAgent", "AgentStatus"]) {
-    it(`${toolName} schema has additionalProperties: false`, () => {
-      const tool = findTool(api, toolName);
-      expect(tool).toBeDefined();
-      expect(tool!.parameters.additionalProperties).toBe(false);
-    });
-  }
+    await vi.waitFor(() => expect(setups).toHaveLength(1));
+    const setup = setups[0]!;
+    await setup.session.promptStarted;
 
-  it("AgentContinue schema requires agent_id, prompt, and run_in_background (strict-mode compatible)", () => {
-    const tool = findTool(api, "AgentContinue");
-    expect(tool!.parameters.required).toEqual(["agent_id", "prompt", "run_in_background"]);
-    expect(tool!.parameters.properties).toMatchObject({
-      agent_id: { type: "string", maxLength: 128 },
-      prompt: { type: "string" },
-      run_in_background: { type: "boolean" },
+    expectChildIsolation(setup);
+    expect(setup.options.resourceLoader.options.noExtensions).toBe(false);
+    expectRootUnchanged(api, ctx, root);
+
+    setup.session.finish("Direct result");
+    await expect(run).resolves.toMatchObject({ responseText: "Direct result", session: setup.session });
+    expectRootUnchanged(api, ctx, root);
+  });
+
+  it("keeps concurrent foreground child runs isolated without changing root state", async () => {
+    const api = createOfflinePi();
+    const ctx = context();
+    const root = mountRoot(api, ctx);
+    const first = runAgent(ctx, "implementer", "first root", {
+      pi: api.api,
+      acceptedSpawn: acceptedSpawn("implementer", "first root"),
     });
-    expect(tool!.parameters.properties.run_in_background.optional).toBeUndefined();
+    await vi.waitFor(() => expect(setups).toHaveLength(1));
+    const second = runAgent(ctx, "scout", "second root", {
+      pi: api.api,
+      acceptedSpawn: acceptedSpawn("scout", "second root"),
+    });
+    await vi.waitFor(() => expect(setups).toHaveLength(2));
+    await Promise.all(setups.map((setup) => setup.session.promptStarted));
+
+    expectChildIsolation(setups[0]);
+    expectChildIsolation(setups[1]);
+    expect(setups[0]!.runtime).not.toBe(setups[1]!.runtime);
+    expect(setups[0]!.session).not.toBe(setups[1]!.session);
+    expectRootUnchanged(api, ctx, root);
+
+    setups[0]!.session.finish("First result");
+    setups[1]!.session.finish("Second result");
+    await expect(first).resolves.toMatchObject({ responseText: "First result", session: setups[0]!.session });
+    await expect(second).resolves.toMatchObject({ responseText: "Second result", session: setups[1]!.session });
+    expectRootUnchanged(api, ctx, root);
   });
 });

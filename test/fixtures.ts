@@ -61,7 +61,7 @@ export function shellMock(fns: ShellMockFns = {}) {
     getTotalAgentCost: vi.fn(() => 0),
     getTotalAgentCount: vi.fn(() => 0),
   };
-  const pi = fns.pi ?? { sendMessage: vi.fn(), exec: vi.fn() };
+  const pi = fns.pi ?? { exec: vi.fn() };
   const sessionCtx = fns.sessionCtx ?? { cwd: "/home/test" };
   const store = fns.store ?? { agent: {} };
   const coordinator = fns.coordinator ?? { spawn: vi.fn() };
@@ -97,6 +97,8 @@ export interface RegisteredTool {
   promptGuidelines?: string;
   parameters: any; // TypeBox TSchema
   constrainedSampling?: unknown;
+  renderCall?: (...args: any[]) => any;
+  renderResult?: (...args: any[]) => any;
   execute?: (...args: any[]) => any;
 }
 
@@ -389,7 +391,6 @@ export function resolvedSpawnFixture(overrides: Partial<ResolvedSpawn> = {}): Re
     type = "test-agent",
     prompt = "test task",
     description = prompt.split("\n")[0]!.slice(0, 80),
-    runInBackground = false,
     agentConfig = {
       name: type,
       description,
@@ -409,7 +410,6 @@ export function resolvedSpawnFixture(overrides: Partial<ResolvedSpawn> = {}): Re
     type,
     prompt,
     description,
-    runInBackground,
     agentConfig,
     runtimeSettings,
     projectTrusted,
@@ -435,8 +435,6 @@ export function spawnWithResolvedFixture(
   const prompt = typeof promptOrOptions === "string" ? promptOrOptions : "test task";
   const options = (legacyOptions ?? (typeof promptOrOptions === "object" ? promptOrOptions : {})) as Record<string, unknown>;
   const {
-    isBackground,
-    runInBackground,
     description,
     ...contractFields
   } = options;
@@ -445,9 +443,6 @@ export function spawnWithResolvedFixture(
     type: typeOrResolved,
     prompt,
     description: typeof description === "string" ? description : undefined,
-    runInBackground: typeof runInBackground === "boolean"
-      ? runInBackground
-      : isBackground === true,
   }));
 }
 

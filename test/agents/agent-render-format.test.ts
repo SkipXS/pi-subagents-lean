@@ -7,7 +7,6 @@ import {
   formatAgentControlCallText,
   formatAgentResultText,
   formatAgentUsageLine,
-  formatStopAgentCallText,
   getAgentCallRenderMetadata,
   mergeAgentCallRenderMetadata,
   parseAgentCallRenderMetadata,
@@ -27,39 +26,37 @@ const usageDetails = {
   usingSubscription: true,
 };
 
-describe("Agent render format boundary", () => {
-  it("formats new, continued, background, and stop call text consistently", () => {
-    expect(formatAgentCallText(undefined, {
-      agent: "scout",
-      prompt: "inspect",
-      run_in_background: true,
-    })).toBe(
-      "Role: scout | Model: — | Thinking: — | Mode: Background | Run: New\n\nPrompt:\ninspect",
+describe("Agent render format", () => {
+  it("formats only New and Continued rows without execution mode labels", () => {
+    expect(formatAgentCallText(undefined, { agent: "scout", prompt: "inspect" })).toBe(
+      "Role: scout | Model: — | Thinking: — | Run: New\n\nPrompt:\ninspect",
     );
     expect(formatAgentContinueCallText(undefined, {
       agent_id: "abc12345",
       prompt: "continue",
     })).toBe(
-      "Role: — | Agent ID: abc12345 | Model: — | Thinking: — | Mode: Foreground | Run: Continued\n\nPrompt:\ncontinue",
+      "Role: — | Agent ID: abc12345 | Model: — | Thinking: — | Run: Continued\n\nPrompt:\ncontinue",
     );
-    expect(formatAgentControlCallText("AgentContinue", undefined, {
-      agent_id: "abc12345",
+    expect(formatAgentControlCallText("AgentContinue", {
+      role: "reviewer",
+      model: "provider/model",
+      thinking: "high",
       prompt: "continue",
-      run_in_background: true,
-    })).toContain("Mode: Background | Run: Continued");
-    expect(formatStopAgentCallText(undefined, { agent_id: "prefix" })).toBe(
-      "Role: — | Agent ID: prefix | Model: — | Thinking: — | Mode: — | Run: —",
-    );
+      agentId: "canonical-id",
+      kind: "continued",
+    })).toContain("Run: Continued");
+    const removedProperty = ["removed", "execution", "switch"].join("_");
+    expect(formatAgentCallText(undefined, { agent: "scout", prompt: "inspect", [removedProperty]: true })).not.toContain("Mode:");
   });
 
-  it("parses, merges, and wraps renderer metadata without trusting unrelated details", () => {
+  it("parses, merges, and wraps renderer metadata without accepting removed fields", () => {
     const previous = parseAgentCallRenderMetadata({
       role: "scout",
       model: "openai/gpt-4o",
       thinking: "medium",
       prompt: "old",
       agentId: "full-id",
-      mode: "foreground",
+      legacyExecutionField: "removed",
       kind: "new",
       ignored: "value",
     });
@@ -69,8 +66,14 @@ describe("Agent render format boundary", () => {
       thinking: "high",
       kind: "new",
     });
-    expect(previous).toBeDefined();
-    expect(incoming).toBeDefined();
+    expect(previous).toEqual({
+      role: "scout",
+      model: "openai/gpt-4o",
+      thinking: "medium",
+      prompt: "old",
+      agentId: "full-id",
+      kind: "new",
+    });
 
     const merged = mergeAgentCallRenderMetadata(previous, incoming!);
     expect(merged).toEqual({
@@ -79,7 +82,6 @@ describe("Agent render format boundary", () => {
       thinking: "high",
       prompt: "new",
       agentId: "full-id",
-      mode: "foreground",
       kind: "new",
     });
     expect(agentCallRenderMetadataEqual(merged, { ...merged })).toBe(true);
@@ -95,18 +97,10 @@ describe("Agent render format boundary", () => {
       "↑6.8k ↓487 R8.2k W1.5k CH83.4% $0.053 (sub) 2.1%/272k (auto)",
     );
     expect(formatAgentUsageLine({ role: "scout", prompt: "search" })).toBeUndefined();
-    expect(formatAgentResultText(
-      [{ type: "text", text: "answer\n" }],
-      usageDetails,
-      true,
-    )).toBe(
+    expect(formatAgentResultText([{ type: "text", text: "answer\n" }], usageDetails, true)).toBe(
       "answer\n\n↑6.8k ↓487 R8.2k W1.5k CH83.4% $0.053 (sub) 2.1%/272k (auto)",
     );
-    expect(formatAgentResultText(
-      [{ type: "text", text: "streaming" }],
-      usageDetails,
-      false,
-    )).toBe("streaming");
+    expect(formatAgentResultText([{ type: "text", text: "streaming" }], usageDetails, false)).toBe("streaming");
   });
 
   it("escapes all control-bearing metadata and prompts before formatting", () => {
@@ -117,7 +111,6 @@ describe("Agent render format boundary", () => {
       thinking: `high${String.fromCharCode(0x9b)}31m`,
       prompt: `before${esc}]52;c;secret\n日本語`,
     });
-
     expect(text).not.toContain(esc);
     expect(text).not.toContain(String.fromCharCode(0x9b));
     expect(text).toContain("\\x1b");

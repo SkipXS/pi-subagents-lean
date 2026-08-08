@@ -1,11 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { executeAgentTool } from "./agents/tool-execution.js";
-import {
-  executeAgentStatusTool,
-  executeContinueAgentTool,
-  executeStopAgentTool,
-} from "./agents/agent-control-execution.js";
+import { executeContinueAgentTool } from "./agents/agent-control-execution.js";
 import type { AgentRenderMetadataBridge } from "./agents/agent-render-bridge.js";
 import {
   MAX_AGENT_ID_BYTES,
@@ -16,13 +12,10 @@ import {
   renderAgentCall,
   renderAgentContinueCall,
   renderAgentResult,
-  renderStopAgentCall,
-  renderSubagentResult,
-  SUBAGENT_RESULT_CUSTOM_TYPE,
 } from "./agents/agent-renderer.js";
 
 // Provider-side json_schema enforcement; "prefer" falls back gracefully on
-// providers without strict mode (e.g. local Ollama).
+// providers without strict mode.
 const CONSTRAINED_SAMPLING = { type: "json_schema", strict: "prefer" } as const;
 
 /** Pi's public tool contract signals failures by throwing, not by isError results. */
@@ -37,7 +30,6 @@ function throwingToolExecute<T extends (...args: any[]) => Promise<any>>(execute
   }) as T;
 }
 
-/** Register the Agent tool once at extension initialization. */
 function registerAgentTool(pi: ExtensionAPI, renderBridge: AgentRenderMetadataBridge | undefined): void {
   const executeAgentWithBridge: typeof executeAgentTool = (
     toolCallId,
@@ -50,12 +42,11 @@ function registerAgentTool(pi: ExtensionAPI, renderBridge: AgentRenderMetadataBr
   pi.registerTool({
     name: "Agent",
     label: "Agent",
-    description: "Delegate to a context-isolated specialized agent. It cannot see the parent conversation, parent tool results, or other agents' output, so its prompt must be self-contained.",
+    description: "Delegate to a context-isolated specialized agent and wait for its result. It cannot see the parent conversation, parent tool results, or other agents' output, so its prompt must be self-contained.",
     parameters: Type.Object({
       prompt: Type.String({ maxLength: MAX_AGENT_PROMPT_BYTES }),
-      description: Type.Optional(Type.String({ maxLength: MAX_DESCRIPTION_BYTES })),
       agent: Type.String(),
-      run_in_background: Type.Optional(Type.Boolean()),
+      description: Type.Optional(Type.String({ maxLength: MAX_DESCRIPTION_BYTES })),
       worktree_path: Type.Optional(Type.String()),
     }, { additionalProperties: false }),
     execute: throwingToolExecute(executeAgentWithBridge),
@@ -64,20 +55,13 @@ function registerAgentTool(pi: ExtensionAPI, renderBridge: AgentRenderMetadataBr
   });
 }
 
-/** Register all four public tools. */
+/** Register the two foreground tools. */
 export function registerTools(
   pi: ExtensionAPI,
   renderBridge?: AgentRenderMetadataBridge,
 ): void {
-  // Background completions are custom messages, so give them the same safe
-  // plaintext/result-footer renderer as foreground Agent-family results.
-  // Optional invocation keeps minimal test/headless doubles compatible while
-  // real Pi always provides the public registration method.
-  pi.registerMessageRenderer?.(SUBAGENT_RESULT_CUSTOM_TYPE, renderSubagentResult);
-
   registerAgentTool(pi, renderBridge);
 
-  // AgentContinue remains a strict-schema compatible root continuation tool.
   const executeContinueWithBridge: typeof executeContinueAgentTool = (
     toolCallId,
     params,
@@ -86,54 +70,17 @@ export function registerTools(
     ctx,
   ) => executeContinueAgentTool(toolCallId, params, signal, onUpdate, ctx, renderBridge);
 
-  const continueAgentTool = {
+  pi.registerTool({
     name: "AgentContinue",
     label: "AgentContinue",
-    description: "Continue an existing agent's session with a new prompt.",
-    // Strict-mode providers (Codex) require every property to be present in
-    // `required`, so run_in_background remains a mandatory boolean here even
-    // though the executor tolerates its absence (defaults to foreground).
+    description: "Continue a finished agent's session with a new prompt and wait for its result.",
     parameters: Type.Object({
       agent_id: Type.String({ maxLength: MAX_AGENT_ID_BYTES }),
       prompt: Type.String({ maxLength: MAX_AGENT_PROMPT_BYTES }),
-      run_in_background: Type.Boolean(),
     }, { additionalProperties: false }),
     execute: throwingToolExecute(executeContinueWithBridge),
     renderCall: renderAgentContinueCall,
     renderResult: renderAgentResult,
     constrainedSampling: CONSTRAINED_SAMPLING,
-  };
-  pi.registerTool(continueAgentTool);
-
-  const executeStopWithBridge: typeof executeStopAgentTool = (
-    toolCallId,
-    params,
-    signal,
-    onUpdate,
-    ctx,
-  ) => executeStopAgentTool(toolCallId, params, signal, onUpdate, ctx, renderBridge);
-
-  const stopAgentTool = {
-    name: "StopAgent",
-    label: "StopAgent",
-    description: "Stop a running or queued agent.",
-    parameters: Type.Object({
-      agent_id: Type.String({ maxLength: MAX_AGENT_ID_BYTES }),
-    }, { additionalProperties: false }),
-    execute: throwingToolExecute(executeStopWithBridge),
-    renderCall: renderStopAgentCall,
-    renderResult: renderAgentResult,
-    constrainedSampling: CONSTRAINED_SAMPLING,
-  };
-  pi.registerTool(stopAgentTool);
-
-  const agentStatusTool = {
-    name: "AgentStatus",
-    label: "AgentStatus",
-    description: "List subagents and their current status.",
-    parameters: Type.Object({}, { additionalProperties: false }),
-    execute: throwingToolExecute(executeAgentStatusTool),
-    constrainedSampling: CONSTRAINED_SAMPLING,
-  };
-  pi.registerTool(agentStatusTool);
+  });
 }

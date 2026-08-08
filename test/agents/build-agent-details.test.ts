@@ -3,7 +3,7 @@
  *
  * buildAgentDetails consolidates the stats/details Record<string, unknown>
  * construction that was previously duplicated across emitIndividualNudge,
- * executeSpawnForeground, and executeSpawnBackground.
+ * the Agent and AgentContinue result paths.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -224,12 +224,12 @@ describe("buildAgentDetails", () => {
         ...makeRecord().stats,
         executions: [
           {
-            id: "exec-0", prompt: "initial", mode: "foreground", status: "completed",
+            id: "exec-0", prompt: "initial", status: "completed",
             startedAt: 1000, completedAt: 3000, responseText: "initial",
             usage: { input: 100, output: 200, cacheWrite: 50, cacheRead: 75, cost: 0.01 },
           },
           {
-            id: "exec-1", prompt: "follow-up", mode: "foreground", status: "completed",
+            id: "exec-1", prompt: "follow-up", status: "completed",
             startedAt: 3000, completedAt: 4000, responseText: "follow-up",
             usage: { input: 40, output: 15, cacheWrite: 5, cacheRead: 20, cost: 0.02 },
             compactionCount: 2,
@@ -253,7 +253,6 @@ describe("buildAgentDetails", () => {
     expect(details.cost).not.toBe(record.stats.lifetimeUsage.cost);
     // The current execution block mirrors the summary without ids or history.
     expect(details.currentExecution).toMatchObject({
-      mode: "foreground",
       status: "completed",
       responseText: "follow-up",
       usage: { input: 40, output: 15, cacheWrite: 5, cacheRead: 20, cost: 0.02 },
@@ -268,7 +267,7 @@ describe("buildAgentDetails", () => {
       stats: {
         ...makeRecord().stats,
         executions: [{
-          id: "exec-0", prompt: "initial", mode: "foreground", status: "completed",
+          id: "exec-0", prompt: "initial", status: "completed",
           startedAt: 1000, completedAt: 5000, responseText: "initial",
           usage: { input: 100, output: 200, cacheWrite: 50, cacheRead: 75, cost: 0.01 },
           compactionCount: 1,
@@ -285,7 +284,7 @@ describe("buildAgentDetails", () => {
     expect(details.compactions).toBe(1);
     expect(details.compactionCount).toBe(1);
     expect(details.currentExecution).toMatchObject({
-      mode: "foreground", status: "completed", compactionCount: 1,
+      status: "completed", compactionCount: 1,
     });
   });
 
@@ -294,11 +293,11 @@ describe("buildAgentDetails", () => {
       stats: {
         ...makeRecord().stats,
         executions: [{
-          id: "exec-0", prompt: "initial", mode: "foreground", status: "completed",
+          id: "exec-0", prompt: "initial", status: "completed",
           startedAt: 1000, completedAt: 3000, responseText: "initial",
           compactionCount: 1,
         }, {
-          id: "exec-1", prompt: "follow-up", mode: "foreground", status: "running",
+          id: "exec-1", prompt: "follow-up", status: "running",
           startedAt: 3000,
         }],
       },
@@ -309,7 +308,7 @@ describe("buildAgentDetails", () => {
     // fallback rather than exposing partial or undefined stats.
     expect(details.input).toBe(100);
     expect(details.cost).toBeCloseTo(0.01);
-    expect(details.currentExecution).toMatchObject({ mode: "foreground", status: "running" });
+    expect(details.currentExecution).toMatchObject({ status: "running" });
   });
 
   // --- Edge cases ---

@@ -2,23 +2,16 @@ import { describe, expect, it } from "vitest";
 import { getStatusNote } from "../src/status-note.js";
 
 describe("getStatusNote", () => {
-  it("returns empty string for status without a note", () => {
+  it("returns empty string for a successful status", () => {
     expect(getStatusNote({ status: "completed", startedAt: 0 })).toBe("");
   });
 
-  it("returns user stop message when stoppedBy is user", () => {
-    expect(getStatusNote({ status: "stopped", startedAt: 0, stoppedBy: "user" })).toMatch(/STOPPED BY THE USER/);
-  });
-
-  it("returns agent stop message when stoppedBy is agent", () => {
-    expect(getStatusNote({ status: "stopped", startedAt: 0, stoppedBy: "agent" })).toMatch(/stopped before completion/);
-  });
-
-  it("returns agent stop message when stoppedBy is undefined", () => {
-    expect(getStatusNote({ status: "stopped", startedAt: 0 })).toMatch(/stopped before completion/);
+  it("explains parent cancellation for a stopped result", () => {
+    expect(getStatusNote({ status: "stopped", startedAt: 0, stoppedBy: "parent" })).toMatch(/parent turn ended/);
+    expect(getStatusNote({ status: "stopped", startedAt: 0 })).toMatch(/parent turn ended/);
   });
 
   it("wraps known notes with space-parentheses", () => {
-    expect(getStatusNote({ status: "stopped", startedAt: 0, stoppedBy: "user" })).toMatch(/^ \(.+\)$/);
+    expect(getStatusNote({ status: "stopped", startedAt: 0, stoppedBy: "parent" })).toMatch(/^ \(.+\)$/);
   });
 });

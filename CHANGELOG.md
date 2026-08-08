@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking foreground-only surface.** Background `Agent` and `AgentContinue`
+  execution and the `run_in_background` parameter are removed; both tools now
+  always await their complete foreground results.
+- **Removed control tools.** `StopAgent` and `AgentStatus` are no longer
+  registered, executed, rendered, exported, or available in child sessions.
+- **Removed delivery and activity projections.** The background delivery
+  subsystem, payload/diagnostic state, completion notifications, static footer,
+  activity observers, execution modes, `deliveredText`, and `resultConsumed`
+  are removed from runtime records, details, and renderers.
+- **Removed deprecated shell compatibility exports.** The source-path
+  compatibility exports `enterSubagentSpawn`, `exitSubagentSpawn`, and
+  `isInsideSubagentSpawn` are removed; AsyncLocalStorage remains the
+  child-runtime isolation mechanism.
+
+### Changed
+
+- **Same-turn foreground parallelism.** Independent read-only `Agent` calls in
+  one assistant turn are submitted concurrently under the configured FIFO root
+  concurrency limit; dependent stages remain sequential.
+- **Always-await results.** `Agent` and `AgentContinue` return the full caller
+  response and canonical ID after settlement. `AgentContinue` still reuses
+  successful retained root sessions by unique ID prefix.
+
 ## [0.2.0] - 2026-08-07
 
 ### Added

@@ -45,7 +45,7 @@ describe("queued worktree agent configuration", () => {
     mocks.runAgent.mockReset();
     registerAgents(new Map(), { disableDefaultAgents: true });
     setAgentScanDirs("", "");
-    manager = new AgentManager(undefined, { default: 1 });
+    manager = new AgentManager({ default: 1 });
   });
 
   afterEach(() => {
@@ -88,13 +88,12 @@ describe("queued worktree agent configuration", () => {
         description: "blocker",
         modelKey: "test/model",
       });
-      await coordinator.spawn(pi, ctx, resolvedSpawnFixture({
+      const queuedResult = coordinator.spawn(pi, ctx, resolvedSpawnFixture({
         type: "reviewer",
         prompt: "review A",
         description: "queued A",
         modelKey: "test/model",
         agentConfig: a!.config,
-        runInBackground: true,
         worktreePath: worktreeA.dir,
         projectTrusted: false,
       }));
@@ -105,6 +104,7 @@ describe("queued worktree agent configuration", () => {
 
       unblock(runResult());
       await vi.waitFor(() => expect(mocks.runAgent).toHaveBeenCalledTimes(2));
+      await queuedResult;
 
       const queuedOptions = mocks.runAgent.mock.calls[1][3];
       expect(queuedOptions.acceptedSpawn.agentConfig).toEqual(expect.objectContaining({

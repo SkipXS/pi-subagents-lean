@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { acceptedSpawnFixture, fakeCtx, fakePi, makeResolvablePromise } from "../fixtures.ts";
+import { acceptedSpawnFixture, fakeCtx, fakePi } from "../fixtures.ts";
 import { AgentExecutionService, type SpawnExecutionTask } from "../../src/agents/agent-execution-service.js";
 import { AgentRecordStore } from "../../src/agents/agent-record-store.js";
 import { ExecutionTelemetry } from "../../src/agents/execution-telemetry.js";
 
-const mockModules = vi.hoisted(() => ({
+const state = vi.hoisted(() => ({
   runAgent: vi.fn(),
   outputLog: vi.fn().mockImplementation((id: string) => ({
     path: `/private/${id}.log`,
@@ -14,103 +14,127 @@ const mockModules = vi.hoisted(() => ({
   })),
   releaseOutputRoot: vi.fn(() => Promise.resolve()),
 }));
-
-vi.mock("../../src/agents/agent-runner.js", () => ({ runAgent: mockModules.runAgent }));
+vi.mock("../../src/agents/agent-runner.js", () => ({ runAgent: state.runAgent }));
 vi.mock("../../src/agents/output-file.js", () => ({
-  AgentOutputLog: mockModules.outputLog,
+  AgentOutputLog: state.outputLog,
   createOutputRoot: vi.fn(() => "/private"),
-  releaseOutputRoot: mockModules.releaseOutputRoot,
+  releaseOutputRoot: state.releaseOutputRoot,
 }));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
 
 function session(): any {
   return { messages: [], subscribe: vi.fn(), dispose: vi.fn() };
 }
 
-function runResult(): { responseText: string; session: any; aborted: boolean } {
-  return { responseText: "done", session: session(), aborted: false };
+function runResult(responseText = "done") {
+  return { responseText, session: session(), aborted: false };
 }
 
 describe("AgentExecutionService", () => {
   beforeEach(() => {
-    mockModules.releaseOutputRoot.mockClear();
+    state.runAgent.mockReset();
+    state.releaseOutputRoot.mockClear();
   });
 
   it("removes a queued task on parent abort without consuming a slot", async () => {
-    mockModules.runAgent.mockReset();
-    const blocker = makeResolvablePromise();
-    mockModules.runAgent.mockReturnValueOnce(blocker.promise);
-    const store = new AgentRecordStore();
-    const telemetry = new ExecutionTelemetry((record) => store.get(record.id) === record);
-    const service = new AgentExecutionService({ store, telemetry, concurrency: 1 });
-
-    const first = acceptedSpawnFixture({ prompt: "first", runInBackground: true });
+    const blocker = deferred<ReturnType<typeof runResult>>();
+    state.runAgent.mockReturnValueOnce(blocker.promise);
+    const { service, store, telemetry } = createService(1);
+    const first = acceptedSpawnFixture({ prompt: "first" });
     const firstCreated = store.createSpawnRecord(first, "running", new AbortController());
-    telemetry.initializeRecord(firstCreated.record);
-    telemetry.beginExecution(firstCreated.execution.id, firstCreated.record);
+    initialize(telemetry, firstCreated.record, firstCreated.execution);
     service.submit(spawnTask(firstCreated, first));
 
     const parent = new AbortController();
     let resolveQueued!: (result: string) => void;
     const queuedPromise = new Promise<string>((resolve) => { resolveQueued = resolve; });
-    const second = acceptedSpawnFixture({ prompt: "second", runInBackground: true });
+    const second = acceptedSpawnFixture({ prompt: "second", signal: parent.signal });
     const secondCreated = store.createSpawnRecord(second, "queued", new AbortController(), queuedPromise);
-    telemetry.initializeRecord(secondCreated.record);
-    telemetry.beginExecution(secondCreated.execution.id, secondCreated.record);
-    service.submit(spawnTask(secondCreated, second, parent.signal, resolveQueued));
+    initialize(telemetry, secondCreated.record, secondCreated.execution);
+    service.submit(spawnTask(secondCreated, second, resolveQueued));
 
-    expect(store.get(secondCreated.id)?.lifecycle.status).toBe("queued");
     expect(service.pendingCount).toBe(1);
     parent.abort();
     expect(service.pendingCount).toBe(0);
     await expect(queuedPromise).resolves.toBe("");
     expect(store.get(secondCreated.id)?.lifecycle).toMatchObject({ status: "stopped", settled: true, stoppedBy: "parent" });
-    expect(mockModules.runAgent).toHaveBeenCalledOnce();
+    expect(state.runAgent).toHaveBeenCalledOnce();
 
     blocker.resolve(runResult());
     await firstCreated.record.execution.promise;
     service.dispose();
   });
 
-  it("releases a completed turn and starts the next FIFO entry", async () => {
-    mockModules.runAgent.mockReset();
-    const firstRun = makeResolvablePromise();
-    const secondRun = makeResolvablePromise();
-    mockModules.runAgent.mockReturnValueOnce(firstRun.promise).mockReturnValueOnce(secondRun.promise);
-    const store = new AgentRecordStore();
-    const telemetry = new ExecutionTelemetry((record) => store.get(record.id) === record);
-    const service = new AgentExecutionService({ store, telemetry, concurrency: 1 });
+  it("releases one slot and starts the next entry in FIFO order", async () => {
+    const firstRun = deferred<ReturnType<typeof runResult>>();
+    const secondRun = deferred<ReturnType<typeof runResult>>();
+    state.runAgent.mockReturnValueOnce(firstRun.promise).mockReturnValueOnce(secondRun.promise);
+    const { service, store, telemetry } = createService(1);
     const first = acceptedSpawnFixture({ prompt: "first" });
     const firstCreated = store.createSpawnRecord(first, "running", new AbortController());
-    telemetry.initializeRecord(firstCreated.record);
-    telemetry.beginExecution(firstCreated.execution.id, firstCreated.record);
+    initialize(telemetry, firstCreated.record, firstCreated.execution);
     service.submit(spawnTask(firstCreated, first));
 
     let resolveSecond!: (result: string) => void;
     const secondPromise = new Promise<string>((resolve) => { resolveSecond = resolve; });
     const second = acceptedSpawnFixture({ prompt: "second" });
     const secondCreated = store.createSpawnRecord(second, "queued", new AbortController(), secondPromise);
-    telemetry.initializeRecord(secondCreated.record);
-    telemetry.beginExecution(secondCreated.execution.id, secondCreated.record);
-    service.submit(spawnTask(secondCreated, second, undefined, resolveSecond));
+    initialize(telemetry, secondCreated.record, secondCreated.execution);
+    service.submit(spawnTask(secondCreated, second, resolveSecond));
 
-    firstRun.resolve(runResult());
+    firstRun.resolve(runResult("first complete"));
     await vi.waitFor(() => expect(store.get(secondCreated.id)?.lifecycle.status).toBe("running"));
-    expect(mockModules.runAgent).toHaveBeenCalledTimes(2);
+    expect(state.runAgent).toHaveBeenCalledTimes(2);
+    expect(state.runAgent.mock.calls[1]![2]).toBe("second");
 
-    secondRun.resolve(runResult());
-    await expect(secondPromise).resolves.toBe("done");
+    secondRun.resolve(runResult("second complete"));
+    await expect(secondPromise).resolves.toBe("second complete");
+    expect(store.get(secondCreated.id)?.result).toBe("second complete");
     service.dispose();
-    expect(mockModules.releaseOutputRoot).toHaveBeenCalledWith("/private");
+    expect(state.releaseOutputRoot).toHaveBeenCalledWith("/private");
+  });
+
+  it("settles active caller promises and removes records during shutdown", async () => {
+    const run = deferred<ReturnType<typeof runResult>>();
+    state.runAgent.mockReturnValue(run.promise);
+    const { service, store, telemetry } = createService(1);
+    let resolveCaller!: (value: string) => void;
+    const callerPromise = new Promise<string>((resolve) => { resolveCaller = resolve; });
+    const accepted = acceptedSpawnFixture();
+    const created = store.createSpawnRecord(accepted, "running", new AbortController(), callerPromise);
+    initialize(telemetry, created.record, created.execution);
+    service.submit(spawnTask(created, accepted, resolveCaller));
+
+    service.dispose();
+    await expect(callerPromise).resolves.toBe("");
+    expect(store.list()).toEqual([]);
+    run.resolve(runResult("late"));
+    await Promise.resolve();
   });
 });
+
+function createService(concurrency: number) {
+  const store = new AgentRecordStore();
+  const telemetry = new ExecutionTelemetry((record) => store.get(record.id) === record);
+  const service = new AgentExecutionService({ store, telemetry, concurrency });
+  return { store, telemetry, service };
+}
+
+function initialize(telemetry: ExecutionTelemetry, record: any, execution: any): void {
+  telemetry.initializeRecord(record);
+  telemetry.beginExecution(execution.id, record);
+}
 
 function spawnTask(
   created: ReturnType<AgentRecordStore["createSpawnRecord"]>,
   acceptedSpawn: ReturnType<typeof acceptedSpawnFixture>,
-  signal?: AbortSignal,
   resolve?: (result: string) => void,
 ): SpawnExecutionTask {
-  const contract = signal ? { ...acceptedSpawn, signal } : acceptedSpawn;
   return {
     kind: "spawn",
     id: created.id,
@@ -118,7 +142,7 @@ function spawnTask(
     execution: created.execution,
     pi: fakePi(),
     ctx: fakeCtx(),
-    acceptedSpawn: contract,
+    acceptedSpawn,
     resolve,
   };
 }

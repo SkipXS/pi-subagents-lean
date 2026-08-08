@@ -1,4 +1,4 @@
-import type { AgentExecutionKind, AgentExecutionMode } from "../types.js";
+import type { AgentExecutionKind } from "../types.js";
 import {
   AGENT_RENDER_DETAILS_KEY,
   type AgentCallRenderMetadata,
@@ -36,7 +36,7 @@ export interface AgentRendererContext {
   isError?: boolean;
 }
 
-export type AgentCallIndicator = "" | "working" | "success" | "error" | "background" | "queued";
+export type AgentCallIndicator = "" | "working" | "success" | "error" | "queued";
 
 export interface AgentRendererState {
   metadata?: AgentCallRenderMetadata;
@@ -83,7 +83,6 @@ export function getAgentRendererState(context: AgentRendererContext): AgentRende
   const indicator: AgentCallIndicator = indicatorValue === "working"
     || indicatorValue === "success"
     || indicatorValue === "error"
-    || indicatorValue === "background"
     || indicatorValue === "queued"
     ? indicatorValue
     : "";
@@ -235,16 +234,6 @@ export function establishRendererCapability(
   return synchronous;
 }
 
-export function executionMode(
-  metadata: AgentCallRenderMetadata | undefined,
-  rawArgs: unknown,
-  defaultMode: AgentExecutionMode | undefined = "foreground",
-): AgentExecutionMode | undefined {
-  if (metadata?.mode !== undefined) return metadata.mode;
-  if (isRecord(rawArgs) && rawArgs.run_in_background === true) return "background";
-  return defaultMode;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -254,7 +243,7 @@ export function isExecutionTool(
   metadata: AgentCallRenderMetadata | undefined,
   rawArgs: unknown,
 ): boolean {
-  if (toolName !== undefined) return toolName !== "StopAgent";
+  if (toolName !== undefined) return toolName === "Agent" || toolName === "AgentContinue";
   if (metadata?.kind === "new" || metadata?.kind === "continued") return true;
   if (!isRecord(rawArgs) || typeof rawArgs.prompt !== "string") return false;
   return typeof rawArgs.agent === "string" || typeof rawArgs.agent_id === "string";
@@ -270,8 +259,6 @@ function indicatorText(indicator: AgentCallIndicator, runtime: AgentRendererRunt
       return "✓";
     case "error":
       return "✗";
-    case "background":
-      return "●";
     case "queued":
       return "◷";
     default:
@@ -286,8 +273,7 @@ export function canAnimateForeground(
   context: AgentRendererContext,
   runtime: AgentRendererRuntime,
 ): boolean {
-  return toolName !== "StopAgent"
-    && executionMode(metadata, rawArgs) === "foreground"
+  return (toolName === "Agent" || toolName === "AgentContinue")
     && context.executionStarted === true
     // An explicitly false value means the row is already terminal. Headless
     // callers may omit this Pi-only field, so undefined remains compatible.
@@ -341,14 +327,10 @@ export function callIndicator(
   runtime: AgentRendererRuntime,
 ): string {
   const metadata = state.metadata;
-  const mode = executionMode(metadata, args, toolName === "StopAgent" ? undefined : "foreground");
 
-  if (state.indicator === "working" && mode === "background") {
-    setRowIndicator(context, state, "background");
-  } else if (
+  if (
     state.indicator !== "success"
     && state.indicator !== "error"
-    && state.indicator !== "background"
     && state.indicator !== "queued"
     && canAnimateForeground(toolName, metadata, args, context, runtime)
   ) {

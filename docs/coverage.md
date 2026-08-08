@@ -51,9 +51,6 @@ conservative per-file floors:
 | `src/prompt/skill-limits.ts` | 78% | 70% | 65% | 80% |
 | `src/prompt/skill-loader-worker.ts` | 85% | 70% | 90% | 90% |
 | `src/spawn/spawn-coordinator.ts` | 74% | 70% | 80% | 74% |
-| `src/spawn/background-delivery.ts` | 74% | 70% | 77% | 74% |
-| `src/spawn/background-delivery-payload.ts` | 65% | 70% | 90% | 65% |
-| `src/spawn/background-delivery-diagnostics.ts` | 85% | 75% | 90% | 90% |
 
 The manager function floor remains at the project gate for the active root-only
 implementation. The skill-module floors account for the measured Windows
@@ -97,9 +94,9 @@ semantics. Context tests cover root-to-cwd ordering, 256/512 KiB
 file/total limits, deep ancestor bounds, lstat identity races, and trust.
 Config tests cover the 1 MiB pre-parse rejection, bounded override count, and
 multibyte name/model strings. Record tests cover the 64 KiB prompt/response
-projections, full multi-MiB foreground response delivery, identity-safe
-promise release, background cleanup, and deterministic 1 MiB summary-text
-pruning. Output-log security tests execute on Windows for post-open
+projections, full multi-MiB foreground response return, identity-safe promise
+release, shutdown cleanup, and deterministic 1 MiB summary-text pruning.
+Output-log security tests execute on Windows for post-open
 identity/root exchange and file-link rejection, and on POSIX/Windows where
 hardlinks are supported. A privilege-restricted Windows symlink, junction, or
 hardlink case skips only that link-dependent test; deterministic simulated

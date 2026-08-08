@@ -1,20 +1,13 @@
-import type { AgentExecutionKind, AgentExecutionMode } from "../types.js";
-import { formatExecutionLabels } from "./execution-display.js";
+import type { AgentExecutionKind } from "../types.js";
 import { escapeTerminalText } from "./agent-render-text.js";
 import { formatCost, formatTokens } from "./usage.js";
 
-/**
- * Private result-details field used only by the Agent tool renderer.
- *
- * The field is deliberately namespaced and nested so that the public Agent
- * result details keep their existing shape while a restored tool row can
- * rebuild its display without process-global state.
- */
+/** Private result-details field used only by the Agent row renderer. */
 export const AGENT_RENDER_DETAILS_KEY = "__pi_subagents_lean_agent_render" as const;
 
-/** Public tool names that have a custom agent-call renderer. */
-export type AgentRenderToolName = "Agent" | "AgentContinue" | "StopAgent";
-export type AgentControlRenderToolName = Exclude<AgentRenderToolName, "Agent">;
+/** Public tool names with custom Agent-family row renderers. */
+export type AgentRenderToolName = "Agent" | "AgentContinue";
+export type AgentControlRenderToolName = "AgentContinue";
 
 /** Metadata needed to render one Agent-family tool call. */
 export interface AgentCallRenderMetadata {
@@ -24,12 +17,11 @@ export interface AgentCallRenderMetadata {
   model?: string;
   /** Pi-normalized thinking level. */
   thinking?: string;
-  /** The complete prompt passed to the agent, when the tool has one. */
+  /** Complete prompt passed to the child session. */
   prompt: string;
-  /** Canonical full root-agent id; absent on a new Agent row before acceptance. */
+  /** Canonical full root-agent id; absent before Agent acceptance. */
   agentId?: string;
-  /** Execution display fields; omitted for StopAgent because stopping is not an execution. */
-  mode?: AgentExecutionMode;
+  /** Whether this execution starts a session or continues one. */
   kind?: AgentExecutionKind;
 }
 
@@ -57,12 +49,10 @@ export function parseAgentCallRenderMetadata(value: unknown): AgentCallRenderMet
     ...(thinking !== undefined ? { thinking } : {}),
     prompt,
     ...(agentId !== undefined ? { agentId } : {}),
-    ...(value.mode === "foreground" || value.mode === "background" ? { mode: value.mode } : {}),
     ...(value.kind === "new" || value.kind === "continued" ? { kind: value.kind } : {}),
   };
 }
 
-/** Compare metadata fields without considering object identity. */
 export function agentCallRenderMetadataEqual(
   a: AgentCallRenderMetadata | undefined,
   b: AgentCallRenderMetadata,
@@ -72,7 +62,6 @@ export function agentCallRenderMetadataEqual(
     && a?.thinking === b.thinking
     && a?.prompt === b.prompt
     && a?.agentId === b.agentId
-    && a?.mode === b.mode
     && a?.kind === b.kind;
 }
 
@@ -89,18 +78,17 @@ export function mergeAgentCallRenderMetadata(
     ...(incoming.agentId ?? previous?.agentId
       ? { agentId: incoming.agentId ?? previous?.agentId }
       : {}),
-    ...(incoming.mode ?? previous?.mode ? { mode: incoming.mode ?? previous?.mode } : {}),
-    ...(incoming.kind ?? previous?.kind ? { kind: incoming.kind ?? previous?.kind } : {}),
+    ...(incoming.kind ?? previous?.kind
+      ? { kind: incoming.kind ?? previous?.kind }
+      : {}),
   };
 }
 
-/** Read renderer metadata from a tool result without trusting arbitrary details. */
 export function getAgentCallRenderMetadata(details: unknown): AgentCallRenderMetadata | undefined {
   if (!isRecord(details)) return undefined;
   return parseAgentCallRenderMetadata(details[AGENT_RENDER_DETAILS_KEY]);
 }
 
-/** Add renderer-only metadata while preserving every existing details field. */
 export function withAgentCallRenderMetadata(
   details: Record<string, unknown> | undefined,
   metadata: AgentCallRenderMetadata,
@@ -128,18 +116,12 @@ function nonNegativeFiniteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-/**
- * Format the compact usage footer shared by foreground results and background
- * completion messages. Details are untrusted because persisted tool results
- * can outlive the code that produced them.
- */
+/** Format the compact usage line shared by completed foreground results. */
 export function formatAgentUsageLine(details: unknown): string | undefined {
   if (!isRecord(details)) return undefined;
 
   try {
-    if (!USAGE_DETAIL_KEYS.some((key) => Object.prototype.hasOwnProperty.call(details, key))) {
-      return undefined;
-    }
+    if (!USAGE_DETAIL_KEYS.some((key) => Object.prototype.hasOwnProperty.call(details, key))) return undefined;
 
     const input = nonNegativeFiniteNumber(details.input);
     const output = nonNegativeFiniteNumber(details.output);
@@ -154,10 +136,6 @@ export function formatAgentUsageLine(details: unknown): string | undefined {
     const autoCompactionEnabled = details.autoCompactionEnabled === true;
     const usingSubscription = details.usingSubscription === true;
 
-    // A malformed stats-shaped details object should be as harmless as a
-    // details object without stats. Valid zeroes still count as stats because
-    // buildAgentDetails intentionally exposes them for completed zero-cost
-    // executions.
     const hasStatsValue = [
       input,
       output,
@@ -205,53 +183,41 @@ export function formatAgentContentText(content: unknown): string {
     .join("\n");
 }
 
-/** Format Agent result content and append the completed usage footer when present. */
-export function formatAgentResultText(
-  content: unknown,
-  details: unknown,
-  completed: boolean,
-): string {
+export function formatAgentResultText(content: unknown, details: unknown, completed: boolean): string {
   const text = formatAgentContentText(content);
   if (!completed) return text;
   const usage = formatAgentUsageLine(details);
   if (!usage) return text;
   if (text.length === 0) return usage;
-
-  // Keep exactly one empty line between response content and the footer. A
-  // response may already end in a newline, so normalize only that separator;
-  // when no footer exists the original text is returned unchanged above.
   const normalizedContent = text.replace(/\n+$/u, "");
   return normalizedContent.length > 0 ? `${normalizedContent}\n\n${usage}` : usage;
 }
 
-/** Format the common Agent-family header in its stable field order. */
+function formatRunLabel(kind: AgentExecutionKind | undefined): string {
+  return `Run: ${kind === "continued" ? "Continued" : kind === "new" ? "New" : "—"}`;
+}
+
 function formatAgentHeader(
   metadata: Partial<AgentCallRenderMetadata> | undefined,
   rawArgs: Record<string, unknown> | undefined,
-  options: {
-    includeRawAgentId: boolean;
-    defaultMode?: AgentExecutionMode;
-    defaultKind?: AgentExecutionKind;
-  },
+  options: { includeRawAgentId: boolean; defaultKind?: AgentExecutionKind },
 ): string {
   const role = escapeTerminalText(metadata?.role || (nonEmptyString(rawArgs?.agent) ?? "—"));
   const requestedId = options.includeRawAgentId ? nonEmptyString(rawArgs?.agent_id) : undefined;
   const agentId = nonEmptyString(metadata?.agentId) ?? requestedId;
   const model = escapeTerminalText(metadata?.model || "—");
   const thinking = escapeTerminalText(metadata?.thinking || "—");
-  const mode = metadata?.mode ?? (rawArgs?.run_in_background === true ? "background" : options.defaultMode);
   const kind = metadata?.kind ?? options.defaultKind;
   const fields = [
     `Role: ${role}`,
     ...(agentId !== undefined ? [`Agent ID: ${escapeTerminalText(agentId)}`] : []),
     `Model: ${model}`,
     `Thinking: ${thinking}`,
-    formatExecutionLabels(mode, kind),
+    formatRunLabel(kind),
   ];
   return fields.join(" | ");
 }
 
-/** Build the Agent call header and complete prompt. */
 export function formatAgentCallText(
   metadata: Partial<AgentCallRenderMetadata> | undefined,
   rawArgs?: unknown,
@@ -259,7 +225,6 @@ export function formatAgentCallText(
   const args = isRecord(rawArgs) ? rawArgs : undefined;
   const header = formatAgentHeader(metadata, args, {
     includeRawAgentId: false,
-    defaultMode: "foreground",
     defaultKind: "new",
   });
   const prompt = escapeTerminalText(
@@ -269,44 +234,26 @@ export function formatAgentCallText(
   return `${header}\n\nPrompt:\n${prompt}`;
 }
 
-/**
- * Build the shared control-tool header. The raw agent_id is deliberately used
- * until an executor resolves a prefix to the record's canonical full id.
- */
 export function formatAgentControlCallText(
-  toolName: AgentControlRenderToolName,
+  _toolName: AgentControlRenderToolName,
   metadata: Partial<AgentCallRenderMetadata> | undefined,
   rawArgs?: unknown,
 ): string {
   const args = isRecord(rawArgs) ? rawArgs : undefined;
   const header = formatAgentHeader(metadata, args, {
     includeRawAgentId: true,
-    ...(toolName === "AgentContinue"
-      ? { defaultMode: args?.run_in_background === true ? "background" : "foreground", defaultKind: "continued" }
-      : {}),
+    defaultKind: "continued",
   });
-  const prompt = toolName === "AgentContinue"
-    ? escapeTerminalText(
-      metadata?.prompt ?? (typeof args?.prompt === "string" ? args.prompt : ""),
-      true,
-    )
-    : "";
-  const promptSection = toolName === "AgentContinue" ? `\n\nPrompt:\n${prompt}` : "";
-  return `${header}${promptSection}`;
+  const prompt = escapeTerminalText(
+    metadata?.prompt ?? (typeof args?.prompt === "string" ? args.prompt : ""),
+    true,
+  );
+  return `${header}\n\nPrompt:\n${prompt}`;
 }
 
-/** Convenience formatter for the AgentContinue row. */
 export function formatAgentContinueCallText(
   metadata: Partial<AgentCallRenderMetadata> | undefined,
   rawArgs?: unknown,
 ): string {
   return formatAgentControlCallText("AgentContinue", metadata, rawArgs);
-}
-
-/** Convenience formatter for the StopAgent row. */
-export function formatStopAgentCallText(
-  metadata: Partial<AgentCallRenderMetadata> | undefined,
-  rawArgs?: unknown,
-): string {
-  return formatAgentControlCallText("StopAgent", metadata, rawArgs);
 }

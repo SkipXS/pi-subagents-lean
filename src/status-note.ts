@@ -1,20 +1,16 @@
-import type { AgentLifecycle, AgentStatus, StopInitiator } from "./types.js";
+import type { AgentLifecycle, AgentLifecycleStatus } from "./types.js";
 
-const STATUS_NOTES: Partial<Record<AgentStatus, string>> = {
+const STATUS_NOTES: Partial<Record<AgentLifecycleStatus, string>> = {
   aborted: "aborted before completion; output may be incomplete",
 };
 
-const STOP_NOTES: Record<StopInitiator, string> = {
-  user: "STOPPED BY THE USER before completion — output is partial; the task was NOT finished",
-  agent: "stopped before completion — output is partial; the task was NOT finished",
-  parent: "parent turn ended before completion — output is partial; the task was NOT finished",
-};
+const STOP_NOTE = "parent turn ended before completion — output is partial; the task was NOT finished";
 
 export function getStatusNote(lifecycle: AgentLifecycle): string {
   const note =
     lifecycle.status === "stopped"
       // A stopped agent with no recorded initiator reads as an agent stop.
-      ? STOP_NOTES[lifecycle.stoppedBy ?? "agent"]
+      ? STOP_NOTE
       : STATUS_NOTES[lifecycle.status];
   return note ? ` (${note})` : "";
 }

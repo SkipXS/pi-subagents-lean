@@ -12,7 +12,7 @@ export const TRUNCATED_TEXT_MARKER = "[TRUNCATED]";
 
 /** Maximum UTF-8 bytes for Agent and AgentContinue prompts. */
 export const MAX_AGENT_PROMPT_BYTES = 256 * 1024;
-/** Maximum UTF-8 bytes for AgentContinue/StopAgent control identifiers. */
+/** Maximum UTF-8 bytes for AgentContinue control identifiers. */
 export const MAX_AGENT_ID_BYTES = 128;
 /** Maximum UTF-8 bytes for an AgentConfig systemPrompt. */
 export const MAX_AGENT_SYSTEM_PROMPT_BYTES = 512 * 1024;
@@ -29,13 +29,13 @@ export const MAX_AGENT_MODEL_BYTES = 256;
 export const MAX_AGENT_FRONTMATTER_ARRAY_ENTRIES = 256;
 /** Maximum UTF-8 bytes for one Agent Markdown selection/exclusion item. */
 export const MAX_AGENT_FRONTMATTER_ITEM_BYTES = 256;
-/** Maximum UTF-8 bytes for retained execution/result/delivery text. */
+/** Maximum UTF-8 bytes for retained execution/result text. */
 export const MAX_RETAINED_TEXT_BYTES = 64 * 1024;
 /** Maximum UTF-8 bytes for one retained execution prompt projection. */
 export const MAX_RETAINED_EXECUTION_PROMPT_BYTES = 64 * 1024;
 /** Maximum UTF-8 bytes for all retained text fields in one record's summaries. */
 export const MAX_RETAINED_EXECUTION_TEXT_BUDGET_BYTES = 1024 * 1024;
-/** Maximum UTF-8 bytes for retained record/execution/delivery errors. */
+/** Maximum UTF-8 bytes for retained record/execution errors. */
 export const MAX_RETAINED_ERROR_BYTES = 8 * 1024;
 /** Maximum UTF-8 bytes for retained agent descriptions. */
 export const MAX_DESCRIPTION_BYTES = 8 * 1024;
@@ -101,7 +101,7 @@ export function truncateUtf8(
   return `${utf8Prefix(value, limit - markerBytes)}${marker}`;
 }
 
-/** Retain one execution/result/delivery text projection. */
+/** Retain one execution/result text projection. */
 export function retainAgentText(value: string): string {
   return truncateUtf8(value, MAX_RETAINED_TEXT_BYTES);
 }

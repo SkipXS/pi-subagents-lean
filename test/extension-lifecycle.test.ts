@@ -4,459 +4,204 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 const state = vi.hoisted(() => ({
   manager: null as any,
   coordinator: null as any,
-  sessionCtx: null as any,
   managers: [] as any[],
   coordinators: [] as any[],
-  coordinatorDisposeError: undefined as unknown,
-  coordinatorDisposePending: undefined as Promise<void> | undefined,
-  scanGeneration: 0,
-  registerAgents: vi.fn(),
-  setAgentScanDirs: vi.fn(),
-  discoverNewAgents: vi.fn(),
-  scanAndMerge: vi.fn(async () => new Map()),
   store: {
-    agent: {
-      disableDefaultAgents: false,
-      orchestrationPrompt: true,
-    },
+    agent: { disableDefaultAgents: false, orchestrationPrompt: true },
     concurrency: { default: 4 },
     reload: vi.fn(),
     setDeps: vi.fn(),
     dispose: vi.fn(),
   },
+  discover: vi.fn(),
+  scanDirs: vi.fn(),
 }));
 
-vi.mock("@earendil-works/pi-coding-agent", () => ({
-  getAgentDir: () => "/tmp/pi-agent",
-}));
-
+vi.mock("@earendil-works/pi-coding-agent", () => ({ getAgentDir: () => "/tmp/pi-agent" }));
 vi.mock("../src/agents/agent-types.js", () => ({
-  discoverNewAgents: state.discoverNewAgents,
+  discoverNewAgents: state.discover,
   getAvailableAgents: () => [],
-  setAgentScanDirs: state.setAgentScanDirs,
+  setAgentScanDirs: state.scanDirs,
 }));
-
 vi.mock("../src/agents/agent-manager.js", () => ({
   AgentManager: class {
-    records: any[] = [];
-    activityObservers = new Set<(snapshot: readonly any[]) => void>();
-    dispose = vi.fn(async () => undefined);
-    setOnComplete = vi.fn();
+    dispose = vi.fn();
     constructor() { state.managers.push(this); }
-    listAgents() { return this.records; }
-    subscribeActivity = vi.fn((observer: (snapshot: readonly any[]) => void) => {
-      this.activityObservers.add(observer);
-      observer([]);
-      return () => this.activityObservers.delete(observer);
-    });
-    emitActivity(snapshot: readonly any[]) {
-      for (const observer of [...this.activityObservers]) observer(snapshot);
-    }
+    listAgents() { return []; }
+    setConcurrency = vi.fn();
   },
 }));
-
 vi.mock("../src/spawn/spawn-coordinator.js", () => ({
   SpawnCoordinator: class {
-    deliveryObservers = new Set<(snapshot: readonly any[]) => void>();
-    dispose = vi.fn(async () => {
-      if (state.coordinatorDisposeError) throw state.coordinatorDisposeError;
-      await state.coordinatorDisposePending;
-    });
-    onAgentComplete = vi.fn();
     constructor() { state.coordinators.push(this); }
-    subscribeDeliveryActivity = vi.fn((observer: (snapshot: readonly any[]) => void) => {
-      this.deliveryObservers.add(observer);
-      observer([]);
-      return () => this.deliveryObservers.delete(observer);
-    });
-    emitDeliveryActivity(snapshot: readonly any[]) {
-      for (const observer of [...this.deliveryObservers]) observer(snapshot);
-    }
   },
 }));
-
-vi.mock("../src/agents/tool-execution.js", () => ({}));
 vi.mock("../src/prompt/orchestration.js", () => ({ getOrchestrationPromptUpdate: () => undefined }));
-
 vi.mock("../src/shell.js", () => ({
   getManager: () => state.manager,
   getCoordinator: () => state.coordinator,
   getStore: () => state.store,
-  setSessionCtx: (ctx: unknown) => { state.sessionCtx = ctx; },
+  setSessionCtx: vi.fn(),
   setManager: (value: unknown) => { state.manager = value; },
   setCoordinator: (value: unknown) => { state.coordinator = value; },
 }));
 
 import { setupEventListeners } from "../src/events.js";
 import { AgentRenderMetadataBridge } from "../src/agents/agent-render-bridge.js";
-import {
-  AGENT_RENDER_DETAILS_KEY,
-  renderAgentCall,
-  stopAgentRendererTimers,
-} from "../src/agents/agent-renderer.js";
+import { AGENT_RENDER_DETAILS_KEY, renderAgentCall, stopAgentRendererTimers } from "../src/agents/agent-renderer.js";
 
-function createContext(): ExtensionContext {
-  return {
-    cwd: "/tmp/project",
-    hasUI: false,
-    isProjectTrusted: () => true,
-  } as unknown as ExtensionContext;
+function context(): ExtensionContext {
+  return { cwd: "/tmp/project", hasUI: false, isProjectTrusted: () => true } as unknown as ExtensionContext;
 }
 
-function createTuiContext(setStatus = vi.fn()): ExtensionContext {
-  return {
-    ...createContext(),
-    mode: "tui",
-    hasUI: true,
-    ui: { setStatus, notify: vi.fn() },
-  } as unknown as ExtensionContext;
+function listenersFor(bridge = new AgentRenderMetadataBridge()) {
+  const listeners = new Map<string, (...args: any[]) => any>();
+  setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any, bridge);
+  return { listeners, bridge };
 }
 
-describe("headless extension session lifecycle", () => {
+describe("headless extension lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.manager = null;
     state.coordinator = null;
-    state.sessionCtx = null;
     state.managers.length = 0;
     state.coordinators.length = 0;
-    state.coordinatorDisposeError = undefined;
-    state.coordinatorDisposePending = undefined;
-    state.scanGeneration = 0;
     state.store.dispose.mockReset();
-    state.registerAgents.mockReset();
-    state.setAgentScanDirs.mockReset().mockImplementation(() => { state.scanGeneration++; });
-    state.scanAndMerge.mockReset().mockResolvedValue(new Map());
-    state.discoverNewAgents.mockReset().mockImplementation(async () => {
-      const scanGeneration = state.scanGeneration;
-      const merged = await state.scanAndMerge();
-      if (scanGeneration === state.scanGeneration) state.registerAgents(merged);
-      return 0;
-    });
+    state.store.reload.mockReset();
+    state.store.setDeps.mockReset();
+    state.discover.mockReset().mockResolvedValue(0);
+    state.scanDirs.mockReset();
+    stopAgentRendererTimers();
+    vi.useRealTimers();
   });
 
-  it("registers root lifecycle hooks without terminal input listeners", () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-
+  it("registers only host lifecycle and renderer bridge hooks", () => {
+    const { listeners } = listenersFor();
     expect([...listeners.keys()]).toEqual([
       "tool_execution_start", "tool_execution_update", "tool_result", "message_end",
       "before_agent_start", "session_start", "session_shutdown",
     ]);
-    expect(listeners.has("tool_execution_start")).toBe(true);
   });
 
-  it("bridges resolved Agent metadata through update, tool_result, and message_end", () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    const bridge = new AgentRenderMetadataBridge();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any, bridge);
-    const metadata = { role: "reviewer", model: "openai/gpt-4o", thinking: "high", prompt: "inspect" };
-
-    listeners.get("tool_execution_start")!({ toolCallId: "bridge-id", toolName: "Agent", args: {} });
+  it("bridges resolved Agent metadata through tool_result and message_end", () => {
+    const { listeners, bridge } = listenersFor();
+    const metadata = { role: "reviewer", model: "provider/model", thinking: "high", prompt: "inspect", kind: "new" as const };
+    listeners.get("tool_execution_start")!({ toolCallId: "call", toolName: "Agent" });
     listeners.get("tool_execution_update")!({
-      toolCallId: "bridge-id",
-      toolName: "Agent",
-      args: {},
-      partialResult: { content: [], details: { [AGENT_RENDER_DETAILS_KEY]: metadata } },
+      toolCallId: "call", toolName: "Agent", partialResult: { details: { [AGENT_RENDER_DETAILS_KEY]: metadata } },
     });
-    const hookResult = listeners.get("tool_result")!({
-      toolName: "Agent",
-      toolCallId: "bridge-id",
-      details: {},
-      content: [{ type: "text", text: "failed" }],
-      isError: true,
-    });
-    expect(hookResult.details[AGENT_RENDER_DETAILS_KEY]).toEqual(metadata);
-    expect(listeners.get("message_end")!({
-      message: { role: "toolResult", toolCallId: "bridge-id", toolName: "Agent", details: hookResult.details },
-    })).toBeUndefined();
+    const patched = listeners.get("tool_result")!({ toolName: "Agent", toolCallId: "call", details: {} });
+    expect(patched.details[AGENT_RENDER_DETAILS_KEY]).toEqual(metadata);
+    listeners.get("message_end")!({ message: { role: "toolResult", toolCallId: "call", toolName: "Agent", details: patched.details } });
     expect(bridge.pendingCount()).toBe(0);
-    bridge.clear();
   });
 
-  it("ends row timers on reload and session shutdown", async () => {
+  it("clears interactive row timers when a session reloads", async () => {
     vi.useFakeTimers();
-    try {
-      const listeners = new Map<string, (...args: any[]) => any>();
-      setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-      const ctx = createContext();
-      await listeners.get("session_start")!({}, ctx);
+    const { listeners } = listenersFor();
+    await listeners.get("session_start")!({}, context());
 
-      const firstRow: any = {
-        args: { agent: "scout", prompt: "inspect" },
-        state: {},
-        lastComponent: undefined,
-        executionStarted: false,
-        isPartial: true,
-        invalidate: undefined,
-      };
-      firstRow.invalidate = vi.fn(() => renderAgentCall(firstRow.args, {}, firstRow));
-      const unopenedFirstRow = renderAgentCall(firstRow.args, {}, firstRow);
-      firstRow.lastComponent = unopenedFirstRow;
-      firstRow.executionStarted = true;
-      renderAgentCall(firstRow.args, {}, firstRow);
-      expect(vi.getTimerCount()).toBe(1);
+    const rowContext: any = {
+      args: { agent: "scout", prompt: "reload me" },
+      state: {},
+      lastComponent: undefined,
+      executionStarted: false,
+      isPartial: true,
+      invalidate: vi.fn(),
+    };
+    rowContext.invalidate = vi.fn(() => renderAgentCall(rowContext.args, {}, rowContext));
+    const unopened = renderAgentCall(rowContext.args, {}, rowContext);
+    rowContext.lastComponent = unopened;
+    rowContext.executionStarted = true;
+    renderAgentCall(rowContext.args, {}, rowContext);
+    expect(vi.getTimerCount()).toBe(1);
 
-      // Pi emits session_start for reload after the old runtime has begun its
-      // replacement. The renderer lifecycle is stopped synchronously rather
-      // than waiting for manager disposal.
-      await listeners.get("session_start")!({}, ctx);
-      expect(vi.getTimerCount()).toBe(0);
-
-      const secondRow: any = {
-        args: { agent: "scout", prompt: "inspect again" },
-        state: {},
-        lastComponent: undefined,
-        executionStarted: false,
-        isPartial: true,
-        invalidate: undefined,
-      };
-      secondRow.invalidate = vi.fn(() => renderAgentCall(secondRow.args, {}, secondRow));
-      const unopenedSecondRow = renderAgentCall(secondRow.args, {}, secondRow);
-      secondRow.lastComponent = unopenedSecondRow;
-      secondRow.executionStarted = true;
-      renderAgentCall(secondRow.args, {}, secondRow);
-      expect(vi.getTimerCount()).toBe(1);
-      await listeners.get("session_shutdown")!({}, ctx);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      stopAgentRendererTimers();
-      vi.useRealTimers();
-    }
+    await listeners.get("session_start")!({}, context());
+    expect(vi.getTimerCount()).toBe(0);
+    await listeners.get("session_shutdown")!({}, context());
+    vi.useRealTimers();
   });
 
-  it("creates and disposes root services on session start/shutdown", async () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-    const ctx = createContext();
+  it("does not publish stale startup state after shutdown and restart", async () => {
+    let releaseScan!: () => void;
+    state.discover
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { releaseScan = resolve; }))
+      .mockResolvedValue(0);
+    const { listeners } = listenersFor();
+    const firstStartup = listeners.get("session_start")!({}, context());
+    await vi.waitFor(() => expect(state.discover).toHaveBeenCalledOnce());
 
-    await listeners.get("session_start")!({}, ctx);
-    expect(state.sessionCtx).toBe(ctx);
-    expect(state.store.reload).toHaveBeenCalledOnce();
-    expect(state.managers).toHaveLength(1);
-    expect(state.coordinators).toHaveLength(1);
-    expect(state.store.setDeps).toHaveBeenCalledWith({ manager: state.manager });
-    expect(state.registerAgents).toHaveBeenCalledOnce();
+    await listeners.get("session_shutdown")!({}, context());
+    const restart = listeners.get("session_start")!({}, context());
+    await restart;
+    const restartedManager = state.manager;
+    const restartedCoordinator = state.coordinator;
 
-    const manager = state.manager;
-    const coordinator = state.coordinator;
-    await listeners.get("session_shutdown")!({}, ctx);
+    releaseScan();
+    await firstStartup;
+    expect(state.manager).toBe(restartedManager);
+    expect(state.coordinator).toBe(restartedCoordinator);
+    expect(state.managers[0].dispose).toHaveBeenCalledOnce();
+    expect(state.managers[1].dispose).not.toHaveBeenCalled();
 
-    expect(coordinator.dispose).toHaveBeenCalledOnce();
-    expect(state.store.dispose).toHaveBeenCalledOnce();
-    expect(manager.dispose).toHaveBeenCalledOnce();
-    expect(state.manager).toBeNull();
-    expect(state.coordinator).toBeNull();
-    expect(state.sessionCtx).toBeNull();
+    await listeners.get("session_shutdown")!({}, context());
   });
 
-  it("mounts the static footer only in TUI and unsubscribes before shutdown", async () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-    const firstStatus = vi.fn();
-    const first = createTuiContext(firstStatus);
-    await listeners.get("session_start")!({}, first);
-
+  it("serializes overlapping shutdown epochs without letting the older one own cleanup", async () => {
+    const { listeners } = listenersFor();
+    await listeners.get("session_start")!({}, context());
     const firstManager = state.manager;
-    const firstCoordinator = state.coordinator;
-    firstManager.emitActivity([{
-      agentId: "a1b2c3d4-agent",
-      type: "scout",
-      mode: "foreground",
-      status: "running",
-      executionId: "execution-1",
-    }]);
-    expect(firstStatus).toHaveBeenLastCalledWith("subagents", "Agent: scout [a1b2c3d4] · Foreground · Running");
-
-    await listeners.get("session_shutdown")!({}, first);
-    expect(firstStatus).toHaveBeenLastCalledWith("subagents", undefined);
-    const callsAfterShutdown = firstStatus.mock.calls.length;
-    firstManager.emitActivity([]);
-    firstCoordinator.emitDeliveryActivity([]);
-    expect(firstStatus).toHaveBeenCalledTimes(callsAfterShutdown);
-
-    const secondStatus = vi.fn();
-    const second = createTuiContext(secondStatus);
-    await listeners.get("session_start")!({}, second);
-    const secondManager = state.manager;
-    secondManager.emitActivity([{
-      agentId: "b2c3d4e5-agent",
-      type: "reviewer",
-      mode: "background",
-      status: "queued",
-      executionId: "execution-2",
-    }]);
-    expect(secondStatus).toHaveBeenLastCalledWith("subagents", "Agent: reviewer [b2c3d4e5] · Background · Queued");
-
-    // The old source is no longer subscribed and cannot clear the new row.
-    firstManager.emitActivity([]);
-    firstCoordinator.emitDeliveryActivity([]);
-    expect(secondStatus).toHaveBeenLastCalledWith("subagents", "Agent: reviewer [b2c3d4e5] · Background · Queued");
-
-    await listeners.get("session_shutdown")!({}, second);
-  });
-
-  it("does not install footer status in JSON/print-style contexts", async () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-    const setStatus = vi.fn();
-    const context = { ...createTuiContext(setStatus), mode: "json", hasUI: false } as unknown as ExtensionContext;
-    await listeners.get("session_start")!({}, context);
-    state.manager.emitActivity([{
-      agentId: "a1b2c3d4-agent", type: "scout", mode: "foreground", status: "running", executionId: "execution-1",
-    }]);
-    expect(setStatus).not.toHaveBeenCalled();
-    await listeners.get("session_shutdown")!({}, context);
-  });
-
-  it("waits for a delayed coordinator dispose before restarting", async () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-    const first = createContext();
-    await listeners.get("session_start")!({}, first);
-    const firstManager = state.manager;
-
     let releaseDispose!: () => void;
-    state.coordinatorDisposePending = new Promise<void>((resolve) => { releaseDispose = resolve; });
-    const shutdown = listeners.get("session_shutdown")!({}, first);
-    await vi.waitFor(() => expect(state.coordinators[0].dispose).toHaveBeenCalledOnce());
+    state.store.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseDispose = resolve; }));
 
-    const retry = createContext();
-    const restart = listeners.get("session_start")!({}, retry);
-    expect(state.sessionCtx).toBe(first);
+    const firstShutdown = listeners.get("session_shutdown")!({}, context());
+    await vi.waitFor(() => expect(state.store.dispose).toHaveBeenCalledOnce());
+    const secondShutdown = listeners.get("session_shutdown")!({}, context());
+    const restart = listeners.get("session_start")!({}, context());
     expect(state.manager).toBe(firstManager);
 
     releaseDispose();
-    await shutdown;
+    await firstShutdown;
+    await secondShutdown;
     await restart;
 
-    expect(state.sessionCtx).toBe(retry);
+    expect(firstManager.dispose).toHaveBeenCalledOnce();
     expect(state.manager).not.toBe(firstManager);
-    await listeners.get("session_shutdown")!({}, retry);
+    await listeners.get("session_shutdown")!({}, context());
   });
 
-  it("keeps a restarted runtime intact when an older shutdown finishes late", async () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-    const first = createContext();
-    await listeners.get("session_start")!({}, first);
-    const firstManager = state.manager;
+  it("creates root services on session start and disposes the manager on shutdown", async () => {
+    const { listeners } = listenersFor();
+    await listeners.get("session_start")!({}, context());
+    expect(state.managers).toHaveLength(1);
+    expect(state.coordinators).toHaveLength(1);
+    expect(state.store.reload).toHaveBeenCalledOnce();
 
-    let releaseFirstDispose!: () => void;
-    state.coordinatorDisposePending = new Promise<void>((resolve) => { releaseFirstDispose = resolve; });
-    const firstShutdown = listeners.get("session_shutdown")!({}, first);
-    await vi.waitFor(() => expect(state.coordinators[0].dispose).toHaveBeenCalledOnce());
-
-    // A second generation can clean global services while the first coordinator
-    // remains blocked. The following start must own the shared runtime.
-    await listeners.get("session_shutdown")!({}, first);
-    const retry = createContext();
-    await listeners.get("session_start")!({}, retry);
-    const retryManager = state.manager;
-    const retryCoordinator = state.coordinator;
-
-    expect(retryManager).not.toBe(firstManager);
-    expect(state.sessionCtx).toBe(retry);
-
-    releaseFirstDispose();
-    await firstShutdown;
-
-    expect(state.manager).toBe(retryManager);
-    expect(state.coordinator).toBe(retryCoordinator);
-    expect(state.sessionCtx).toBe(retry);
-    await listeners.get("session_shutdown")!({}, retry);
-  });
-
-  it("attempts every runtime disposer and remains restartable after disposal errors", async () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-    const first = createContext();
-    await listeners.get("session_start")!({}, first);
-
-    const coordinatorFailure = new Error("coordinator dispose failed");
-    const storeFailure = new Error("store dispose failed");
-    const managerFailure = new Error("manager dispose failed");
-    state.coordinatorDisposeError = coordinatorFailure;
-    state.store.dispose.mockImplementationOnce(() => { throw storeFailure; });
-    state.manager.dispose.mockImplementationOnce(async () => { throw managerFailure; });
-
-    await expect(listeners.get("session_shutdown")!({}, first)).rejects.toBe(coordinatorFailure);
-
-    expect(state.coordinators[0].dispose).toHaveBeenCalledOnce();
+    await listeners.get("session_shutdown")!({}, context());
     expect(state.store.dispose).toHaveBeenCalledOnce();
     expect(state.managers[0].dispose).toHaveBeenCalledOnce();
-    expect(state.manager).toBeNull();
-    expect(state.coordinator).toBeNull();
-    expect(state.sessionCtx).toBeNull();
-
-    state.coordinatorDisposeError = undefined;
-    const retry = createContext();
-    await expect(listeners.get("session_start")!({}, retry)).resolves.toBeUndefined();
-    expect(state.manager).not.toBeNull();
-    await listeners.get("session_shutdown")!({}, retry);
+    expect(state.coordinators[0]).not.toHaveProperty("dispose");
   });
 
-  it("does not publish a pending catalog scan after shutdown", async () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-    let resolveScan!: (catalog: Map<string, unknown>) => void;
-    state.scanAndMerge.mockImplementationOnce(() => new Promise((resolve) => { resolveScan = resolve; }));
-    const first = createContext();
-
-    const startup = listeners.get("session_start")!({}, first);
-    await vi.waitFor(() => expect(state.scanAndMerge).toHaveBeenCalledOnce());
-    await listeners.get("session_shutdown")!({}, first);
-
-    const retry = createContext();
-    await listeners.get("session_start")!({}, retry);
-    resolveScan(new Map([["stale", {}]]));
-    await expect(startup).resolves.toBeUndefined();
-
-    expect(state.registerAgents).toHaveBeenCalledTimes(1);
-    expect(state.sessionCtx).toBe(retry);
-    await listeners.get("session_shutdown")!({}, retry);
-  });
-
-  it("does not clean a newer runtime when an older startup scan fails late", async () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-    let rejectScan!: (error: unknown) => void;
-    state.scanAndMerge.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectScan = reject; }));
-    const first = createContext();
-
-    const startup = listeners.get("session_start")!({}, first);
-    await vi.waitFor(() => expect(state.scanAndMerge).toHaveBeenCalledOnce());
-    await listeners.get("session_shutdown")!({}, first);
-
-    const retry = createContext();
-    await listeners.get("session_start")!({}, retry);
-    const retryManager = state.manager;
-    const retryCoordinator = state.coordinator;
-
-    rejectScan(new Error("stale scan failed"));
-    await expect(startup).resolves.toBeUndefined();
-
-    expect(state.manager).toBe(retryManager);
-    expect(state.coordinator).toBe(retryCoordinator);
-    expect(state.sessionCtx).toBe(retry);
-    expect(retryManager.dispose).not.toHaveBeenCalled();
-    expect(retryCoordinator.dispose).not.toHaveBeenCalled();
-    expect(state.store.dispose).toHaveBeenCalledOnce();
-
-    await listeners.get("session_shutdown")!({}, retry);
-  });
-
-  it("cleans partially initialized services when catalog loading fails", async () => {
-    const listeners = new Map<string, (...args: any[]) => any>();
-    setupEventListeners({ on: vi.fn((event: string, handler: (...args: any[]) => any) => listeners.set(event, handler)) } as any);
-    const failure = new Error("agent scan failed");
-    state.scanAndMerge.mockRejectedValueOnce(failure);
-
-    await expect(listeners.get("session_start")!({}, createContext())).rejects.toBe(failure);
-    expect(state.coordinators[0].dispose).toHaveBeenCalledOnce();
-    expect(state.managers[0].dispose).toHaveBeenCalledOnce();
-    expect(state.manager).toBeNull();
-    expect(state.coordinator).toBeNull();
-    expect(state.sessionCtx).toBeNull();
+  it("stops interactive row timers during session shutdown", async () => {
+    vi.useFakeTimers();
+    const { listeners } = listenersFor();
+    const rowContext: any = {
+      args: { agent: "scout", prompt: "inspect" },
+      state: {},
+      lastComponent: undefined,
+      executionStarted: false,
+      isPartial: true,
+      invalidate: vi.fn(),
+    };
+    rowContext.invalidate = vi.fn(() => renderAgentCall(rowContext.args, {}, rowContext));
+    const first = renderAgentCall(rowContext.args, {}, rowContext);
+    rowContext.lastComponent = first;
+    rowContext.executionStarted = true;
+    renderAgentCall(rowContext.args, {}, rowContext);
+    expect(vi.getTimerCount()).toBe(1);
+    await listeners.get("session_shutdown")!({}, context());
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

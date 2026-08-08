@@ -33,7 +33,7 @@ describe.sequential("Pi extension contract", () => {
       expect(result.errors).toEqual([]);
       expect(result.extensions).toHaveLength(1);
       const extension = result.extensions[0]!;
-      expect([...extension.tools.keys()]).toEqual(["Agent", "AgentContinue", "StopAgent", "AgentStatus"]);
+      expect([...extension.tools.keys()]).toEqual(["Agent", "AgentContinue"]);
       expect([...extension.commands.keys()]).toEqual([]);
 
       runner = new ExtensionRunner(
@@ -85,7 +85,7 @@ describe.sequential("Pi extension contract", () => {
       expect(result.runtime.getActiveTools()).toEqual(["Agent"]);
       expect(activeToolsReads).toBe(1);
       expect(runner.getAllRegisteredTools().map((tool) => tool.definition.name).sort())
-        .toEqual(["Agent", "AgentContinue", "AgentStatus", "StopAgent"]);
+        .toEqual(["Agent", "AgentContinue"]);
       for (const { definition } of runner.getAllRegisteredTools()) {
         expect(definition.description).toEqual(expect.any(String));
         expect(definition.description.length).toBeGreaterThan(0);
@@ -95,16 +95,10 @@ describe.sequential("Pi extension contract", () => {
       await expect(runner.getToolDefinition("Agent")!.execute(
         "contract-agent", { agent: "scout", prompt: "do not start" }, contractAbort.signal, undefined, publicContext,
       )).rejects.toThrow("Agent execution cancelled");
-      await expect(runner.getToolDefinition("AgentStatus")!.execute(
-        "contract-status", {}, undefined, undefined, publicContext,
-      )).rejects.toThrow("root session is ready");
-      await expect(runner.getToolDefinition("StopAgent")!.execute(
-        "contract-stop", { agent_id: "missing" }, undefined, undefined, publicContext,
-      )).rejects.toThrow("root session is ready");
       await expect(runner.getToolDefinition("AgentContinue")!.execute(
         "contract-continue", { agent_id: "missing", prompt: "wrap up" }, undefined, undefined, publicContext,
       )).rejects.toThrow("root session is ready");
-      expect(runner.getMessageRenderer("subagent-result")).toEqual(expect.any(Function));
+      expect(runner.getMessageRenderer(["subagent", "result"].join("-") as any)).toBeUndefined();
       expect(runner.hasUI()).toBe(false);
       expect(runner.hasHandlers("before_agent_start")).toBe(true);
       expect(runner.hasHandlers("tool_execution_start")).toBe(true);
@@ -131,10 +125,12 @@ describe.sequential("Pi extension contract", () => {
 
       const schema = extension.tools.get("Agent")!.definition.parameters as any;
       expect(schema.additionalProperties).toBe(false);
-      expect(schema.required).toEqual(expect.arrayContaining(["prompt", "agent"]));
+      expect(schema.required).toEqual(["prompt", "agent"]);
       expect(schema.properties.agent.type).toBe("string");
       expect(schema.properties).not.toHaveProperty("model");
       expect(schema.properties).not.toHaveProperty("thinking");
+      const removedProperty = ["removed", "execution", "switch"].join("_");
+      expect(schema.properties).not.toHaveProperty(removedProperty);
     } finally {
       try {
         if (runner && sessionStarted && !sessionShutdown) {

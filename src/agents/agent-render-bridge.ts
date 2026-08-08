@@ -26,7 +26,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isRenderableToolName(value: unknown): value is AgentRenderToolName {
-  return value === "Agent" || value === "AgentContinue" || value === "StopAgent";
+  return value === "Agent" || value === "AgentContinue";
 }
 
 /**
@@ -50,7 +50,7 @@ export class AgentRenderMetadataBridge {
     this.active = false;
   }
 
-  /** Begin one rendered agent-family row; AgentStatus stays outside the bridge. */
+  /** Begin one rendered Agent-family row. */
   start(toolCallId: string, toolName: string): void {
     if (!this.active || !isRenderableToolName(toolName) || !toolCallId) return;
     this.entries.set(toolCallId, {});
@@ -120,8 +120,8 @@ export class AgentRenderMetadataBridge {
   onMessageEnd(event: MessageEndEventLike): { message: Record<string, unknown> } | undefined {
     if (!this.active || !isRecord(event.message) || event.message.role !== "toolResult") return undefined;
     // Hosts differ on whether toolName is repeated on the persisted message.
-    // If it is present, keep AgentStatus and every unrelated tool out of the
-    // bridge; otherwise the pending id remains the authoritative association.
+    // If it is present, keep unrelated tools out of the bridge; otherwise the
+    // pending id remains the authoritative association.
     if (typeof event.message.toolName === "string" && !isRenderableToolName(event.message.toolName)) return undefined;
     const toolCallId = event.message.toolCallId;
     if (typeof toolCallId !== "string") return undefined;

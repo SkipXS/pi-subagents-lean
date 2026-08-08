@@ -48,5 +48,4 @@ export interface AgentInvocation {
   /** Resolved provider/model id retained internally for queued control rows. */
   modelKey?: string;
   thinkingLevel?: ThinkingLevel;
-  runInBackground?: boolean;
 }

@@ -20,9 +20,8 @@ export default defineConfig({
         functions: 75,
         lines: 81,
         "src/registration.ts": { statements: 80, branches: 70, functions: 95, lines: 80 },
-        // Activity observers add presentation-only lifecycle paths; retain the
-        // existing statement/branch/function gates while keeping the line floor
-        // above the measured cross-platform baseline.
+        // Manager lifecycle and retained-record paths keep conservative floors
+        // while the line floor remains above the measured cross-platform baseline.
         "src/agents/agent-manager.ts": { statements: 85, branches: 80, functions: 80, lines: 87 },
         // Tool execution boundaries retain conservative floors after splitting
         // the former handler; each remains below the measured Windows baseline.
@@ -56,11 +55,6 @@ export default defineConfig({
         "src/prompt/skill-limits.ts": { statements: 78, branches: 70, functions: 65, lines: 80 },
         "src/prompt/skill-loader-worker.ts": { statements: 85, branches: 70, functions: 90, lines: 90 },
         "src/spawn/spawn-coordinator.ts": { statements: 74, branches: 70, functions: 80, lines: 74 },
-        // V8's Windows method-map merge differs between the lifecycle and
-        // payload workers; retain measured floors for each delivery boundary.
-        "src/spawn/background-delivery.ts": { statements: 74, branches: 70, functions: 77, lines: 74 },
-        "src/spawn/background-delivery-payload.ts": { statements: 65, branches: 70, functions: 90, lines: 65 },
-        "src/spawn/background-delivery-diagnostics.ts": { statements: 85, branches: 75, functions: 90, lines: 90 },
       },
     },
   },

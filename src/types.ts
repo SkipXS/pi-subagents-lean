@@ -24,8 +24,6 @@ export interface AgentRecord {
   result?: string;
   /** Retained error projection; UTF-8 bounded at 8 KiB with `[TRUNCATED]`. */
   error?: string;
-  /** Background-result handoff state; absent for foreground agents. */
-  delivery?: BackgroundDelivery;
   /** Lifecycle state: status, timestamps. */
   lifecycle: AgentLifecycle;
   /** Display-oriented info: type, description, output file, invocation. */
@@ -82,16 +80,7 @@ export interface CompactionReasonMetadata {
 // ---------------------------------------------------------------------------
 
 /** Possible agent lifecycle statuses. */
-export type AgentStatus = "queued" | "running" | "completed" | "aborted" | "stopped" | "error";
-
-/** Who initiated an agent stop: a control tool, the agent, or its parent turn. */
-export type StopInitiator = "user" | "agent" | "parent";
-
-/** Background-result delivery state; `accepted` only means no synchronous throw, while `failed` records a diagnostic error until session shutdown. */
-export type BackgroundDeliveryState = "pending" | "accepted" | "failed" | "abandoned";
-
-/** Whether an execution runs in the foreground (awaited) or background (notification). */
-export type AgentExecutionMode = "foreground" | "background";
+export type AgentLifecycleStatus = "queued" | "running" | "completed" | "aborted" | "stopped" | "error";
 
 /** Whether an execution starts a new session or continues an existing one. */
 export type AgentExecutionKind = "new" | "continued";
@@ -99,26 +88,23 @@ export type AgentExecutionKind = "new" | "continued";
 /**
  * Per-execution summary retained on the record for each prompt execution on
  * an agent session (the initial spawn plus each AgentContinue execution). Each
- * entry carries its own generation (response text), delivery (text handed to
- * the caller), usage delta, and compaction data so continuation history stays
- * inspectable after the session is gone.
+ * entry carries its own prompt, response projection, usage delta, and
+ * compaction data so continuation history stays inspectable after the session
+ * is gone.
  */
 export interface AgentExecutionSummary {
   /** Manager-assigned execution id; unique within the record. */
   id: string;
   /** Retained prompt projection, capped at 64 KiB UTF-8; active tasks may hold the full accepted input separately. */
   prompt: string;
-  mode: AgentExecutionMode;
   /** Optional so records persisted before this field was introduced remain valid. */
   kind?: AgentExecutionKind;
   /** "queued" | "running" while active; terminal status after completion. */
-  status: AgentStatus;
+  status: AgentLifecycleStatus;
   startedAt: number;
   completedAt?: number;
   /** Retained assistant text projection, UTF-8 bounded at 64 KiB. */
   responseText?: string;
-  /** Retained caller-delivery projection, UTF-8 bounded at 64 KiB. */
-  deliveredText?: string;
   /** Usage delta accumulated during this execution only. */
   usage?: AgentUsage;
   /** Compactions that occurred during this execution only. */
@@ -127,43 +113,16 @@ export interface AgentExecutionSummary {
   error?: string;
 }
 
-/** Payload-free failure projection retained on a record across delivery generations. */
-export interface BackgroundDeliveryFailure {
-  /** Execution whose automatic delivery failed. */
-  executionId: string;
-  attempts: number;
-  lastAttemptAt?: number;
-  /** UTF-8-bounded to 4 KiB; oversized values carry `[TRUNCATED]`. */
-  lastError: string;
-}
-
-/** Delivery diagnostics retained with a background result while its record is retained. */
-export interface BackgroundDelivery {
-  state: BackgroundDeliveryState;
-  /** Number of automatic sendMessage attempts; failed delivery is not retried. */
-  attempts: number;
-  lastAttemptAt?: number;
-  /** UTF-8-bounded delivery diagnostic for the current/latest claim. */
-  lastError?: string;
-  /** Latest claim-ordered failure, including failures from older claims. */
-  lastFailure?: BackgroundDeliveryFailure;
-}
-
 /**
  * Lifecycle state: when the agent started, completed, and its current status.
  * Used by agent-manager for lifecycle control and session lifetime.
  */
 export interface AgentLifecycle {
-  status: AgentStatus;
+  status: AgentLifecycleStatus;
   startedAt: number;
   completedAt?: number;
-  stoppedBy?: StopInitiator;
-  /**
-   * Whether the result was delivered to the LLM, or has no remaining delivery
-   * path (for example, its parent tool call was already aborted). This is
-   * delivery telemetry only; it does not control the session-lifetime record.
-   */
-  resultConsumed?: boolean;
+  /** Parent cancellation is retained only to explain a stopped result. */
+  stoppedBy?: "parent";
   /**
    * True only after all runner/queue work has settled. A stopped running agent is
    * terminal for status reporting before its runner has actually released its

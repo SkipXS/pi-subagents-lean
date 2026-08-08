@@ -119,39 +119,6 @@ export interface SubagentRuntimeContext {
 const subagentRuntime = new AsyncLocalStorage<SubagentRuntimeContext>();
 const registeredSubagentRuntimes = new WeakSet<object>();
 
-/**
- * Deprecated compatibility marker for integrations which guarded extension
- * registration before child AsyncLocalStorage contexts existed. It is only
- * consulted by index.ts to keep that registration inert; it is never an
- * authorization boundary for shell state.
- */
-let legacySubagentSpawnDepth = 0;
-
-/**
- * @deprecated Use the AsyncLocalStorage session marker instead. This only
- * marks extension registration as inert for compatibility; it cannot isolate
- * async work or grant access to root shell controls. Pair with exit in finally.
- */
-export function enterSubagentSpawn(): void {
-  legacySubagentSpawnDepth++;
-}
-
-/**
- * @deprecated This cannot clear or bypass an active isolated session's root
- * shell guards.
- */
-export function exitSubagentSpawn(): void {
-  legacySubagentSpawnDepth = Math.max(0, legacySubagentSpawnDepth - 1);
-}
-
-/**
- * @deprecated Returns the legacy registration marker or an active ALS child
- * runtime. It is not an authorization capability; ALS remains authoritative.
- */
-export function isInsideSubagentSpawn(): boolean {
-  return legacySubagentSpawnDepth > 0 || subagentRuntime.getStore() !== undefined;
-}
-
 /** Create the only kind of context permitted in child AsyncLocalStorage. */
 export function createSubagentRuntimeContext(): SubagentRuntimeContext {
   const context: SubagentRuntimeContext = Object.freeze({

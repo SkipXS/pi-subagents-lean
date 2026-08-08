@@ -20,7 +20,7 @@ import { retainAgentDescription } from "./agent-string-limits.js";
 export const BUILTIN_TOOL_NAMES: string[] = ["read", "bash", "edit", "write", "grep", "find"];
 
 /** Root-session control tools are never registered in agent sessions. */
-export const EXCLUDED_TOOL_NAMES = ["Agent", "AgentContinue", "StopAgent", "AgentStatus"];
+export const EXCLUDED_TOOL_NAMES = ["Agent", "AgentContinue"];
 
 /** Resolve bare, ext/*, and ext/tool entries into concrete tool names. */
 function resolveToolEntries(

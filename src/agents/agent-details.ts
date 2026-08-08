@@ -1,8 +1,7 @@
 import type { AgentRecord } from "../types.js";
 import { executionKind } from "./execution-display.js";
 import { getSessionUsageSnapshot } from "./usage.js";
-import { retainAgentDescription, retainAgentError, retainAgentText, truncateUtf8 } from "./agent-string-limits.js";
-import { MAX_BACKGROUND_FAILURE_BYTES } from "../spawn/background-delivery-diagnostics.js";
+import { retainAgentDescription, retainAgentError, retainAgentText } from "./agent-string-limits.js";
 
 /**
  * Build a details Record from an AgentRecord, controlled by options.
@@ -11,8 +10,8 @@ import { MAX_BACKGROUND_FAILURE_BYTES } from "../spawn/background-delivery-diagn
  * - `includeStatus`: adds `status`, `outputFile`
  * - `includeStats`: adds turn/token/cost/context/compaction/model fields
  *
- * Consolidates the identical field-selection logic previously duplicated
- * across emitIndividualNudge, executeSpawnForeground, and executeSpawnBackground.
+ * Consolidates the field-selection logic used by the Agent and AgentContinue
+ * result paths.
  */
 export function buildAgentDetails(
   record: AgentRecord,
@@ -28,26 +27,6 @@ export function buildAgentDetails(
 
   if (record.display.worktreePath) {
     details.worktreePath = record.display.worktreePath;
-  }
-
-  if (record.delivery) {
-    const delivery = record.delivery;
-    details.delivery = {
-      state: delivery.state,
-      attempts: delivery.attempts,
-      ...(delivery.lastAttemptAt !== undefined ? { lastAttemptAt: delivery.lastAttemptAt } : {}),
-      ...(delivery.lastError !== undefined ? { lastError: retainAgentError(delivery.lastError) } : {}),
-      ...(delivery.lastFailure !== undefined ? {
-        lastFailure: {
-          executionId: delivery.lastFailure.executionId,
-          attempts: delivery.lastFailure.attempts,
-          ...(delivery.lastFailure.lastAttemptAt !== undefined
-            ? { lastAttemptAt: delivery.lastFailure.lastAttemptAt }
-            : {}),
-          lastError: truncateUtf8(delivery.lastFailure.lastError, MAX_BACKGROUND_FAILURE_BYTES),
-        },
-      } : {}),
-    };
   }
 
   if (opts?.includeStatus) {
@@ -129,7 +108,6 @@ export function buildAgentDetails(
     // the record itself.
     if (current) {
       details.currentExecution = {
-        mode: current.mode,
         kind: currentKind,
         status: current.status,
         ...(current.responseText !== undefined ? { responseText: retainAgentText(current.responseText) } : {}),

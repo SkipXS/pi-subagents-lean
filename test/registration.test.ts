@@ -3,18 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const state = vi.hoisted(() => ({
   executeAgentTool: vi.fn(),
   executeContinueAgentTool: vi.fn(),
-  executeStopAgentTool: vi.fn(),
-  executeAgentStatusTool: vi.fn(),
 }));
-
-vi.mock("../src/agents/tool-execution.js", () => ({
-  executeAgentTool: state.executeAgentTool,
-}));
-vi.mock("../src/agents/agent-control-execution.js", () => ({
-  executeAgentStatusTool: state.executeAgentStatusTool,
-  executeContinueAgentTool: state.executeContinueAgentTool,
-  executeStopAgentTool: state.executeStopAgentTool,
-}));
+vi.mock("../src/agents/tool-execution.js", () => ({ executeAgentTool: state.executeAgentTool }));
+vi.mock("../src/agents/agent-control-execution.js", () => ({ executeContinueAgentTool: state.executeContinueAgentTool }));
 
 import { registerTools } from "../src/registration.js";
 
@@ -24,131 +15,71 @@ function createApi() {
     tools,
     api: {
       registerTool: vi.fn((tool: Record<string, any>) => tools.push(tool)),
-      registerMessageRenderer: vi.fn(),
     },
   };
 }
 
-function publicExecute(tool: Record<string, any>) {
-  return tool.execute;
-}
-
-beforeEach(() => {
-  vi.clearAllMocks();
-});
+beforeEach(() => vi.clearAllMocks());
 
 describe("tool registration", () => {
-  it("registers exactly the four public tools and the background renderer", () => {
+  it("registers only the two foreground tools and no message renderer", () => {
     const api = createApi();
     registerTools(api.api as any);
-
-    expect(api.tools.map((tool) => tool.name)).toEqual([
-      "Agent", "AgentContinue", "StopAgent", "AgentStatus",
-    ]);
-    expect(api.api.registerTool).toHaveBeenCalledTimes(4);
-    expect(api.api.registerMessageRenderer).toHaveBeenCalledWith("subagent-result", expect.any(Function));
+    expect(api.tools.map((tool) => tool.name)).toEqual(["Agent", "AgentContinue"]);
+    expect(api.api.registerTool).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps the fixed Agent schema and registers the Agent-family renderers", () => {
+  it("keeps the exact Agent schema and static description", () => {
     const api = createApi();
     registerTools(api.api as any);
     const tool = api.tools[0]!;
-
-    expect(tool.description).toBe("Delegate to a context-isolated specialized agent. It cannot see the parent conversation, parent tool results, or other agents' output, so its prompt must be self-contained.");
+    expect(tool.description).toBe(
+      "Delegate to a context-isolated specialized agent and wait for its result. It cannot see the parent conversation, parent tool results, or other agents' output, so its prompt must be self-contained.",
+    );
     expect(JSON.parse(JSON.stringify(tool.parameters))).toEqual({
       type: "object",
       additionalProperties: false,
       required: ["prompt", "agent"],
       properties: {
         prompt: { type: "string", maxLength: 262144 },
-        description: { type: "string", maxLength: 8192 },
         agent: { type: "string" },
-        run_in_background: { type: "boolean" },
+        description: { type: "string", maxLength: 8192 },
         worktree_path: { type: "string" },
       },
     });
     expect(tool.renderCall).toEqual(expect.any(Function));
     expect(tool.renderResult).toEqual(expect.any(Function));
-    expect(api.tools[1]!.renderCall).toEqual(expect.any(Function));
-    expect(api.tools[1]!.renderResult).toEqual(expect.any(Function));
-    expect(api.tools[2]!.renderCall).toEqual(expect.any(Function));
-    expect(api.tools[2]!.renderResult).toEqual(expect.any(Function));
-    expect(api.tools[3]).not.toHaveProperty("renderCall");
-    expect(api.tools[3]).not.toHaveProperty("renderResult");
   });
 
-  it("keeps AgentContinue strict-mode requirements", () => {
+  it("keeps AgentContinue strict requirements and constrained sampling", () => {
     const api = createApi();
     registerTools(api.api as any);
     const tool = api.tools[1]!;
-
+    expect(tool.description).toBe("Continue a finished agent's session with a new prompt and wait for its result.");
     expect(JSON.parse(JSON.stringify(tool.parameters))).toEqual({
       type: "object",
       additionalProperties: false,
-      required: ["agent_id", "prompt", "run_in_background"],
+      required: ["agent_id", "prompt"],
       properties: {
         agent_id: { type: "string", maxLength: 128 },
         prompt: { type: "string", maxLength: 262144 },
-        run_in_background: { type: "boolean" },
       },
     });
     expect(tool.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
   });
 
-  it("keeps constrained StopAgent and AgentStatus schemas", () => {
+  it("translates internal errors into Pi throwing results", async () => {
     const api = createApi();
     registerTools(api.api as any);
-    const stop = api.tools[2]!;
-    const status = api.tools[3]!;
-
-    expect(JSON.parse(JSON.stringify(stop.parameters))).toEqual({
-      type: "object", additionalProperties: false,
-      required: ["agent_id"], properties: { agent_id: { type: "string", maxLength: 128 } },
-    });
-    expect(JSON.parse(JSON.stringify(status.parameters))).toEqual({
-      type: "object", additionalProperties: false, properties: {},
-    });
-    expect(stop.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
-    expect(status.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
+    state.executeAgentTool.mockResolvedValueOnce({ content: [{ type: "text", text: "failed clearly" }], isError: true });
+    await expect(api.tools[0]!.execute!("call", {}, undefined, undefined, {})).rejects.toThrow("failed clearly");
   });
 
-  it("translates isError tool results into Pi errors", async () => {
-    const api = createApi();
-    registerTools(api.api as any);
-    state.executeAgentTool.mockResolvedValueOnce({
-      content: [{ type: "text", text: "agent failed clearly" }],
-      isError: true,
-    });
-
-    await expect(publicExecute(api.tools[0]!)!("call", {}, undefined, undefined, {}))
-      .rejects.toThrow("agent failed clearly");
-  });
-
-  it("passes successful Agent results through unchanged", async () => {
+  it("passes complete successful results through unchanged", async () => {
     const api = createApi();
     registerTools(api.api as any);
     const result = { content: [{ type: "text", text: "done" }], details: { keep: true } };
-    state.executeAgentTool.mockResolvedValueOnce(result);
-
-    await expect(publicExecute(api.tools[0]!)!("call", {}, undefined, undefined, {}))
-      .resolves.toBe(result);
-  });
-
-  it("keeps an undefined internal result defensive", async () => {
-    const api = createApi();
-    registerTools(api.api as any);
-    state.executeAgentTool.mockResolvedValueOnce(undefined);
-
-    await expect(publicExecute(api.tools[0]!)!("call", {}, undefined, undefined, {}))
-      .resolves.toBeUndefined();
-  });
-
-  it("uses a defensive fallback for malformed error results", async () => {
-    const api = createApi();
-    registerTools(api.api as any);
-    state.executeAgentTool.mockResolvedValueOnce({ isError: true });
-
-    await expect(publicExecute(api.tools[0]!)!("call", {}, undefined, undefined, {}))
-      .rejects.toThrow("Tool execution failed");
+    state.executeContinueAgentTool.mockResolvedValueOnce(result);
+    await expect(api.tools[1]!.execute!("call", {}, undefined, undefined, {})).resolves.toBe(result);
   });
 });
