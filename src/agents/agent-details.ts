@@ -7,7 +7,7 @@ import { retainAgentDescription, retainAgentError, retainAgentText } from "./age
  * Build a details Record from an AgentRecord, controlled by options.
  *
  * Always includes canonical `agentId`, `type`, and `description`. Optional groups:
- * - `includeStatus`: adds `status`, `outputFile`
+ * - `includeStatus`: adds `status`
  * - `includeStats`: adds turn/token/cost/context/compaction/model fields
  *
  * Consolidates the field-selection logic used by the Agent and AgentContinue
@@ -31,7 +31,6 @@ export function buildAgentDetails(
 
   if (opts?.includeStatus) {
     details.status = opts.execution?.status ?? record.lifecycle.status;
-    details.outputFile = record.display.outputFile;
   }
 
   if (opts?.includeStats) {

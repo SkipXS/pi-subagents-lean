@@ -8,31 +8,12 @@ import {
 import { AgentRecordStore } from "../../src/agents/agent-record-store.js";
 import { ExecutionTelemetry } from "../../src/agents/execution-telemetry.js";
 
-const state = vi.hoisted(() => {
-  const finalizeOutputLog = vi.fn();
-  const outputLog = vi.fn().mockImplementation(function (id: string) {
-    return {
-      path: `/private/${id}.log`,
-      append: vi.fn(),
-      attach: vi.fn(),
-      finalize: finalizeOutputLog,
-    };
-  });
-  return {
-    runAgent: vi.fn(),
-    executeAgentTurn: vi.fn(),
-    outputLog,
-    finalizeOutputLog,
-    releaseOutputRoot: vi.fn(() => Promise.resolve()),
-  };
-});
+const state = vi.hoisted(() => ({
+  runAgent: vi.fn(),
+  executeAgentTurn: vi.fn(),
+}));
 vi.mock("../../src/agents/agent-runner.js", () => ({ runAgent: state.runAgent }));
 vi.mock("../../src/agents/agent-session-runtime.js", () => ({ executeAgentTurn: state.executeAgentTurn }));
-vi.mock("../../src/agents/output-file.js", () => ({
-  AgentOutputLog: state.outputLog,
-  createOutputRoot: vi.fn(() => "/private"),
-  releaseOutputRoot: state.releaseOutputRoot,
-}));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -58,9 +39,6 @@ describe("AgentExecutionService", () => {
   beforeEach(() => {
     state.runAgent.mockReset();
     state.executeAgentTurn.mockReset();
-    state.outputLog.mockClear();
-    state.finalizeOutputLog.mockClear();
-    state.releaseOutputRoot.mockClear();
   });
 
   afterEach(() => {
@@ -82,8 +60,6 @@ describe("AgentExecutionService", () => {
     expect(store.list()).toEqual([]);
     expect(service.pendingCount).toBe(0);
     expect(state.runAgent).toHaveBeenCalledOnce();
-    expect(state.finalizeOutputLog).toHaveBeenCalledOnce();
-    expect(created.record.execution.outputLog).toBeUndefined();
   });
 
   it("rejects a continuation whose turn cannot start synchronously and retains its session", async () => {
@@ -102,9 +78,7 @@ describe("AgentExecutionService", () => {
       error: "continuation setup failed",
     });
     expect(root.record.execution.session).toBe(root.session);
-    expect(root.record.execution.outputLog).toBeUndefined();
     expect(state.executeAgentTurn).toHaveBeenCalledOnce();
-    expect(state.finalizeOutputLog).toHaveBeenCalledOnce();
     expect(service.pendingCount).toBe(0);
   });
 
@@ -128,8 +102,6 @@ describe("AgentExecutionService", () => {
     await expect(first.caller.promise).resolves.toBe("");
     expect(first.created.record.lifecycle).toMatchObject({ status: "error", settled: true });
     expect(first.created.record.error).toBe("provider unavailable");
-    expect(first.created.record.execution.outputLog).toBeUndefined();
-    expect(state.finalizeOutputLog).toHaveBeenCalledOnce();
     expect(state.runAgent).toHaveBeenCalledTimes(2);
     expect(state.runAgent.mock.calls.map((call) => call[2])).toEqual(["async failure", "second"]);
     expect(second.created.record.lifecycle.status).toBe("running");
@@ -171,8 +143,7 @@ describe("AgentExecutionService", () => {
       responseText: "",
     });
     expect(root.record.execution.session).toBe(root.session);
-    expect(root.record.execution.outputLog).toBeUndefined();
-    expect(state.finalizeOutputLog).toHaveBeenCalledOnce();
+    expect(state.executeAgentTurn).toHaveBeenCalledOnce();
     expect(service.pendingCount).toBe(0);
   });
 
@@ -337,8 +308,6 @@ describe("AgentExecutionService", () => {
     expect(root.session.dispose).toHaveBeenCalledOnce();
     expect(state.runAgent).toHaveBeenCalledOnce();
     expect(state.executeAgentTurn).toHaveBeenCalledOnce();
-    expect(state.finalizeOutputLog).toHaveBeenCalledTimes(2);
-    expect(state.releaseOutputRoot).toHaveBeenCalledWith("/private");
 
     runningSpawn.resolve(runResult("late spawn"));
     runningContinuation.resolve({ responseText: "late continuation", aborted: true });
@@ -401,8 +370,10 @@ describe("AgentExecutionService", () => {
     secondRun.resolve(runResult("second complete"));
     await expect(secondPromise).resolves.toBe("second complete");
     expect(store.get(secondCreated.id)?.result).toBe("second complete");
+    const completedRecord = store.get(secondCreated.id)!;
+    expect(Object.keys(completedRecord.display)).not.toContain(["output", "File"].join(""));
+    expect(Object.keys(completedRecord.execution)).not.toContain(["output", "Log"].join(""));
     service.dispose();
-    expect(state.releaseOutputRoot).toHaveBeenCalledWith("/private");
   });
 
   it("settles active caller promises and removes records during shutdown", async () => {

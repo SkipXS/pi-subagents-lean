@@ -71,8 +71,7 @@ The schema is strict and its only required properties are `agent_id` and
 `prompt`. It uses constrained `json_schema` sampling with `strict: "prefer"`.
 A prefix is accepted only when it resolves to one retained root record. The
 record must have completed successfully, be settled, and still have its live
-session. The continuation reuses that session, model, working directory, and
-output log.
+session. The continuation reuses that session, model, and working directory.
 
 ## Interactive rows and results
 
@@ -117,6 +116,13 @@ work tools and never receives either root delegation tool, so children cannot
 start another child or access the parent conversation. Prompt handoffs are
 explicit and self-contained.
 
+Child sessions are kept in memory. `AgentContinue` reuses a retained in-memory
+child session during the parent session. The parent Pi session retains each
+`Agent`/`AgentContinue` call and its final result; the extension does not persist
+internal child calls, thinking, or intermediate transcript, and creates no child
+transcript files in system temp. The parent does not receive the child's full
+internal conversation.
+
 ## Concurrency, batching, and FIFO queueing
 
 `concurrency.default` accepts an integer from 1 through 64 and defaults to 4
@@ -150,18 +156,15 @@ usable for continuation and diagnostics.
 The parent tool AbortSignal cancels queued work before it consumes a slot and
 aborts running child sessions. A cancelled tool returns an error rather than a
 successful result. Session shutdown aborts active sessions, settles caller
-promises, releases queue and output-log resources, and removes the session's
-records. Late runner completion cannot release a newer slot or resurrect a
-removed record.
+promises, releases queue resources, and removes the session's records. Late
+runner completion cannot release a newer slot or resurrect a removed record.
 
-## Headless operation and logs
+## Headless operation and session lifecycle
 
 The extension uses Pi's normal tool result path and has no custom terminal UI,
 manual menu, polling API, status tool, background notification, or static
 activity footer. There is no need to wait for a separate event: the tool call
-itself is the join point. Output logs remain available as append-only technical
-diagnostics under a private temporary root, with existing ownership, size, and
-link-safety bounds.
+itself is the join point.
 
 ## Configuration
 
@@ -178,8 +181,8 @@ link-safety bounds.
 
 Model and thinking are resolved from persistent per-role settings, effective
 Agent Markdown, and the parent session. Skills and extensions follow their
-catalog selection and exclusion rules. Worktree validation, trust, output logs,
-usage telemetry, and bounded security checks remain active.
+catalog selection and exclusion rules. Worktree validation, trust, usage
+telemetry, and bounded record retention remain active.
 
 ## Development
 

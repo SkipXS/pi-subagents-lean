@@ -96,17 +96,10 @@ Config tests cover the 1 MiB pre-parse rejection, bounded override count, and
 multibyte name/model strings. Record tests cover the 64 KiB prompt/response
 projections, full multi-MiB foreground response return, identity-safe promise
 release, shutdown cleanup, and deterministic 1 MiB summary-text pruning.
-Output-log security tests execute on Windows for post-open
-identity/root exchange and file-link rejection, and on POSIX/Windows where
-hardlinks are supported. A privilege-restricted Windows symlink, junction, or
-hardlink case skips only that link-dependent test; deterministic simulated
-identity failures still run. The janitor tests verify exact-parent, ownership,
-private-mode, live-marker, age/count/size, depth/entry-limit iterator cleanup,
-no-link traversal, exact second-pass reservations, no-partial-delete growth
-handling, and deterministic global 50,000-entry pass exhaustion.
-UNC paths are intentionally not claimed. The suite also does not pretend to
-validate paid provider calls or power-loss durability; headless extension
-lifecycle and package loading are covered.
+Foreground execution lifecycle tests cover parent-signal binding and cleanup,
+exceptional runner setup, shutdown settlement, retained sessions, FIFO slot
+release, and late completion. The suite does not pretend to validate paid
+provider calls; headless extension lifecycle and package loading are covered.
 
 ## Required checks for `main`
 

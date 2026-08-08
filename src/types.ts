@@ -4,7 +4,6 @@
 
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { AgentOutputLog } from "./agents/output-file.js";
 import type { ContextStats, LifetimeUsage, AgentUsage } from "./agents/usage.js";
 import type { SubagentType, AgentInvocation } from "./agents/types.js";
 export type { AgentConfig } from "./agents/types.js";
@@ -26,9 +25,9 @@ export interface AgentRecord {
   error?: string;
   /** Lifecycle state: status, timestamps. */
   lifecycle: AgentLifecycle;
-  /** Display-oriented info: type, description, output file, invocation. */
+  /** Display-oriented info: type, description, and invocation. */
   display: AgentDisplayInfo;
-  /** Execution internals: session, abort controller, and output-log lifecycle. */
+  /** Execution internals: session, abort controller, and caller promise. */
   execution: AgentExecutionState;
   /** Accumulated statistics: usage, context, and compactions. */
   stats: AgentAccumulatedStats;
@@ -132,15 +131,13 @@ export interface AgentLifecycle {
 }
 
 /**
- * Record metadata: type name, description, output file, and invocation params.
- * Agent identity and output metadata retained for tool results and diagnostics.
+ * Record metadata: type name, description, and invocation params.
+ * Agent identity and display metadata are retained for tool results and diagnostics.
  */
 export interface AgentDisplayInfo {
   type: SubagentType;
   /** Retained description projection, UTF-8 bounded at 8 KiB. */
   description: string;
-  /** Path to the streaming output transcript file. */
-  outputFile?: string;
   /** Resolved spawn params, captured for tool details. Fixed at spawn time. */
   invocation?: AgentInvocation;
   /** The tool_use_id from the original Agent tool call. */
@@ -152,14 +149,12 @@ export interface AgentDisplayInfo {
 }
 
 /**
- * Execution internals: session handle, abort controller, and output-log lifecycle.
+ * Execution internals: session handle, abort controller, and caller promise.
  */
 export interface AgentExecutionState {
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;
-  /** Lifecycle wrapper for the output file stream. */
-  outputLog?: AgentOutputLog;
 }
 
 /**

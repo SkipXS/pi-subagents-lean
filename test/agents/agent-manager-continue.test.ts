@@ -159,25 +159,6 @@ describe("AgentContinue root control", () => {
     await Promise.resolve();
   });
 
-  it("appends and finalizes a continuation output log", async () => {
-    const root = await completedRoot();
-    const outputLog = {
-      append: vi.fn(),
-      attach: vi.fn(),
-      finalize: vi.fn(),
-      path: "/tmp/continuation.log",
-    };
-    root.record.execution.outputLog = outputLog as any;
-    state.executeAgentTurn.mockResolvedValueOnce({ responseText: "continued", aborted: false });
-
-    const continuation = manager.continueAgent(root.agentId, "append this turn");
-    expect(outputLog.append).toHaveBeenCalledWith("append this turn");
-    expect(outputLog.attach).toHaveBeenCalledWith(root.record.execution.session, expect.any(Number));
-    await expect(continuation.promise).resolves.toBe("continued");
-    expect(outputLog.finalize).toHaveBeenCalledOnce();
-    expect(root.record.execution.outputLog).toBeUndefined();
-  });
-
   it("rejects a queued continuation when its parent call is aborted", async () => {
     manager = new AgentManager({ default: 1 });
     const root = await new SpawnCoordinator(manager).spawn(fakePi(), fakeCtx(), resolvedSpawnFixture({ prompt: "root" }));

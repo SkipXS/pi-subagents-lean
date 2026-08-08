@@ -18,7 +18,7 @@ relevant state, constraints, scope, and acceptance criteria.
 Resumes one successfully completed and settled retained root session. It accepts
 an exact canonical ID or a unique prefix, validates the ID and prompt before
 lookup/history allocation, publishes canonical metadata, and awaits the new
-turn. It reuses the retained session, model, working directory, and output log.
+turn. It reuses the retained in-memory session, model, and working directory.
 
 **ResolvedSpawn / AcceptedSpawn**
 
@@ -36,9 +36,9 @@ selected work tools and always excludes `Agent` and `AgentContinue`.
 **Agent record**
 
 The parent-owned flat record retains lifecycle state, display metadata, session
-handles, output-log state, cumulative usage/context telemetry, and bounded
-execution history. Each history entry retains `kind`, `status`, timestamps,
-prompt, response projection, usage, compaction count, and terminal error. There
+handles, cumulative usage/context telemetry, and bounded execution history. Each
+history entry retains `kind`, `status`, timestamps, prompt, response projection,
+usage, compaction count, and terminal error. There
 is no execution delivery projection or execution-mode metadata.
 
 At most 64 settled terminal records are retained. Queued, running, and
@@ -69,7 +69,7 @@ remain sequential.
 
 The parent AbortSignal removes queued work without consuming a slot and aborts
 running child sessions. Shutdown aborts active controllers, settles caller
-promises, releases output resources, and removes records. Late completion cannot
+promises, releases queue resources, and removes records. Late completion cannot
 release a slot or mutate a removed record.
 
 **Renderer**
@@ -109,6 +109,5 @@ useful; dependent stages must wait for their prerequisite result.
   part of the active surface.
 
 The persistent configuration, model/thinking resolution, skills/extensions,
-worktrees, output-log security, usage telemetry, and bounded retention contracts
-remain active. See `README.md`, `docs/coverage.md`, and the ADRs for operational
-and test detail.
+worktrees, usage telemetry, and bounded retention contracts remain active. See
+`README.md`, `docs/coverage.md`, and the ADRs for operational and test detail.
