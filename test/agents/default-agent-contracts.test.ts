@@ -13,8 +13,14 @@ describe("bundled agent and config contracts", () => {
     expect(CONFIG_AGENT_KEYS).not.toContain("default");
   });
 
-  it("keeps the implementer focused and non-delegating", () => {
+  it("keeps the implementer bounded, non-delegating, and handoff-ready", () => {
     const prompt = DEFAULT_AGENTS.get("implementer")!.systemPrompt;
+    expect(prompt).toContain("sole writer for this delegated stage");
+    expect(prompt).toContain(
+      "Report unrelated, environmental, or pre-existing failures without expanding scope.",
+    );
+    expect(prompt).toContain("Return a concise completion report");
+    expect(prompt).toContain("Do not claim checks you did not run");
     expect(prompt).toContain("focused tests");
     expect(prompt).not.toContain("nested");
   });
