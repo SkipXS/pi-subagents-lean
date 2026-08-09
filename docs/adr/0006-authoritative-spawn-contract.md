@@ -3,11 +3,11 @@
 ## Decision
 
 `Agent` preflight produces one immutable `ResolvedSpawn` value containing the
-resolved role definition, runtime settings, model/thinking values, trust
-snapshot, worktree, prompt, and caller signal. `SpawnCoordinator` forwards that
-value without resolving anything again. `AgentManager` is the only acceptance
-boundary: it creates the detached `AcceptedSpawn` snapshot, retains it in the
-queue, and passes it to the runner.
+resolved role and tunables, trust snapshot, worktree selection, prompt, and
+caller signal. `SpawnCoordinator` forwards that value without resolving
+anything again. `AgentManager` is the only acceptance boundary: it creates the
+detached `AcceptedSpawn` snapshot, retains it in the queue, and passes it to the
+runner.
 
 The coordinator is a stateless foreground facade. It guards root-only access,
 publishes accepted metadata before awaiting, captures the exact caller promise,
@@ -24,7 +24,7 @@ same await/release boundary.
 - Full caller responses are not replaced by bounded record projections.
 - Running and queued work use one FIFO scheduler and one configured root limit.
 - Parent cancellation and session shutdown remain service-owned cleanup paths.
-- Delivery maps, host message hooks, observer subscriptions, and execution-mode
-  projections are unnecessary and removed.
+- Delivery maps, host message hooks, observer subscriptions, and background/delivery
+  projections are absent from the active contract.
 - Legacy scalar manager/coordinator inputs and manual control adapters are not
   maintained as parallel contracts.

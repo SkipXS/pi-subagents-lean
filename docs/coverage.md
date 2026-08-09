@@ -1,8 +1,7 @@
 # Test and coverage policy
 
-## Local checks
-
-Run the same checks required by CI before opening a pull request:
+The local release gate should match CI. Run these commands from a clean
+checkout:
 
 ```bash
 bun install --frozen-lockfile
@@ -10,27 +9,25 @@ bun run typecheck
 bun run typecheck:test
 bun run test
 bun run test:coverage
-bun run npm:production:smoke
-bun run package:smoke
+bun run release:validate
 bun run pack:check
+bun run package:smoke
+bun run npm:production:smoke
 ```
 
 Coverage uses Vitest's V8 provider over `src/**/*.ts`. Reports are written to
-`coverage/` as text, JSON summary, and LCOV; CI uploads the directory.
-
-The instrumented coverage run excludes `test/pi-contract-smoke.test.ts`. Pi's
-public loader uses Jiti to load a second, uninstrumented copy of the extension
-module graph; merging that graph into V8 coverage produces incorrect function
-counts even when the corresponding lines execute. `bun run test` still runs
-this contract test, and `bun run package:smoke` independently loads the
-installed tarball through Pi. Both checks are mandatory and must not be
-replaced by the coverage run.
+`coverage/` as text, JSON summary, and LCOV. The instrumented coverage run
+excludes `test/pi-contract-smoke.test.ts`: Pi's public loader uses Jiti to load
+a second, uninstrumented copy of the extension module graph, which produces
+incorrect V8 function counts when merged into coverage. The ordinary `bun run
+test` run still executes that contract test, and `bun run package:smoke`
+independently loads the installed tarball through Pi. Both checks are required;
+coverage is not a replacement for either loader smoke.
 
 ## Minimum coverage
 
 Global thresholds in `vitest.config.ts` are 79% statements, 74% branches, 75%
-functions, and 81% lines. Critical failure/race boundaries additionally have
-conservative per-file floors:
+functions, and 81% lines. Critical per-file floors are:
 
 | Module | Statements | Branches | Functions | Lines |
 |---|---:|---:|---:|---:|
@@ -52,62 +49,14 @@ conservative per-file floors:
 | `src/prompt/skill-loader-worker.ts` | 85% | 70% | 90% | 90% |
 | `src/spawn/spawn-coordinator.ts` | 74% | 70% | 80% | 74% |
 
-The manager function floor remains at the project gate for the active root-only
-implementation. The skill-module floors account for the measured Windows
-instrumentation baseline while retaining the global project gates; they should
-be raised only after stable cross-platform evidence rather than padded with
-synthetic tests. Coverage runs with two workers; skill tests intentionally
-isolate and mock shared extension modules while capping nested Worker usage.
-Linux is the gate platform because
-V8 module/mocking instrumentation differs on Windows and some filesystem cases
-are platform-specific. Raise floors after stable CI evidence; do not trade
-behavioral assertions for coverage padding.
+Coverage runs with two workers. Raise floors only after stable cross-platform
+evidence; do not trade behavioral assertions for coverage padding.
 
-## Compatibility and package checks
+## Compatibility and CI
 
-CI runs locked Pi checks on Ubuntu and Windows and minimum-supported Pi checks
-on Ubuntu. Package smokes run on both Ubuntu and Windows. Each CI job has a
-finite job timeout, and subprocess-based integration/package checks also have
-explicit process timeouts.
-
-`bun run npm:production:smoke` installs a production-only manifest with npm.
-`bun run package:smoke` packs and installs the tarball, verifies its manifest,
-documentation, and bundled Markdown agents, then loads it through Pi's public
-extension loader. Neither smoke makes a model/provider request.
-
-Skill integration tests use Pi's real loaders with temporary git/ignore trees.
-Trust/discovery tests cover trusted-to-untrusted catalog contamination,
-trusted add-after-parent-turn refresh, ASCII/multibyte UTF-8 boundaries,
-streaming iterator cleanup at Agent/skill entry limits, oversized Agent
-Markdown rejected before readFile, deterministic bounded ordering, per-file
-512 KiB/256 KiB ignore/32 MiB relevant-byte skill limits (including direct
-root `source=agents` Markdown that is later filtered), 64 ancestor roots,
-10,000-skill aggregate limits, post-worker fingerprint races, pathological
-skill trees with 10,000-entry/depth-64 fingerprint budgets, worker timeout
-cleanup, incrementally bounded 4 MiB UTF-8 worker metadata results with main
-thread cache revalidation, and the project-free catalog. Prompt tests cover
-1 MiB skill metadata and 2 MiB complete child system-prompt failures with
-multibyte input and no partial selection. The runner covers `skills:true` and
-explicit lists through the async metadata worker and `noSkills:true` in the
-child loader while preserving arrays/false, exclusion, precedence, and trust
-semantics. Context tests cover root-to-cwd ordering, 256/512 KiB
-file/total limits, deep ancestor bounds, lstat identity races, and trust; runner
-tests also assert unconditional bounded context loading and nonfatal failures
-for new sessions. Config tests cover the read-only 1 MiB pre-parse rejection,
-bounded override count, multibyte name/model strings, valid/missing/invalid/
-unreadable primary selection, non-destructive backup fallback, session reload,
-and frozen accepted snapshots. Record tests cover the one current execution projection, explicit `new`/
-`continued` kind, independent 64 KiB prompt/response and 8 KiB error bounds, full
-multi-MiB foreground response return, identity-safe promise release, shutdown
-cleanup, and 64-record eviction/session disposal. Telemetry tests cover
-execution-object identity and reused-ID stale callback rejection. Foreground
-execution lifecycle tests cover parent-signal binding and cleanup, exceptional
-runner setup, shutdown settlement, retained sessions, FIFO slot release,
-current-task/generation ownership, and late completion. The suite does not
-pretend to validate paid provider calls; headless extension lifecycle and
-package loading are covered.
-
-## Required checks for `main`
+Supported Pi is `>=0.82.0 <0.83.0` (Pi `0.82.x`), matching the package's
+`^0.82.0` peer ranges. CI runs locked dependencies on Ubuntu and Windows and the minimum
+supported version on Ubuntu:
 
 - `Checks (Ubuntu, Pi locked)`
 - `Checks (Windows, Pi locked)`
@@ -115,3 +64,11 @@ package loading are covered.
 - `Coverage`
 - `Package smoke`
 - `Package smoke (Windows)`
+
+The package smoke packs and installs the allowlisted package, checks its
+manifest and bundled role Markdown, then loads the tarball through Pi's public
+extension loader. The npm production smoke installs a manifest without
+development dependencies. Neither smoke makes a model/provider request.
+`release:validate` checks the package version and dated changelog heading
+without changing tags, the registry, GitHub, or any external state. See
+[`docs/releasing.md`](releasing.md) for the repo-only release checklist.

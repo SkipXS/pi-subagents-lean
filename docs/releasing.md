@@ -1,18 +1,32 @@
-# Release checklist
+# Repository-only release checklist
 
-This checklist prepares a version tag; it does not publish a package or create a
-GitHub release. Publishing and releasing require separate, explicit approval.
+This checklist validates release metadata and prepares a repository commit. It
+does not create tags, publish to npm, or create a GitHub Release. Those actions
+require separate, explicit approval.
 
-## Before tagging
+## Prepare and validate
 
-1. Start from the merged, current `origin/main`; do not tag an unmerged feature
-   branch.
-2. Confirm that `package.json` contains the intended semantic version and that
-   `CHANGELOG.md` has a dated heading in the exact form
-   `## [<version>] - YYYY-MM-DD`.
-3. Confirm the public install instructions and requirements in `README.md`.
-   The release must support Pi `>= 0.82.0`.
-4. Run the complete local release gate:
+1. Fetch and inspect the current remote state. Work from a clean local `main`
+   whose `HEAD` is the intended current `origin/main`; do not prepare a release
+   from an unmerged branch or with unrelated changes. Read-only checks include:
+
+   ```bash
+   git fetch origin --prune
+   git status --short
+   git rev-parse HEAD
+   git rev-parse origin/main
+   ```
+
+2. Confirm that `package.json` has the intended semantic version and that
+   `CHANGELOG.md` contains the matching dated heading exactly as
+   `## [<version>] - YYYY-MM-DD`. Confirm the README install command and the
+   Pi requirement `>=0.82.0 <0.83.0` (Pi `0.82.x`) match the package's
+   `^0.82.0` peer ranges and release version.
+3. Confirm that the exact tag `v<version>` does not exist locally or on the
+   configured remote. Read-only checks include `git tag --list "v<version>"`
+   and `git ls-remote --tags origin "refs/tags/v<version>"`; do not create or
+   push the tag during this check.
+4. Run the full local gate at the intended commit:
 
    ```bash
    bun install --frozen-lockfile
@@ -20,27 +34,26 @@ GitHub release. Publishing and releasing require separate, explicit approval.
    bun run typecheck:test
    bun run test
    bun run test:coverage
-   bun run npm:production:smoke
-   bun run package:smoke
    bun run release:validate
+   bun run pack:check
+   bun run package:smoke
+   bun run npm:production:smoke
    ```
 
-   `package:smoke` packs the allowlisted files, installs the tarball in an
-   isolated project, and loads the installed extension through Pi's public
-   extension loader. The ordinary `test` run also contains the Pi/Jiti contract
-   smoke and must not be replaced by `test:coverage`, whose instrumented module
-   graph intentionally excludes that loader test. `release:validate` checks the
-   changelog metadata without making network or registry changes; CI also
-   checks a release tag when one is pushed.
-5. Open and merge a pull request. Wait for every required `main` check to pass.
+   The smoke checks use the package tarball and a production-only manifest;
+   they do not make paid provider calls. `release:validate` checks the package
+   version and dated changelog metadata without network or registry changes.
+5. Record the validated commit SHA after the gate passes. The release tag must
+   eventually point to this exact commit, not merely to a branch name. Review
+   the final diff and `git status --short` again before handing it off.
 
-## Tag validation
+## After separate approvals
 
-After explicit approval, create and push an annotated tag named exactly
-`v<version>` from the validated `main` commit. CI runs the normal cross-platform,
-minimum-Pi, coverage, and installed-tarball checks for `v*` tags. The **Release
-metadata** job validates the dated changelog heading on every pull request and
-also rejects a tag that does not exactly match `package.json`.
+Only after the repository review and a separate approval for tagging may an
+annotated tag named exactly `v<version>` be created. Verify that its target is
+the recorded validated commit before any tag push.
 
-Do not publish a package, create a GitHub release, or push a tag as part of this
-checklist without the required approval.
+Tag pushing, npm publishing, and GitHub Release creation are three separate
+external actions. Each requires its own explicit approval; none is implied by
+this checklist or by a passing local/CI gate. Do not publish, push, or create a
+release while performing repository-only validation.

@@ -1,26 +1,42 @@
-# Fixed tool registration
+# ADR 0001: Fixed stable public tool schemas
 
-The two public tools, `Agent` and `AgentContinue`, are registered once at extension init with minimal,
-byte-stable parameter schemas and concise static descriptions. They have no
-prompt snippets or guidelines, parameter descriptions, or runtime-generated
-enums. The required `agent` field is always a bare `Type.String()`; it never
-has a config- or registry-driven enum. Model and thinking are intentionally
-absent from the LLM-visible `Agent` schema and remain controlled through the
-persistent per-agent settings and Agent Markdown, with the parent session as
-fallback.
+## Decision
+
+Register the two public tools, `Agent` and `AgentContinue`, once at extension
+initialization with fixed strict schemas and concise static descriptions. The
+schemas contain only the public parameters required by their contracts:
+
+- `Agent`: `prompt`, `agent`, optional `description` and `worktree_path`.
+- `AgentContinue`: `agent_id` and `prompt`.
+
+Dynamic catalogs, model choices, thinking levels, scheduling, trust, and
+resource selections are resolved internally. They are not runtime-generated
+enums or public tool parameters. The schemas reject unknown properties.
+
+Parent orchestration policy and its handler are mandatory. Before every parent
+turn, the extension refreshes the trust-scoped live catalog and updates the
+parent system prompt: it injects the extension-owned parent-only block only
+when the visible catalog is non-empty, and removes the prior owned block when
+it is empty. This parent-only block is the automatic catalog of available roles;
+it is not injected into child sessions. The fixed tool schema and the live
+catalog therefore have separate responsibilities.
 
 ## Why
 
-Calling `registerTool()` at runtime rebuilds tools and can invalidate the system-prompt/KV-cache prefix. A fixed schema prevents mid-session tool registration and cache churn.
+Re-registering a tool during a session can rebuild the system prompt and churn
+the provider's reusable prompt prefix. A fixed schema keeps recurring tool
+shape stable while allowing role descriptions and trust-scoped availability to
+change in the parent orchestration block.
 
-When enabled, the parent-only orchestration block is the sole automatic catalog
-of visible agents. It is regenerated from the trusted live registry before each
-parent turn, independently of the tool schema. Disabling that block deliberately
-provides no automatic catalog. Model and thinking come from the persistent
-per-agent settings or effective Agent Markdown and, when absent, the calling
-parent session. Registry validation and provider normalization remain internal;
-they are not public tool overrides.
+Dynamic model and thinking resolution remains validated against Pi's model
+registry and provider capabilities, but putting it in the tool schema would
+make the public contract mutable and encourage the model to control policy
+that belongs to configuration, role Markdown, and the parent session.
 
-## Trade-off
+## Consequences
 
-The schema is intentionally terse, so the model learns parameter usage from names and tool results. This keeps recurring tokens minimal and leaves dynamic discovery out of the schema.
+The tool descriptions and parameter names must carry the stable public meaning,
+while result metadata explains accepted role, ID, model, thinking, and current
+execution details. Catalog refresh never changes the schema, and schema
+stability never makes a stale catalog authoritative. Children receive neither
+`Agent` nor `AgentContinue`, so parent orchestration remains a root-only concern.

@@ -1,148 +1,133 @@
-# pi-subagents-lean
+# Current architecture map
 
-A lightweight Pi extension for isolated, foreground-only root delegation. The
-parent has exactly two tools, `Agent` and `AgentContinue`; both await complete
-results. Child sessions keep their own context, catalog, tools, model, thinking,
-skills, extensions, and optional trusted worktree.
+`pi-subagents-lean` is a Pi extension with two fixed foreground tools:
+`Agent` creates a root child session and `AgentContinue` resumes a successful
+retained root session. Pi owns the tool lifecycle and parent result history.
 
-## Core concepts
+## Composition root and turn flow
 
-**Agent**
+At extension initialization, fixed `Agent` and `AgentContinue` schemas are
+registered. Root lifecycle state is composed through the process-local shell;
+`AsyncLocalStorage` marks for child runtimes keep root tools and shell access out of children.
 
-Starts one context-isolated root session. Its prompt cannot rely on parent
-conversation, parent tool results, or peer output. The prompt is self-contained
-by default and must carry all relevant state, constraints, scope, and acceptance
-criteria; a child may selectively ask for missing parent context when it would
-materially help and cannot reasonably obtain it from its prompt, session,
-repository, or tools.
+Before every parent turn:
 
-**AgentContinue**
+```text
+before_agent_start (before every parent turn)
+  -> refresh configured discovery sources
+  -> trust-scoped live agent catalog
+  -> non-empty visible catalog: inject extension-owned parent-only block
+  -> empty visible catalog: remove the old owned block
+```
 
-Resumes one successfully completed and settled retained root session. It accepts
-an exact canonical ID or a unique prefix, validates the ID and prompt before
-lookup/record allocation, publishes canonical metadata, and awaits the new
-turn. It reuses the retained in-memory session, model, and working directory.
+The orchestration handler and policy run before every parent turn. The
+extension-owned parent-only block advertises visible role names and descriptions
+only when the visible trust-scoped catalog is non-empty; an empty catalog
+removes the prior owned block. It is not copied into child prompts.
 
-**ResolvedSpawn / AcceptedSpawn**
+A new `Agent` follows this boundary:
 
-`ResolvedSpawn` is the immutable preflight snapshot containing the selected
-role definition, resolved model/thinking values, trust decision, worktree
-selection, prompt, and caller signal. The manager snapshots it once as
-`AcceptedSpawn`; queued work never consults mutable catalogs or settings again.
-Persistent per-agent overrides are normalized only for preflight tunable
-resolution; the accepted contract carries the resolved model, model key, and
-thinking level rather than a live settings object.
+```text
+role / trust / effective cwd/worktree / model/thinking / prompt/caller contract /
+resource-selection policy preflight
+  -> immutable ResolvedSpawn
+  -> manager creates immutable AcceptedSpawn
+  -> FIFO root scheduler
+  -> runner setup after slot acquisition under frozen policy/trust
+  -> bounded context + Skills + Extensions + tool mapping
+  -> isolated child AgentSession
+  -> complete foreground result
+```
 
-**Configuration**
+Preflight/acceptance freezes the resolved role, project trust, effective cwd and
+worktree selection, resolved model/thinking, prompt/caller contract, and
+resource-selection policy. After a scheduler slot is acquired, runner setup uses
+that frozen policy/trust to materialize bounded context, Skills, Extensions, and
+the effective tool mapping. The accepted contract is not reinterpreted while
+queued.
+`AgentContinue` resolves one exact or unique-prefix retained root, requires a
+successful settled record with a live session, and sends its new prompt to that
+same `AgentSession` through normal FIFO capacity.
 
-`~/.pi/agent/subagents-lean.json` is a manually maintained, read-only input.
-The ConfigStore loads and normalizes a detached snapshot; it has no manager
-lifecycle coupling or file ownership dependency. `session_start` reloads the store before
-creating a manager or applying its normalized concurrency to an existing one.
-Accepted model/thinking resolution is detached and frozen, so a later reload
-cannot reinterpret an already accepted spawn.
+## Context ownership
 
-**Child isolation**
+These inputs are intentionally separate:
 
-AsyncLocalStorage marks every child setup and turn. Root shell access and both
-root tools are unavailable inside a child. Tool policy applies exactly the
-selected work tools and always excludes `Agent` and `AgentContinue`.
+- **Parent orchestration context** is the live catalog and delegation guidance
+  added only to the parent system prompt.
+- **Explicit handoff** is the caller's `Agent` or `AgentContinue` prompt. It
+  carries the goal, evidence, decisions, scope, constraints, and acceptance
+  criteria; parent and sibling history is not injected.
+- **Automatically loaded context files** are bounded `AGENTS.md`, `AGENTS.MD`,
+  `CLAUDE.md`, and `CLAUDE.MD` candidates for a new child. The global AgentDir
+  candidate is first, followed by bounded filesystem ancestors of the effective
+  cwd in root-to-cwd order for trusted calls. Within each directory, candidates
+  are tried in that priority and the first acceptable one is selected; unsafe,
+  oversized, changing, or otherwise rejected candidates fall through to later
+  names. Untrusted calls do not inspect project ancestors.
+- **Retained child conversation** is the live in-memory Pi `AgentSession`.
+  `AgentContinue` reuses it and does not reload context files or create a new
+  session. Pi may compact older conversation semantically.
+- **Provider/Pi cache telemetry** is usage data such as `cacheRead` and
+  `cacheWrite`; in continuation details they may be current-execution deltas.
+  `latestCacheHitRate` is cumulative and derived as cumulative `cacheRead` /
+  (cumulative prompt-accounting `input` + `cacheRead` + `cacheWrite`). This is
+  prompt-cache telemetry, not session continuity, and never means that
+  continuation is a cache hit.
+- **Internal caches** are bounded process-local discovery caches for agent
+  catalogs, skills, extension/package lookup, and resource fingerprints. They
+  are optimizations, not child history or user-visible session storage.
+- **Current execution projection** is the record's one bounded latest-turn
+  diagnostic/result view. A continuation replaces it; cumulative usage and
+  compaction telemetry remain, but prior projections are not an execution
+  transcript.
 
-**Agent record**
+Context loading uses an invocation-local bounded loader so trust survives
+asynchronous setup. The child resource loader uses the already-built prompt
+and does not perform a second context or skill scan. Source tests cover
+candidate order, trust exclusion, byte/ancestor bounds, and file identity
+races.
 
-The parent-owned flat record retains lifecycle state, display metadata, the
-exact live child-session handle, cumulative usage/context telemetry, and one
-bounded current/latest execution projection. A spawn creates a `new` projection;
-each continuation replaces it with a `continued` projection. The projection
-retains its kind, status, timestamps, prompt, response, usage, compaction count,
-and terminal error, with prompt/response/error bounds applied independently; old
-execution summaries are not retained. Continuation never replaces or disposes
-the live child session. The parent Pi session persists each tool call and final
-result, while the extension does not persist the child's internal transcript.
-There is no execution delivery projection or execution-mode metadata.
+## Resource and lifecycle ownership
 
-At most 64 settled terminal records are retained. Queued, running, and
-unsettled records are protected. Safe eviction is deterministic and disposes
-session resources, so an old continuation ID may later become unavailable. The
-full caller response travels through the exact foreground promise and is
-released by identity after consumption; lifetime totals remain cumulative on the
-record while details read the current projection for the latest turn.
+Bundled defaults plus user definitions form the parent catalog; trusted shared,
+project, and explicitly selected trusted invocation `<selected effective cwd>/.pi/agents/`
+resources are overlays. A selected effective-cwd overlay is invocation-local and
+never mutates the parent catalog. `agent.disableDefaultAgents` controls bundled-role
+discovery.
 
-**Foreground coordinator**
+Role Markdown controls tools, extensions, skills, exclusions, model, thinking,
+and the role system prompt. Persistent per-agent model/thinking settings are
+resolved above effective Markdown and the parent session, then frozen in the
+accepted contract. Runner setup applies the Skills policy through the bounded
+asynchronous catalog and filters Extensions/tool mapping under the frozen trust
+snapshot. Root delegation tools are always excluded from children.
 
-`SpawnCoordinator` is a stateless root facade with a narrow manager port. It
-rejects child calls, accepts a spawn or continuation, publishes accepted
-metadata before awaiting, captures the exact caller promise, awaits it, and
-releases that same promise identity in `finally`. It owns no delivery map,
-observer, timer, host API, or disposal lifecycle.
+`AgentManager` owns records, retention, continuation lookup, and total counts.
+`AgentExecutionService` owns runner tasks, parent cancellation, shutdown, and
+scheduler slots. `ExecutionTelemetry` owns cumulative usage/context/compaction
+bookkeeping and per-execution deltas. `AgentRecordStore` owns lifecycle and the
+current projection. `SpawnCoordinator` is the stateless foreground facade: it
+accepts work, publishes metadata, awaits the complete caller result, and
+releases the exact caller promise by identity.
 
-**Root scheduling**
+Interactive renderers expose static role/ID/model/thinking/prompt metadata,
+complete results, and useful usage details. Pi owns pending/success/error
+presentation; real queue waits remain host-pending. Renderer state is hydrated
+and invalidated defensively, while print, HTML, RPC, JSON, and headless paths
+remain timer-free.
 
-The manager and execution service own one FIFO scheduler. `concurrency.default`
-accepts integer values 1..64 and defaults invalid values to 4. At most 128
-accepted root executions may wait. Calls issued independently in one assistant
-turn are submitted concurrently until the configured limit; dependent stages
-remain sequential.
+## Source and decision records
 
-**Cancellation and shutdown**
+- Tool registration and strict schemas: `src/registration.ts`, `src/index.ts`,
+  `test/index.test.ts`, and ADR 0001.
+- Parent orchestration and refresh: `src/events.ts`, `src/prompt/orchestration.ts`, and `test/prompt/orchestration.test.ts`.
+- Preflight and immutable contracts: `src/spawn/spawn-preflight.ts`,
+  `src/spawn/spawn-contract.ts`, and ADR 0006.
+- Trust and resource boundaries: `src/agents/context-file-loader.ts`, `src/agents/agent-types.ts`, skill catalog sources, and ADR 0005.
+- Composition root: `src/shell.ts`, `src/events.ts`, and ADR 0004.
+- Scheduling, retention, continuation, and telemetry: manager, execution-service, record-store, and focused manager/service tests.
+- Worktree naming and repository identity: `src/spawn/worktree-validator.ts`
+  and ADR 0003.
 
-The parent AbortSignal removes queued work without consuming a slot and aborts
-running child sessions. Shutdown aborts active controllers, settles caller
-promises, releases queue resources, and removes records. Late completion cannot
-release a slot or mutate a removed record.
-
-**Renderer**
-
-Interactive rows are limited to `Agent` and `AgentContinue`. Headers show role,
-canonical ID when known, resolved model, thinking, prompt, and `Run: New` or
-`Run: Continued`. The extension owns only this informative static content,
-complete results, usage details, terminal escaping, and restored metadata; Pi
-owns the pending, success, and error visual lifecycle. Real queued waits remain
-host-pending because queue state is not sent live to the renderer. The metadata
-bridge and versioned row state retain hydration, while invalidation is guarded
-against stale, synchronous, asynchronous, and detached hosts. Print, HTML, RPC,
-JSON, and headless calls use no renderer timers.
-
-## Catalog, trust, and handoffs
-
-Bundled defaults, user definitions, trusted shared/project definitions, and an
-explicit trusted-worktree `.pi/agents/` overlay are discovered with bounded
-streaming scans and live refresh before parent turns. Catalog entries and
-frontmatter descriptions remain bounded; malformed or oversized inputs fail
-closed. An immutable trust snapshot controls project catalogs, context files,
-skills, and worktree overlays for the whole accepted execution.
-
-Parent orchestration is always refreshed before each parent turn. Context loading
-is mandatory for every new `Agent` session: the existing bounded, trust-aware
-loader checks the global candidate and trusted project ancestors within its
-fixed file, total-byte, ancestor, race, and warning limits. There are no
-configuration booleans to disable either policy. `AgentContinue` reuses its retained
-session and does not reload context files.
-
-Agent prompts are explicit, self-contained handoffs by default. The extension
-does not automatically inject a complete parent transcript, tool history, or
-peer context. A child may request only materially useful missing context,
-clarification, evidence, or a decision and should state why; when possible, the
-parent resolves it from available evidence and uses `AgentContinue` to resume
-the same retained session instead of replacing the child merely for asking.
-The parent owns planning, decomposition, sequencing, reconciliation,
-integration, validation, and the final answer. Independent read-only stages
-should be submitted as one foreground batch when useful; dependent stages must
-wait for their prerequisite result.
-
-## Public contract
-
-- `Agent`: required `prompt` and `agent`; optional `description` and
-  `worktree_path`; strict additional-property rejection.
-- `AgentContinue`: required `agent_id` and `prompt`; strict constrained sampling
-  preference and root-only unique-prefix reuse.
-- Both tools throw through Pi's public wrapper when their internal result is an
-  error and always return the complete foreground result on success.
-- No polling, status/control tool, deferred result message, custom result
-  message renderer, static activity footer, or execution-mode projection is
-  part of the active surface.
-
-The manually maintained configuration, model/thinking resolution,
-skills/extensions, worktrees, usage telemetry, and bounded retention contracts
-remain active. See
-`README.md`, `docs/coverage.md`, and the ADRs for operational and test detail.
+Source and focused tests are authoritative for detailed limits and provider/host integration behavior; this map records current boundaries, not an exhaustive implementation inventory.
