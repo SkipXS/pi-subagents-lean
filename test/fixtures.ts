@@ -62,7 +62,7 @@ export function shellMock(fns: ShellMockFns = {}) {
   };
   const pi = fns.pi ?? { exec: vi.fn() };
   const sessionCtx = fns.sessionCtx ?? { cwd: "/home/test" };
-  const store = fns.store ?? { agent: {} };
+  const store = fns.store ?? { agent: { disableDefaultAgents: false } };
   const coordinator = fns.coordinator ?? { spawn: vi.fn() };
 
   return {
@@ -323,13 +323,6 @@ export function resolvedSpawnFixture(overrides: Partial<ResolvedSpawn> = {}): Re
       description,
       systemPrompt: "Test agent instructions.",
     },
-    runtimeSettings = {
-      agent: {
-        includeContextFiles: true,
-        disableDefaultAgents: false,
-        orchestrationPrompt: true,
-      },
-    },
     projectTrusted = false,
     ...rest
   } = overrides;
@@ -338,7 +331,6 @@ export function resolvedSpawnFixture(overrides: Partial<ResolvedSpawn> = {}): Re
     prompt,
     description,
     agentConfig,
-    runtimeSettings,
     projectTrusted,
     ...rest,
   });

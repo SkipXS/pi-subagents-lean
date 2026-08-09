@@ -9,7 +9,7 @@ const state = vi.hoisted(() => ({
   managerConfigs: [] as any[],
   order: [] as string[],
   store: {
-    agent: { disableDefaultAgents: false, orchestrationPrompt: true },
+    agent: { disableDefaultAgents: false },
     concurrency: { default: 4 },
     reload: vi.fn(),
   },

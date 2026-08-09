@@ -198,8 +198,9 @@ export async function runSpawnPreflight(input: SpawnPreflightInput): Promise<Spa
       || prompt.slice(0, 80);
     const description = retainAgentDescription(rawDescription);
     // Persisted per-agent settings are applied above the effective merged
-    // Markdown definition. The runtime snapshot keeps the accepted spawn
-    // stable if config is reloaded while it waits for a concurrency slot.
+    // Markdown definition. The transient snapshot is used only to resolve
+    // model/thinking; those resolved fields keep the accepted spawn stable if
+    // config is reloaded while it waits for a concurrency slot.
     const runtimeSettingsSnapshot = typeof store.createSubagentRuntimeSettings === "function"
       ? store.createSubagentRuntimeSettings()
       : undefined;
@@ -221,7 +222,6 @@ export async function runSpawnPreflight(input: SpawnPreflightInput): Promise<Spa
       prompt,
       description,
       agentConfig,
-      runtimeSettings,
       projectTrusted,
       model,
       modelKey,

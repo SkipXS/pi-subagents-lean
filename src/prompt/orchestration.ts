@@ -161,12 +161,9 @@ export function stripOrchestrationPromptBlocks(prompt: string): string {
 /** Return a parent-prompt update only when injection or removal changes it. */
 export function getOrchestrationPromptUpdate(
   systemPrompt: string,
-  enabled: boolean,
   agents: Iterable<OrchestrationAgent>,
 ): string | undefined {
   const withoutOwnedBlocks = stripOrchestrationPromptBlocks(systemPrompt);
-  if (!enabled) return withoutOwnedBlocks === systemPrompt ? undefined : withoutOwnedBlocks;
-
   const prompt = buildOrchestrationPrompt(agents);
   if (!prompt) return withoutOwnedBlocks === systemPrompt ? undefined : withoutOwnedBlocks;
 

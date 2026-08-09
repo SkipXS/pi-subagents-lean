@@ -40,7 +40,6 @@ import {
 } from "../../src/agents/agent-string-limits.js";
 
 const runtimeSettings: SubagentRuntimeSettings = {
-  agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
   agents: { known: { model: "settings/model" } },
 };
 const agentConfig = {
@@ -107,7 +106,11 @@ describe("runSpawnPreflight", () => {
       projectTrusted: false,
     });
     expect(Object.isFrozen(result.resolvedSpawn)).toBe(true);
+    expect(result.resolvedSpawn).not.toHaveProperty("runtimeSettings");
     expect(input.store.createSubagentRuntimeSettings).toHaveBeenCalledOnce();
+    expect(mocks.resolveAgentTunables).toHaveBeenCalledWith(expect.objectContaining({
+      overrides: runtimeSettings.agents,
+    }));
     expect(mocks.revalidateWorktreePath).not.toHaveBeenCalled();
     expect(mocks.resolveAgentCatalog).not.toHaveBeenCalled();
   });

@@ -5,7 +5,7 @@ import { DEFAULT_AGENTS, DEFAULT_AGENT_NAMES } from "../../src/agents/default-ag
 import { parseAgentFile, toAgentConfig } from "../../src/agents/agent-discovery.js";
 import { CONFIG_AGENT_KEYS } from "../../src/config/types.ts";
 
-const expectedAgentKeys = ["includeContextFiles", "disableDefaultAgents", "orchestrationPrompt"];
+const expectedAgentKeys = ["disableDefaultAgents"];
 
 describe("bundled agent and config contracts", () => {
   it("keeps the persisted agent allowlist current", () => {

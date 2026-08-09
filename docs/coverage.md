@@ -91,11 +91,12 @@ multibyte input and no partial selection. The runner covers `skills:true` and
 explicit lists through the async metadata worker and `noSkills:true` in the
 child loader while preserving arrays/false, exclusion, precedence, and trust
 semantics. Context tests cover root-to-cwd ordering, 256/512 KiB
-file/total limits, deep ancestor bounds, lstat identity races, and trust.
-Config tests cover the read-only 1 MiB pre-parse rejection, bounded override
-count, multibyte name/model strings, valid/missing/invalid/unreadable primary
-selection, non-destructive backup fallback, session reload, and frozen
-accepted snapshots. Record tests cover the one current execution projection, explicit `new`/
+file/total limits, deep ancestor bounds, lstat identity races, and trust; runner
+tests also assert unconditional bounded context loading and nonfatal failures
+for new sessions. Config tests cover the read-only 1 MiB pre-parse rejection,
+bounded override count, multibyte name/model strings, valid/missing/invalid/
+unreadable primary selection, non-destructive backup fallback, session reload,
+and frozen accepted snapshots. Record tests cover the one current execution projection, explicit `new`/
 `continued` kind, independent 64 KiB prompt/response and 8 KiB error bounds, full
 multi-MiB foreground response return, identity-safe promise release, shutdown
 cleanup, and 64-record eviction/session disposal. Telemetry tests cover

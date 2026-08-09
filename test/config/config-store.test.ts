@@ -5,9 +5,7 @@ import type { SubagentsConfig } from "../../src/config/types.ts";
 function defaultConfig(): SubagentsConfig {
   return {
     agent: {
-      includeContextFiles: true,
       disableDefaultAgents: false,
-      orchestrationPrompt: true,
     },
     concurrency: { default: 4 },
   };
@@ -35,7 +33,6 @@ describe("ConfigStore runtime settings", () => {
   it("normalizes scalar and per-agent values from a load-only adapter", () => {
     const { io } = mutableIO({
       agent: {
-        includeContextFiles: false,
         disableDefaultAgents: "yes" as any,
         ignoredRole: "provider/model",
       } as any,
@@ -49,9 +46,7 @@ describe("ConfigStore runtime settings", () => {
     const store = new ConfigStore(io);
 
     expect(store.agent).toEqual({
-      includeContextFiles: false,
       disableDefaultAgents: false,
-      orchestrationPrompt: true,
     });
     expect(store.concurrency).toEqual({ default: 4 });
     expect(store.createSubagentRuntimeSettings().agents).toEqual({
@@ -60,7 +55,7 @@ describe("ConfigStore runtime settings", () => {
     });
   });
 
-  it("captures normalized per-agent overrides in the accepted-spawn snapshot", () => {
+  it("captures normalized per-agent overrides in the transient preflight snapshot", () => {
     const { io } = mutableIO({
       agents: {
         Scout: { model: "provider/model", thinking: "high" },
@@ -72,7 +67,7 @@ describe("ConfigStore runtime settings", () => {
 
     expect(snapshot.agents).toEqual({ scout: { thinking: "medium" } });
     expect(Object.isFrozen(snapshot)).toBe(true);
-    expect(Object.isFrozen(snapshot.agent)).toBe(true);
+    expect(snapshot).not.toHaveProperty("agent");
     expect(Object.isFrozen(snapshot.agents)).toBe(true);
     expect(Object.isFrozen(snapshot.agents?.scout)).toBe(true);
   });
@@ -97,18 +92,19 @@ describe("ConfigStore runtime settings", () => {
     }
   });
 
-  it("keeps an accepted snapshot stable while the underlying adapter changes", () => {
-    const { io, underlying } = mutableIO({ agent: { includeContextFiles: false } });
+  it("keeps a preflight snapshot stable while the underlying adapter changes", () => {
+    const { io, underlying } = mutableIO({ agent: { disableDefaultAgents: false } });
     const store = new ConfigStore(io);
     const snapshot = store.createSubagentRuntimeSettings();
 
-    underlying.agent.includeContextFiles = true;
+    underlying.agent.disableDefaultAgents = true;
     underlying.concurrency.default = 2;
     underlying.agents = { reviewer: { thinking: "high" } };
 
-    expect(store.agent.includeContextFiles).toBe(false);
+    expect(store.agent.disableDefaultAgents).toBe(false);
     expect(store.concurrency).toEqual({ default: 4 });
-    expect(snapshot.agent.includeContextFiles).toBe(false);
+    expect(snapshot).toEqual({});
+    expect(snapshot).not.toHaveProperty("agent");
     expect(snapshot.agents).toBeUndefined();
   });
 
@@ -135,9 +131,7 @@ describe("ConfigStore runtime settings", () => {
     const store = new ConfigStore(io);
 
     expect(store.agent).toEqual({
-      includeContextFiles: true,
       disableDefaultAgents: false,
-      orchestrationPrompt: true,
     });
     expect(store.concurrency).toEqual({ default: 4 });
     expect(store.createSubagentRuntimeSettings().agents).toBeUndefined();
@@ -148,7 +142,7 @@ describe("ConfigStore runtime settings", () => {
     const store = new ConfigStore(io);
 
     expect(Object.keys(io)).toEqual(["load"]);
-    expect(store.agent.includeContextFiles).toBe(true);
+    expect(store.agent.disableDefaultAgents).toBe(false);
     expect(store.concurrency).toEqual({ default: 4 });
   });
 });

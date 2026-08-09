@@ -26,14 +26,14 @@ describe("read-only config I/O with the real filesystem", () => {
     const directory = makeDir();
     const path = configPath(directory);
     const contents = JSON.stringify({
-      agent: { includeContextFiles: false, ignored: true },
+      agent: { ignored: true },
       agents: { Scout: { thinking: "high", ignored: true } },
       concurrency: { default: 2 },
     });
     writeFileSync(path, contents, "utf8");
 
     expect(createConfigFileIO(directory).load()).toEqual({
-      agent: { includeContextFiles: false, disableDefaultAgents: false, orchestrationPrompt: true },
+      agent: { disableDefaultAgents: false },
       agents: { scout: { thinking: "high" } },
       concurrency: { default: 2 },
     });
@@ -48,7 +48,7 @@ describe("read-only config I/O with the real filesystem", () => {
     writeFileSync(backup, backupContents, "utf8");
 
     expect(createConfigFileIO(directory).load()).toEqual({
-      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+      agent: { disableDefaultAgents: false },
       concurrency: { default: 4 },
     });
     expect(readFileSync(backup, "utf8")).toBe(backupContents);

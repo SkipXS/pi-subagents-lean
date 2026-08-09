@@ -16,7 +16,8 @@ vi.mock("../../src/agents/agent-runner.js", () => ({
 vi.mock("../../src/shell.js", () => ({
   getSubagentRuntimeContext: () => undefined,
   getStore: () => ({
-    createSubagentRuntimeSettings: () => ({ agent: {} }),
+    agent: { disableDefaultAgents: false },
+    createSubagentRuntimeSettings: () => ({}),
   }),
   getPiInstance: () => undefined,
   getSessionCtx: () => undefined,

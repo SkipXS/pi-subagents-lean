@@ -26,9 +26,12 @@ turn. It reuses the retained in-memory session, model, and working directory.
 **ResolvedSpawn / AcceptedSpawn**
 
 `ResolvedSpawn` is the immutable preflight snapshot containing the selected
-role definition, runtime settings, model/thinking resolution, trust decision,
-worktree selection, prompt, and caller signal. The manager snapshots it once as
+role definition, resolved model/thinking values, trust decision, worktree
+selection, prompt, and caller signal. The manager snapshots it once as
 `AcceptedSpawn`; queued work never consults mutable catalogs or settings again.
+Persistent per-agent overrides are normalized only for preflight tunable
+resolution; the accepted contract carries the resolved model, model key, and
+thinking level rather than a live settings object.
 
 **Configuration**
 
@@ -36,8 +39,8 @@ worktree selection, prompt, and caller signal. The manager snapshots it once as
 The ConfigStore loads and normalizes a detached snapshot; it has no manager
 lifecycle coupling or file ownership dependency. `session_start` reloads the store before
 creating a manager or applying its normalized concurrency to an existing one.
-Accepted runtime settings are detached and frozen, so a later reload cannot
-reinterpret an already accepted spawn.
+Accepted model/thinking resolution is detached and frozen, so a later reload
+cannot reinterpret an already accepted spawn.
 
 **Child isolation**
 
@@ -108,6 +111,13 @@ streaming scans and live refresh before parent turns. Catalog entries and
 frontmatter descriptions remain bounded; malformed or oversized inputs fail
 closed. An immutable trust snapshot controls project catalogs, context files,
 skills, and worktree overlays for the whole accepted execution.
+
+Parent orchestration is always refreshed before each parent turn. Context loading
+is mandatory for every new `Agent` session: the existing bounded, trust-aware
+loader checks the global candidate and trusted project ancestors within its
+fixed file, total-byte, ancestor, race, and warning limits. There are no
+configuration booleans to disable either policy. `AgentContinue` reuses its retained
+session and does not reload context files.
 
 Agent prompts are explicit, self-contained handoffs by default. The extension
 does not automatically inject a complete parent transcript, tool history, or
