@@ -29,7 +29,6 @@ import { GIT_EXEC_TIMEOUT_MS } from "../utils.js";
 import type { EnvInfo } from "../types.js";
 import type { SubagentType } from "./types.js";
 import { createSubagentRuntimeContext, getSubagentRuntimeContext, runWithSubagentRuntime } from "../shell.js";
-import type { SubagentRuntimeSettings } from "../config/config-store.js";
 import { revalidateWorktreePath } from "../spawn/worktree-validator.js";
 import { loadBoundedContextFiles } from "./context-file-loader.js";
 
@@ -69,15 +68,13 @@ async function detectEnv(pi: ExtensionAPI, cwd: string): Promise<EnvInfo> {
   return { isGitRepo, branch, platform: process.platform };
 }
 
-/** Load context files when enabled, respecting the immutable trust snapshot. */
+/** Load bounded context files, respecting the immutable trust snapshot. */
 async function resolvePromptExtras(
   cwd: string,
-  settings: SubagentRuntimeSettings,
   projectTrusted: boolean,
   agentDir: string,
   onWarning?: (warning: string) => void,
 ): Promise<Pick<PromptExtras, "contextFiles">> {
-  if (!settings.agent.includeContextFiles) return {};
   try {
     const contextFiles = await loadBoundedContextFiles({
       cwd,
@@ -119,7 +116,6 @@ export async function runAgent(
       acceptedSpawn.type,
       acceptedSpawn.prompt,
       options,
-      acceptedSpawn.runtimeSettings,
     ),
   );
 }
@@ -129,7 +125,6 @@ async function runAgentImpl(
   type: SubagentType,
   prompt: string,
   options: RunOptions,
-  settings: SubagentRuntimeSettings,
 ): Promise<RunResult> {
   if (options.signal?.aborted) {
     const error = new Error("Agent run aborted before setup");
@@ -171,7 +166,6 @@ async function runAgentImpl(
   // project behind the trust snapshot.
   const promptExtras = await resolvePromptExtras(
     effectiveCwd,
-    settings,
     projectTrusted,
     agentDir,
     bufferNotify,

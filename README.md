@@ -105,11 +105,14 @@ bundled roles are `architect`, `scout`, `implementer`, `reviewer`, and
 catalogs are refreshed live before parent turns. Catalog limits and UTF-8
 bounds are fail-closed and deterministic.
 
-Each accepted spawn carries immutable resolved role, settings, model, thinking,
-trust, worktree, context, tools, extensions, and skills data. Queueing or later
-catalog edits cannot reinterpret it. Project descriptions and instructions are
-read only under Pi's trust gate; an untrusted request uses the project-free
-catalog and excludes project context.
+Each accepted spawn carries immutable resolved role, model, thinking, trust,
+worktree, tools, extensions, and skills data. Queueing or later catalog edits
+cannot reinterpret it. Project descriptions and instructions are read only
+under Pi's trust gate; an untrusted request uses the project-free catalog and
+excludes project context. Parent orchestration is refreshed from the live
+catalog before every parent turn. Every new `Agent` session always loads
+bounded, trust-aware context files; `AgentContinue` reuses its retained
+session and does not reload context.
 
 Every child session is AsyncLocalStorage-isolated. It sees only its configured
 work tools and never receives either root delegation tool, so children cannot
@@ -189,8 +192,6 @@ itself is the join point.
 |---|---:|---|
 | `concurrency.default` | `4` | Simultaneous root limit, integer range 1..64. |
 | `agent.disableDefaultAgents` | `false` | Exclude bundled roles from refreshed catalogs. |
-| `agent.orchestrationPrompt` | `true` | Add bounded parent-only routing guidance and the live catalog. |
-| `agent.includeContextFiles` | `true` | Include applicable trusted context files. |
 | `agents.<name>.model` | absent | Per-role provider/model override, bounded and registry-checked. |
 | `agents.<name>.thinking` | absent | Per-role reasoning override with provider capability normalization. |
 
@@ -200,9 +201,9 @@ session; the extension only reads this file and never changes or recreates
 it. A 1 MiB bound applies before JSON parsing. A missing primary uses defaults even
 when `.bak` exists. If an existing primary is invalid or unreadable, a valid
 `.bak` is used in memory and both files are left unchanged; otherwise defaults
-are used so manual recovery remains possible. Each accepted `Agent` call gets
-a detached, frozen settings snapshot, so later edits and reloads affect only
-later accepted calls.
+are used so manual recovery remains possible. Each accepted `Agent` call
+resolves persistent model/thinking overrides once into its detached, frozen
+contract, so later edits and reloads affect only later accepted calls.
 
 Model and thinking are resolved from persistent per-role settings, effective
 Agent Markdown, and the parent session. Skills and extensions follow their

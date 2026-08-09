@@ -104,7 +104,6 @@ export function setupEventListeners(
     await scanAndRegisterAgents(ctx);
     const systemPrompt = getOrchestrationPromptUpdate(
       event.systemPrompt,
-      getStore().agent.orchestrationPrompt,
       getAvailableAgents(),
     );
     return systemPrompt === undefined ? undefined : { systemPrompt };

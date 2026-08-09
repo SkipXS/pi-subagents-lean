@@ -24,7 +24,6 @@ export interface ResolvedSpawn {
   /** Retained/display description; capped at 8 KiB UTF-8. */
   readonly description: string;
   readonly agentConfig: AgentConfig;
-  readonly runtimeSettings: SubagentRuntimeSettings;
   /** Trust snapshot captured before tool-preflight awaits. */
   readonly projectTrusted: boolean;
   readonly model?: Model<any>;
@@ -42,12 +41,6 @@ export interface ResolvedSpawn {
 export interface AcceptedSpawn extends ResolvedSpawn {
   readonly accepted: true;
 }
-
-const DEFAULT_RUNTIME_AGENT_SETTINGS = {
-  includeContextFiles: true,
-  disableDefaultAgents: false,
-  orchestrationPrompt: true,
-} as const;
 
 /**
  * Clone and recursively freeze contract-owned data. Model instances and
@@ -102,12 +95,6 @@ function freezeAgentConfig(config: AgentConfig): AgentConfig {
 export function snapshotRuntimeSettings(
   settings?: SubagentRuntimeSettings,
 ): SubagentRuntimeSettings {
-  const sourceAgent = settings?.agent;
-  const agent = Object.freeze({
-    includeContextFiles: sourceAgent?.includeContextFiles ?? DEFAULT_RUNTIME_AGENT_SETTINGS.includeContextFiles,
-    disableDefaultAgents: sourceAgent?.disableDefaultAgents ?? DEFAULT_RUNTIME_AGENT_SETTINGS.disableDefaultAgents,
-    orchestrationPrompt: sourceAgent?.orchestrationPrompt ?? DEFAULT_RUNTIME_AGENT_SETTINGS.orchestrationPrompt,
-  });
   const normalizedAgents = normalizeAgentSettingsOverrides(settings?.agents);
   const agents = Object.keys(normalizedAgents).length > 0
     ? Object.fromEntries(
@@ -115,10 +102,7 @@ export function snapshotRuntimeSettings(
     )
     : undefined;
 
-  return cloneAndFreeze({
-    agent,
-    ...(agents ? { agents } : {}),
-  });
+  return cloneAndFreeze(agents ? { agents } : {});
 }
 
 function snapshotResolvedFields(spawn: ResolvedSpawn): ResolvedSpawn {
@@ -127,7 +111,6 @@ function snapshotResolvedFields(spawn: ResolvedSpawn): ResolvedSpawn {
     prompt: spawn.prompt,
     description: retainAgentDescription(spawn.description),
     agentConfig: freezeAgentConfig(spawn.agentConfig),
-    runtimeSettings: snapshotRuntimeSettings(spawn.runtimeSettings),
     projectTrusted: spawn.projectTrusted,
     model: spawn.model,
     modelKey: spawn.modelKey,

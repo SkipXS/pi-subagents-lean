@@ -35,9 +35,7 @@ describe("concurrency normalization", () => {
 describe("agent config entry normalization", () => {
   it("accepts only the current boolean agent settings", () => {
     const input = {
-      includeContextFiles: false,
       disableDefaultAgents: true,
-      orchestrationPrompt: false,
       default: "provider/default",
       reviewer: "provider/model",
       ignoredString: "provider/model",
@@ -47,15 +45,9 @@ describe("agent config entry normalization", () => {
     };
 
     expect(normalizeAgentEntries(input)).toEqual({
-      includeContextFiles: false,
       disableDefaultAgents: true,
-      orchestrationPrompt: false,
     });
-    expect(CONFIG_AGENT_KEYS).toEqual([
-      "includeContextFiles",
-      "disableDefaultAgents",
-      "orchestrationPrompt",
-    ]);
+    expect(CONFIG_AGENT_KEYS).toEqual(["disableDefaultAgents"]);
   });
 });
 

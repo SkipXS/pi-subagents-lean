@@ -47,7 +47,6 @@ const mockModules = vi.hoisted(() => ({
   mockSettingsManager: { id: "shared-settings-manager" },
   mockLoadProjectContextFiles: vi.fn().mockReturnValue([]),
   mockLoadBoundedContextFiles: vi.fn().mockResolvedValue([]),
-  mockIncludeContextFiles: true as boolean,
   loaderReloadFailure: undefined as Error | undefined,
   loaderExtensionsFailure: undefined as Error | undefined,
   getLoaderOpts: () => _loaderOpts[_loaderOpts.length - 1] ?? null,
@@ -93,14 +92,9 @@ vi.mock("../../src/agents/context-file-loader.js", () => ({
 vi.mock("../../src/shell.js", () => ({
   createSubagentRuntimeContext: () => Object.freeze({ isChildRuntime: true as const }),
   getStore: () => {
-    const agent = {
-      includeContextFiles: mockModules.mockIncludeContextFiles,
-      disableDefaultAgents: false,
-      orchestrationPrompt: true,
-    };
     return {
-      agent,
-      createSubagentRuntimeSettings: () => ({ agent }),
+      agent: { disableDefaultAgents: false },
+      createSubagentRuntimeSettings: () => ({}),
     };
   },
   getSubagentRuntimeContext: () => undefined,
@@ -155,19 +149,11 @@ function runAgent(
     ...(mockModules.mockGetConfig() ?? {}),
     name: type,
   };
-  const runtimeSettings = options.runtimeSettings ?? {
-    agent: {
-      includeContextFiles: mockModules.mockIncludeContextFiles,
-      disableDefaultAgents: false,
-      orchestrationPrompt: true,
-    },
-  };
   const acceptedSpawn = acceptedSpawnFixture({
     type,
     prompt,
     description: options.description ?? prompt,
     agentConfig,
-    runtimeSettings,
     projectTrusted: options.projectTrusted === true,
     model: options.model,
     modelKey: options.modelKey,
@@ -188,7 +174,6 @@ function resetMocks() {
   vi.clearAllMocks();
   mockModules.clearLoaderOpts();
   mockModules.clearLoaderExtensions();
-  mockModules.mockIncludeContextFiles = true;
   mockModules.mockLoadBoundedContextFiles.mockResolvedValue([]);
   mockModules.loaderReloadFailure = undefined;
   mockModules.loaderExtensionsFailure = undefined;
@@ -1545,20 +1530,19 @@ describe("tools field — extension tool names and ext/all syntax", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  runAgent — context file gating (includeContextFiles)              */
+/*  runAgent — bounded context files                                 */
 /* ------------------------------------------------------------------ */
 
-describe("runAgent — context file gating", () => {
+describe("runAgent — bounded context files", () => {
   beforeEach(() => {
     resetMocks();
     fakePi.exec.mockResolvedValue({ code: 0, stdout: "true" });
   });
 
-  it("loads context files when includeContextFiles is true", async () => {
+  it("always loads bounded context files", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-    mockModules.mockIncludeContextFiles = true;
     mockModules.mockLoadBoundedContextFiles.mockResolvedValue([
       { path: "AGENTS.md", content: "project instructions" },
     ]);
@@ -1578,28 +1562,10 @@ describe("runAgent — context file gating", () => {
     );
   });
 
-  it("does NOT load context files when includeContextFiles is false", async () => {
-    const session = createMockSession();
-    session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
-    mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-    mockModules.mockIncludeContextFiles = false;
-
-    await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi, projectTrusted: true });
-
-    expect(mockModules.mockLoadBoundedContextFiles).not.toHaveBeenCalled();
-    expect(mockModules.mockBuildAgentPrompt).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      expect.not.objectContaining({ contextFiles: expect.anything() }),
-    );
-  });
-
   it("context file loading failure is non-fatal", async () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-    mockModules.mockIncludeContextFiles = true;
     mockModules.mockLoadBoundedContextFiles.mockRejectedValue(new Error("permission denied"));
 
     // Should not throw
@@ -1614,7 +1580,6 @@ describe("runAgent — context file gating", () => {
     const session = createMockSession();
     session.getActiveToolNames.mockReturnValue(["read", "bash", "edit"]);
     mockModules.mockCreateAgentSession.mockResolvedValue({ session, extensionsResult: {} });
-    mockModules.mockIncludeContextFiles = true;
     mockModules.mockLoadBoundedContextFiles.mockResolvedValue([]);
 
     await runAgent(fakeCtx(), "test-agent", "do something", { pi: fakePi });
@@ -1677,9 +1642,6 @@ describe("runAgent — context file gating", () => {
       prompt: "trusted prompt",
       description: "Trusted",
       agentConfig: config,
-      runtimeSettings: {
-        agent: { includeContextFiles: false, disableDefaultAgents: false, orchestrationPrompt: true },
-      },
       projectTrusted: true,
     }));
 
@@ -1914,16 +1876,11 @@ describe("runAgent — agent config snapshot", () => {
       skills: false,
     };
     const model = { provider: "accepted", id: "model" };
-    const runtimeSettings = {
-      agent: { includeContextFiles: false, disableDefaultAgents: false, orchestrationPrompt: true },
-      agents: { accepted: { model: "settings/model" } },
-    } as any;
     const acceptedSpawn = acceptResolvedSpawn(snapshotResolvedSpawn({
       type: "accepted",
       prompt: "accepted prompt",
       description: "Accepted",
       agentConfig: config,
-      runtimeSettings,
       model: model as any,
       modelKey: "accepted/model",
       thinkingLevel: "high",

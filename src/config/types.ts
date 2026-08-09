@@ -14,9 +14,7 @@ export type AgentSettingsOverrides = Record<string, AgentSettingsOverride>;
 
 export interface SubagentsConfig {
   agent: {
-    includeContextFiles?: boolean;
     disableDefaultAgents?: boolean;
-    orchestrationPrompt?: boolean;
   };
   /** Persisted per-agent model/thinking overrides, keyed case-insensitively. */
   agents?: AgentSettingsOverrides;
@@ -56,9 +54,7 @@ export function normalizeConcurrencyDefault(raw: unknown): number {
 
 /** Agent settings that are valid in subagents-lean.json. */
 export const CONFIG_AGENT_KEYS = [
-  "includeContextFiles",
   "disableDefaultAgents",
-  "orchestrationPrompt",
 ] as const;
 
 const CONFIG_AGENT_KEY_SET = new Set<string>(CONFIG_AGENT_KEYS);

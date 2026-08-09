@@ -15,18 +15,12 @@ describe("AcceptedSpawn immutability", () => {
       description: "Trusted",
       agentConfig: { name: "trusted", description: "Trusted", systemPrompt: "" },
       projectTrusted: true,
-      runtimeSettings: {
-        agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
-      },
     });
     const untrusted = snapshotResolvedSpawn({
       type: "untrusted",
       prompt: "task",
       description: "Untrusted",
       agentConfig: { name: "untrusted", description: "Untrusted", systemPrompt: "" },
-      runtimeSettings: {
-        agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
-      },
       projectTrusted: false,
     });
 
@@ -36,15 +30,30 @@ describe("AcceptedSpawn immutability", () => {
     expect(Object.isFrozen(acceptResolvedSpawn(trusted))).toBe(true);
   });
 
+  it("retains resolved model, model key, and thinking on accepted spawns", () => {
+    const model = { provider: "provider", id: "resolved-model" } as any;
+    const accepted = acceptResolvedSpawn(snapshotResolvedSpawn({
+      type: "resolved",
+      prompt: "task",
+      description: "Resolved",
+      agentConfig: { name: "resolved", description: "Resolved", systemPrompt: "" },
+      projectTrusted: false,
+      model,
+      modelKey: "provider/resolved-model",
+      thinkingLevel: "high",
+    }));
+
+    expect(accepted.model).toBe(model);
+    expect(accepted.modelKey).toBe("provider/resolved-model");
+    expect(accepted.thinkingLevel).toBe("high");
+  });
+
   it("rejects oversized prompt/systemPrompt before AcceptedSpawn can be queued", () => {
     const base = {
       type: "bounded",
       prompt: "task",
       description: "description",
       agentConfig: { name: "bounded", description: "description", systemPrompt: "instructions" },
-      runtimeSettings: {
-        agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
-      },
       projectTrusted: false,
     } as const;
 
@@ -73,17 +82,12 @@ describe("AcceptedSpawn immutability", () => {
       tools: [["read"]],
       excludeSkills: [["private"]],
     } as any;
-    const runtimeSettings = {
-      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
-      agents: { nested: { model: "provider/model", extra: [["mutable"]] } },
-    } as any;
     const invocation = { modelName: "model", nested: [["metadata"]] } as any;
     const resolved = snapshotResolvedSpawn({
       type: "nested",
       prompt: "task",
       description: "Nested",
       agentConfig,
-      runtimeSettings,
       invocation,
       projectTrusted: false,
     });
@@ -94,8 +98,7 @@ describe("AcceptedSpawn immutability", () => {
     expect(Object.isFrozen(acceptedAny.agentConfig)).toBe(true);
     expect(Object.isFrozen(acceptedAny.agentConfig.tools)).toBe(true);
     expect(Object.isFrozen(acceptedAny.agentConfig.tools[0])).toBe(true);
-    expect(Object.isFrozen(acceptedAny.runtimeSettings.agents)).toBe(true);
-    expect(acceptedAny.runtimeSettings.agents.nested).toEqual({ model: "provider/model" });
+    expect(acceptedAny).not.toHaveProperty("runtimeSettings");
     expect(Object.isFrozen(acceptedAny.invocation.nested[0])).toBe(true);
 
     agentConfig.tools[0].push("write");

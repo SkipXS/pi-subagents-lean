@@ -18,25 +18,18 @@ export const fileConfigIO: ConfigIO = {
 
 /** Agent settings with all scalar defaults resolved. */
 export interface ResolvedAgentSettings {
-  /** Whether to include AGENTS.md context files in the subagent system prompt. */
-  readonly includeContextFiles: boolean;
   /** Whether to skip bundled default agents during catalog discovery. */
   readonly disableDefaultAgents: boolean;
-  /** Whether to append dynamic parent-agent orchestration guidance. */
-  readonly orchestrationPrompt: boolean;
 }
 
-/** Detached settings captured for one accepted root execution. */
+/** Detached per-agent model/thinking overrides captured for one root spawn. */
 export interface SubagentRuntimeSettings {
-  readonly agent: Readonly<ResolvedAgentSettings>;
   /** Normalized per-agent model/thinking overrides, when any are configured. */
   readonly agents?: Readonly<Record<string, Readonly<AgentSettingsOverride>>>;
 }
 
 const DEFAULT_AGENT_SETTINGS: Required<ResolvedAgentSettings> = {
-  includeContextFiles: true,
   disableDefaultAgents: false,
-  orchestrationPrompt: true,
 };
 
 export class ConfigStore {
@@ -51,9 +44,7 @@ export class ConfigStore {
   get agent(): ResolvedAgentSettings {
     const agent = this.config.agent;
     return {
-      includeContextFiles: agent.includeContextFiles ?? DEFAULT_AGENT_SETTINGS.includeContextFiles,
       disableDefaultAgents: agent.disableDefaultAgents ?? DEFAULT_AGENT_SETTINGS.disableDefaultAgents,
-      orchestrationPrompt: agent.orchestrationPrompt ?? DEFAULT_AGENT_SETTINGS.orchestrationPrompt,
     };
   }
 
@@ -70,7 +61,6 @@ export class ConfigStore {
       )
       : undefined;
     return Object.freeze({
-      agent: Object.freeze({ ...this.agent }),
       ...(agents ? { agents: Object.freeze(agents) } : {}),
     });
   }

@@ -89,9 +89,7 @@ describe("read-only config I/O", () => {
   it("loads a valid primary with scalar and per-agent normalization", async () => {
     setFile(primaryPath, JSON.stringify({
       agent: {
-        includeContextFiles: false,
         disableDefaultAgents: true,
-        orchestrationPrompt: false,
         ignoredRole: "provider/model",
       },
       agents: {
@@ -104,7 +102,7 @@ describe("read-only config I/O", () => {
     const { createConfigFileIO, loadConfig } = await loadModule();
 
     const expected = {
-      agent: { includeContextFiles: false, disableDefaultAgents: true, orchestrationPrompt: false },
+      agent: { disableDefaultAgents: true },
       agents: {
         scout: { thinking: "low" },
         reviewer: { model: "provider/reviewer" },
@@ -120,7 +118,7 @@ describe("read-only config I/O", () => {
     const { loadConfig } = await loadModule();
 
     expect(loadConfig()).toEqual({
-      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+      agent: { disableDefaultAgents: false },
       concurrency: { default: 4 },
     });
     expect(mockLstatSync).not.toHaveBeenCalledWith(backupPath);
@@ -134,7 +132,7 @@ describe("read-only config I/O", () => {
       const { loadConfig } = await loadModule();
 
       expect(loadConfig()).toEqual({
-        agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+        agent: { disableDefaultAgents: false },
         concurrency: { default: 4 },
       });
       expect(files.get(primaryPath)).toBe(contents);
@@ -148,7 +146,7 @@ describe("read-only config I/O", () => {
     const { loadConfig } = await loadModule();
 
     expect(loadConfig()).toEqual({
-      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+      agent: { disableDefaultAgents: false },
       concurrency: { default: 7 },
     });
     expect(files.get(primaryPath)).toBe("{broken");
@@ -171,7 +169,7 @@ describe("read-only config I/O", () => {
     const { loadConfig } = await loadModule();
 
     expect(loadConfig()).toEqual({
-      agent: { includeContextFiles: true, disableDefaultAgents: false, orchestrationPrompt: true },
+      agent: { disableDefaultAgents: false },
       concurrency: { default: 4 },
     });
     expect(mockReadFileSync).not.toHaveBeenCalledWith(primaryPath);

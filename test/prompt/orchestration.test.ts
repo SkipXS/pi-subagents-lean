@@ -174,17 +174,26 @@ describe("parent orchestration prompt", () => {
   it("replaces only complete extension blocks and ignores marker collisions", () => {
     const agents = [agent("custom", "Custom role")];
     const base = `Base\n${ORCHESTRATION_PROMPT_MARKER}\nuser text`;
-    const updated = getOrchestrationPromptUpdate(base, true, agents)!;
+    const updated = getOrchestrationPromptUpdate(base, agents)!;
     expect(updated).toContain(`${ORCHESTRATION_PROMPT_MARKER}\nuser text`);
     expect(updated.match(new RegExp(ORCHESTRATION_PROMPT_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))?.length).toBe(2);
 
     const withUnmatchedEnd = `Base\n${ORCHESTRATION_PROMPT_END_MARKER}`;
-    expect(getOrchestrationPromptUpdate(withUnmatchedEnd, true, agents)).toContain(withUnmatchedEnd);
+    expect(getOrchestrationPromptUpdate(withUnmatchedEnd, agents)).toContain(withUnmatchedEnd);
 
-    const generated = buildOrchestrationPrompt(agents)!;
-    expect(getOrchestrationPromptUpdate(`Base\n\n${generated}`, false, agents)).toBe("Base");
-    const replaced = getOrchestrationPromptUpdate(`Base\n\n${generated}`, true, agents);
+    const generated = buildOrchestrationPrompt([agent("old", "Old role")])!;
+    const refreshed = getOrchestrationPromptUpdate(`Base\n\n${generated}`, agents)!;
+    expect(refreshed).toContain("Base");
+    expect(refreshed).toContain("`custom` — Custom role");
+    const replaced = getOrchestrationPromptUpdate(refreshed, agents);
     expect(replaced).toBeUndefined();
+  });
+
+  it("removes the owned block when the live catalog is empty", () => {
+    const generated = buildOrchestrationPrompt([agent("custom", "Custom role")])!;
+
+    expect(getOrchestrationPromptUpdate(`Base\n\n${generated}`, [])).toBe("Base");
+    expect(getOrchestrationPromptUpdate("Base", [])).toBeUndefined();
   });
 
   it("omits unrepresentable names rather than changing their callable identifier", () => {
@@ -210,6 +219,6 @@ describe("parent orchestration prompt", () => {
 
   it("strips versioned blocks after rules change", () => {
     const changedRulesBlock = `${ORCHESTRATION_PROMPT_MARKER}\nNew future rules\nAgents: \`reviewer\` — Review\n${ORCHESTRATION_PROMPT_END_MARKER}`;
-    expect(getOrchestrationPromptUpdate(`Inherited\n\n${changedRulesBlock}`, false, [])).toBe("Inherited");
+    expect(getOrchestrationPromptUpdate(`Inherited\n\n${changedRulesBlock}`, [])).toBe("Inherited");
   });
 });

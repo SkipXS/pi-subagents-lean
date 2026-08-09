@@ -212,13 +212,6 @@ function acceptedSpawn(type: string, prompt: string) {
       skills: false,
       systemPrompt: "Test child instructions.",
     },
-    runtimeSettings: {
-      agent: {
-        includeContextFiles: false,
-        disableDefaultAgents: false,
-        orchestrationPrompt: true,
-      },
-    },
   });
 }
 

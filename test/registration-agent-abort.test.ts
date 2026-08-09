@@ -22,7 +22,7 @@ vi.mock("../src/agents/agent-types.js", () => ({
 vi.mock("../src/shell.js", () => ({
   getPiInstance: () => ({ exec: vi.fn() }),
   getSessionCtx: () => ({ cwd: "/project" }),
-  getStore: () => ({ agent: {}, createSubagentRuntimeSettings: () => ({ agent: {} }) }),
+  getStore: () => ({ agent: { disableDefaultAgents: false }, createSubagentRuntimeSettings: () => ({}) }),
   getCoordinator: () => ({ spawn: boundary.coordinatorSpawn }),
   getManager: () => ({ getRecord: vi.fn(), listAgents: vi.fn(() => []) }),
 }));

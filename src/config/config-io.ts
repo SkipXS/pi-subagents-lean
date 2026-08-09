@@ -17,9 +17,7 @@ const CONFIG_DIR = getAgentDir();
 export const MAX_CONFIG_FILE_BYTES = MAX_SUBAGENTS_CONFIG_BYTES;
 
 const DEFAULT_AGENT: SubagentsConfig["agent"] = {
-  includeContextFiles: true,
   disableDefaultAgents: false,
-  orchestrationPrompt: true,
 };
 
 export interface ConfigFileIO {

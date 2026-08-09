@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -15,6 +16,7 @@ import {
   MAX_CONTEXT_TOTAL_BYTES,
 } from "../../src/agents/context-file-loader.js";
 import { utf8ByteLength } from "../../src/agents/agent-string-limits.js";
+import { canCreateSymlinks } from "../fixtures.ts";
 
 const roots: string[] = [];
 
@@ -24,6 +26,24 @@ afterEach(() => {
 });
 
 describe("bounded context-file loader", () => {
+  it("rejects symlinked context candidates", async () => {
+    if (!canCreateSymlinks()) return;
+    const root = mkdtempSync(join(tmpdir(), "context-loader-symlink-"));
+    roots.push(root);
+    const agentDir = join(root, "global");
+    mkdirSync(agentDir);
+    const target = join(root, "target.md");
+    writeFileSync(target, "must not load");
+    symlinkSync(target, join(agentDir, "AGENTS.md"), "file");
+
+    const result = await loadBoundedContextFiles({
+      cwd: root,
+      agentDir,
+      projectTrusted: false,
+    });
+    expect(result).toEqual([]);
+  });
+
   it("keeps global-first and root-to-cwd Pi candidate ordering", async () => {
     const root = mkdtempSync(join(tmpdir(), "context-loader-order-"));
     roots.push(root);

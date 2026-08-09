@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Always-on parent orchestration and context loading.** Parent prompts refresh from the live catalog before each turn, every new Agent session uses the bounded trust-aware context loader, and AgentContinue reuses its session without reloading context; the two optional policy switches are removed.
 - **Single current execution projection.** Records now retain one bounded latest execution projection with explicit `new`/`continued` kind; continuations replace that projection while reusing the exact live child session and preserving cumulative telemetry and parent Pi result persistence.
 - **Pi-owned Agent row lifecycle.** `Agent` and `AgentContinue` retain informative static headers, metadata hydration, complete prompts, results, usage details, and terminal-safe text while Pi owns pending, success, and error row presentation; real queued waits remain host-pending because queue state is not sent live to the renderer.
 - **Parent↔agent clarification flow.** Subagents may request missing parent-side context or decisions and can be resumed in the same retained session with AgentContinue; orchestration guidance now prefers resuming the existing agent over replacing it.
