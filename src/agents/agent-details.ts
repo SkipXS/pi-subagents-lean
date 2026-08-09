@@ -1,5 +1,4 @@
 import type { AgentRecord } from "../types.js";
-import { executionKind } from "./execution-display.js";
 import { getSessionUsageSnapshot } from "./usage.js";
 import { retainAgentDescription, retainAgentError, retainAgentText } from "./agent-string-limits.js";
 
@@ -15,7 +14,7 @@ import { retainAgentDescription, retainAgentError, retainAgentText } from "./age
  */
 export function buildAgentDetails(
   record: AgentRecord,
-  opts?: { includeStats?: boolean; includeStatus?: boolean; execution?: NonNullable<AgentRecord["stats"]["executions"]>[number] },
+  opts?: { includeStats?: boolean; includeStatus?: boolean; execution?: AgentRecord["stats"]["currentExecution"] },
 ): Record<string, unknown> {
   const details: Record<string, unknown> = {
     agentId: record.id,
@@ -35,14 +34,12 @@ export function buildAgentDetails(
 
   if (opts?.includeStats) {
     // Only the current execution's compact delta/result is exposed: never
-    // execution history, execution ids, timestamps, or prior responses. The
-    // initial spawn's summary stays lifetime-cumulative; every continuation
-    // reports the exact per-execution usage/compaction deltas instead of
-    // cumulative record totals.
-    const executions = record.stats.executions;
-    const current = opts.execution ?? executions?.at(-1);
-    const currentIndex = current ? (executions?.indexOf(current) ?? 0) : 0;
-    const currentKind = executionKind(current, currentIndex);
+    // prior execution projections, execution ids, timestamps, or prior
+    // responses. The initial spawn's projection stays lifetime-cumulative;
+    // every continuation reports the exact per-execution usage/compaction
+    // deltas instead of cumulative record totals.
+    const current = opts.execution ?? record.stats.currentExecution;
+    const currentKind = current?.kind;
     const continuation = current && currentKind === "continued" ? current : undefined;
     const usage = continuation?.usage;
     const elapsedMs = continuation
@@ -79,7 +76,7 @@ export function buildAgentDetails(
     details.latestCacheHitRate = record.stats.latestCacheHitRate;
     const contextStats = record.stats.contextStats?.count ? record.stats.contextStats : undefined;
     // Keep the explicit live/terminal snapshot so shared formatting can prefer
-    // a newly measured response without losing context history telemetry.
+    // a newly measured response without losing context telemetry.
     details.contextPercent = usageSnapshot.contextPercent ?? null;
     // The explicit current/live window wins over historical telemetry from
     // an earlier model or branch.
@@ -102,12 +99,12 @@ export function buildAgentDetails(
     details.thinkingLevel = record.execution.session?.thinkingLevel ?? record.display.invocation?.thinkingLevel;
     details.cost = usage?.cost ?? record.stats.lifetimeUsage.cost;
     // Only the current execution's compact delta/result is exposed: never
-    // execution history, execution ids, timestamps, or prior responses. The
-    // caller authored the current prompt and can recover earlier context from
-    // the record itself.
+    // prior execution projections, execution ids, timestamps, or prior
+    // responses. The caller authored the current prompt and can recover earlier
+    // context from the live session.
     if (current) {
       details.currentExecution = {
-        kind: currentKind,
+        kind: current.kind,
         status: current.status,
         ...(current.responseText !== undefined ? { responseText: retainAgentText(current.responseText) } : {}),
         ...(current.usage !== undefined ? { usage: current.usage } : {}),

@@ -54,7 +54,7 @@ function record(id: string, type: string, prompt: string): any {
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
       cacheRead: 0,
       compactionCount: 0,
-      executions: [{ id: "execution", prompt, kind: "new", status: "completed", startedAt: 1, completedAt: 2, responseText: "complete" }],
+      currentExecution: { id: "execution", prompt, kind: "new", status: "completed", startedAt: 1, completedAt: 2, responseText: "complete" },
     },
     result: "complete",
   };

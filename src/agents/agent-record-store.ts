@@ -1,7 +1,7 @@
 /**
  * agent-record-store.ts — retained records and their lifecycle projections.
  *
- * The store owns the mutable record/history boundary. ExecutionService owns
+ * The store owns the mutable record/current-projection boundary. ExecutionService owns
  * runner resources and slot cleanup; it uses these transitions instead of
  * duplicating record mutations in each execution path.
  */
@@ -20,19 +20,12 @@ import {
   retainAgentError,
   retainAgentText,
   retainExecutionPrompt,
-  utf8ByteLength,
-  MAX_RETAINED_EXECUTION_TEXT_BUDGET_BYTES,
 } from "./agent-string-limits.js";
 
 const AGENT_ID_PREFIX_LENGTH = 17;
 
 /** Maximum number of settled terminal root records retained by a manager. */
 export const MAX_RETAINED_AGENT_RECORDS = 64;
-
-/** Maximum number of completed execution summaries retained per record. */
-export const MAX_RETAINED_EXECUTION_SUMMARIES = 128;
-/** Maximum UTF-8 bytes used by text fields in retained summaries per record. */
-export const MAX_RETAINED_EXECUTION_SUMMARY_TEXT_BYTES = MAX_RETAINED_EXECUTION_TEXT_BUDGET_BYTES;
 
 export interface SpawnRecordResult {
   id: string;
@@ -50,16 +43,6 @@ export interface TurnOutcome {
   error?: string;
 }
 
-function executionSummaryTextBytes(executions: readonly AgentExecutionSummary[]): number {
-  let total = 0;
-  for (const execution of executions) {
-    if (typeof execution.prompt === "string") total += utf8ByteLength(execution.prompt);
-    if (execution.responseText !== undefined) total += utf8ByteLength(execution.responseText);
-    if (execution.error !== undefined) total += utf8ByteLength(execution.error);
-  }
-  return total;
-}
-
 export class AgentRecordStore {
   private readonly records = new Map<string, AgentRecord>();
   private readonly recordOrdinals = new Map<string, number>();
@@ -75,7 +58,7 @@ export class AgentRecordStore {
     return this.createId();
   }
 
-  /** Accept one resolved root and create its retained record/history entry. */
+  /** Accept one resolved root and create its retained record/current projection. */
   createSpawnRecord(
     acceptedSpawn: AcceptedSpawn,
     status: "queued" | "running",
@@ -100,7 +83,7 @@ export class AgentRecordStore {
     const execution: AgentExecutionSummary = {
       id: executionId,
       // The full accepted prompt remains only on the active execution task;
-      // retained history keeps a bounded diagnostic projection.
+      // the current projection keeps a bounded diagnostic copy.
       prompt: retainExecutionPrompt(acceptedSpawn.prompt),
       kind: "new",
       status,
@@ -121,7 +104,7 @@ export class AgentRecordStore {
         lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
         compactionCount: 0,
         cacheRead: 0,
-        executions: [execution],
+        currentExecution: execution,
       },
     };
     this.records.set(id, record);
@@ -129,7 +112,7 @@ export class AgentRecordStore {
     return { id, record, execution };
   }
 
-  /** Append an accepted continuation to the retained execution history. */
+  /** Replace the retained current execution with an accepted continuation. */
   createContinuation(
     record: AgentRecord,
     executionId: string,
@@ -145,8 +128,7 @@ export class AgentRecordStore {
       status,
       startedAt,
     };
-    (record.stats.executions ??= []).push(execution);
-    this.capExecutionHistory(record);
+    record.stats.currentExecution = execution;
     record.lifecycle.status = status;
     record.lifecycle.settled = false;
     record.lifecycle.completedAt = undefined;
@@ -196,7 +178,7 @@ export class AgentRecordStore {
     });
   }
 
-  /** Move a root from accepted/queued to running without changing its history entry yet. */
+  /** Move a root from accepted/queued to running without changing its current projection. */
   beginSpawn(record: AgentRecord, startedAt = Date.now()): void {
     record.lifecycle.status = "running";
     record.lifecycle.startedAt = startedAt;
@@ -210,13 +192,14 @@ export class AgentRecordStore {
     record.lifecycle.completedAt = undefined;
   }
 
-  /** Apply the terminal result of an executed turn to record and history. */
+  /** Apply the terminal result of an executed turn to the current projection. */
   completeTurn(
     record: AgentRecord,
     execution: AgentExecutionSummary,
     outcome: TurnOutcome,
     completedAt = Date.now(),
   ): AgentLifecycleStatus {
+    if (!this.isCurrentExecution(record, execution)) return record.lifecycle.status;
     const status: AgentLifecycleStatus = record.lifecycle.status === "stopped"
       ? "stopped"
       : outcome.error !== undefined
@@ -232,7 +215,6 @@ export class AgentRecordStore {
     record.result = retainAgentText(outcome.responseText);
     record.error = retainAgentError(outcome.error);
     record.lifecycle.completedAt ??= completedAt;
-    this.capExecutionHistory(record);
     return status;
   }
 
@@ -244,6 +226,7 @@ export class AgentRecordStore {
     error?: string,
     completedAt = Date.now(),
   ): boolean {
+    if (!this.isCurrentExecution(record, execution)) return false;
     if (record.lifecycle.settled && execution.completedAt !== undefined) return false;
 
     execution.status = status;
@@ -255,83 +238,61 @@ export class AgentRecordStore {
     record.error = retainAgentError(error);
     record.lifecycle.completedAt = completedAt;
     record.lifecycle.settled = true;
-    this.capExecutionHistory(record);
     return true;
   }
 
   /** Mark an active runner stopped while leaving settlement to its completion callback. */
-  stopRunning(record: AgentRecord, stoppedAt = Date.now()): void {
+  stopRunning(
+    record: AgentRecord,
+    execution: AgentExecutionSummary,
+    stoppedAt = Date.now(),
+  ): boolean {
+    if (!this.isCurrentExecution(record, execution)) return false;
     record.lifecycle.status = "stopped";
     record.lifecycle.stoppedBy = "parent";
     record.lifecycle.completedAt = stoppedAt;
     record.result = undefined;
-    const activeExecution = this.activeExecution(record, "running");
-    if (activeExecution) {
-      activeExecution.status = "stopped";
-      activeExecution.completedAt ??= stoppedAt;
+    if (execution.status === "running") {
+      execution.status = "stopped";
+      execution.completedAt ??= stoppedAt;
     }
+    return true;
   }
 
   markSettled(record: AgentRecord): void {
     record.lifecycle.settled = true;
     this.capRetainedStrings(record);
-    this.capExecutionHistory(record);
+  }
+
+  isCurrentExecution(record: AgentRecord, execution: AgentExecutionSummary): boolean {
+    return this.records.get(record.id) === record && record.stats.currentExecution === execution;
   }
 
   activeExecution(
     record: AgentRecord,
     status?: "queued" | "running",
   ): AgentExecutionSummary | undefined {
-    const executions = record.stats.executions ?? [];
-    return executions.find((execution) =>
-      status === undefined
-        ? execution.status === "running" || execution.status === "queued"
-        : execution.status === status,
-    );
+    const execution = record.stats.currentExecution;
+    if (!execution) return undefined;
+    if (status !== undefined && execution.status !== status) return undefined;
+    return status === undefined && execution.status !== "running" && execution.status !== "queued"
+      ? undefined
+      : execution;
   }
 
-  /**
-   * Keep the newest completed summaries while preserving every active entry.
-   * Normally there is one active entry, but retaining all active entries makes
-   * this boundary safe for legacy or concurrently-observed record shapes too.
-   */
   private capRetainedStrings(record: AgentRecord): void {
     record.display.description = retainAgentDescription(record.display.description);
     if (record.result !== undefined) record.result = retainAgentText(record.result);
     if (record.error !== undefined) record.error = retainAgentError(record.error);
-    for (const execution of record.stats.executions ?? []) {
-      execution.prompt = typeof execution.prompt === "string"
-        ? retainExecutionPrompt(execution.prompt)
-        : "";
-      execution.responseText = execution.responseText === undefined
-        ? undefined
-        : retainAgentText(execution.responseText);
-      execution.error = retainAgentError(execution.error);
-    }
-  }
-
-  private capExecutionHistory(record: AgentRecord): void {
-    this.capRetainedStrings(record);
-    let executions = record.stats.executions;
-    if (!executions) return;
-
-    // Active entries are protected. Prune the oldest completed entry one at a
-    // time until both the existing completed-count bound and the aggregate
-    // UTF-8 text budget are satisfied. Array order is acceptance order, so the
-    // result is deterministic even when timestamps collide.
-    while (
-      executions.filter((execution) => !this.isActiveExecutionSummary(execution)).length > MAX_RETAINED_EXECUTION_SUMMARIES
-      || executionSummaryTextBytes(executions) > MAX_RETAINED_EXECUTION_SUMMARY_TEXT_BYTES
-    ) {
-      const oldestCompletedIndex = executions.findIndex((execution) => !this.isActiveExecutionSummary(execution));
-      if (oldestCompletedIndex < 0) break;
-      executions = executions.filter((_, index) => index !== oldestCompletedIndex);
-    }
-    record.stats.executions = executions;
-  }
-
-  private isActiveExecutionSummary(execution: AgentExecutionSummary): boolean {
-    return execution.status === "queued" || execution.status === "running";
+    const execution = record.stats.currentExecution;
+    if (!execution) return;
+    execution.prompt = typeof execution.prompt === "string"
+      ? retainExecutionPrompt(execution.prompt)
+      : "";
+    execution.responseText = execution.responseText === undefined
+      ? undefined
+      : retainAgentText(execution.responseText);
+    execution.error = retainAgentError(execution.error);
   }
 
 }

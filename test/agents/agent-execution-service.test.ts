@@ -7,6 +7,7 @@ import {
 } from "../../src/agents/agent-execution-service.js";
 import { AgentRecordStore } from "../../src/agents/agent-record-store.js";
 import { ExecutionTelemetry } from "../../src/agents/execution-telemetry.js";
+import type { AgentExecutionSummary } from "../../src/types.js";
 
 const state = vi.hoisted(() => ({
   runAgent: vi.fn(),
@@ -73,12 +74,67 @@ describe("AgentExecutionService", () => {
 
     await expect(continuation.caller.promise).rejects.toThrow(failure);
     expect(root.record.lifecycle).toMatchObject({ status: "error", settled: true });
-    expect(root.record.stats.executions?.at(-1)).toMatchObject({
+    expect(root.record.stats.currentExecution).toMatchObject({
       status: "error",
       error: "continuation setup failed",
     });
     expect(root.record.execution.session).toBe(root.session);
     expect(state.executeAgentTurn).toHaveBeenCalledOnce();
+    expect(service.pendingCount).toBe(0);
+  });
+
+  it("rejects a stale continuation submission without changing the current record or queue", async () => {
+    const { service, store, telemetry } = createService(1);
+    const root = completedRecord(store, telemetry, "stale submission root");
+    const current = root.record.stats.currentExecution!;
+    const beforeLifecycle = { ...root.record.lifecycle };
+    const beforeResult = root.record.result;
+    const beforeError = root.record.error;
+    const beforeSession = root.record.execution.session;
+    const beforePromise = root.record.execution.promise;
+    const staleExecution: AgentExecutionSummary = {
+      id: current.id,
+      kind: "continued",
+      prompt: "stale follow-up",
+      status: "queued",
+      startedAt: current.startedAt + 1,
+    };
+    const baseline = telemetry.beginExecution(staleExecution, root.record);
+    const caller = deferred<string>();
+    const staleTask: ContinueExecutionTask = {
+      kind: "continue",
+      id: root.id,
+      record: root.record,
+      execution: staleExecution,
+      request: {
+        record: root.record,
+        session: root.session,
+        executionId: staleExecution.id,
+        baseline,
+        prompt: staleExecution.prompt,
+        resolve: caller.resolve,
+        reject: caller.reject,
+        startedAt: staleExecution.startedAt,
+      },
+    };
+
+    expect(service.pendingCount).toBe(0);
+    service.submit(staleTask);
+    await expect(caller.promise).rejects.toThrow("no longer current");
+    expect(service.pendingCount).toBe(0);
+    expect(root.record.lifecycle).toEqual(beforeLifecycle);
+    expect(root.record.result).toBe(beforeResult);
+    expect(root.record.error).toBe(beforeError);
+    expect(root.record.execution.session).toBe(beforeSession);
+    expect(root.record.execution.promise).toBe(beforePromise);
+    expect(root.record.stats.currentExecution).toBe(current);
+    expect(service.shouldQueue()).toBe(false);
+
+    state.runAgent.mockResolvedValue(runResult("following task"));
+    const following = spawnWithCaller(store, telemetry, "following task", "running");
+    service.submit(following.task);
+    await expect(following.caller.promise).resolves.toBe("following task");
+    expect(state.runAgent).toHaveBeenCalledOnce();
     expect(service.pendingCount).toBe(0);
   });
 
@@ -119,10 +175,77 @@ describe("AgentExecutionService", () => {
 
     thirdRun.resolve(runResult("third complete"));
     await expect(third.caller.promise).resolves.toBe("third complete");
-    expect(first.created.record.stats.executions?.at(-1)?.status).toBe("error");
+    expect(first.created.record.stats.currentExecution?.status).toBe("error");
     expect(second.created.record.lifecycle.status).toBe("completed");
     expect(third.created.record.lifecycle.status).toBe("completed");
     expect(service.pendingCount).toBe(0);
+  });
+
+  it("rejects generation-99 callbacks and completion after generation-100 without releasing generation-101", async () => {
+    const { service, store, telemetry } = createService(1);
+    const root = completedRecord(store, telemetry, "generation root");
+    let generation = 0;
+    let staleCallbacks: any;
+    let stale: ReturnType<typeof continuationTask> | undefined;
+    state.executeAgentTurn.mockImplementation((_session: unknown, _prompt: string, options: any) => {
+      generation++;
+      if (generation === 99) staleCallbacks = options;
+      return Promise.resolve({ responseText: `generation-${generation}`, aborted: false });
+    });
+
+    for (let index = 1; index <= 100; index++) {
+      const current = continuationTask(store, telemetry, root, `generation-${index}`);
+      if (index === 99) stale = current;
+      service.submit(current.task);
+      await expect(current.caller.promise).resolves.toBe(`generation-${index}`);
+    }
+    expect(generation).toBe(100);
+    expect(stale).toBeDefined();
+
+    const liveTurn = deferred<{ responseText: string; aborted: boolean }>();
+    state.executeAgentTurn.mockReturnValueOnce(liveTurn.promise);
+    const live = continuationTask(store, telemetry, root, "generation-101");
+    service.submit(live.task);
+    const queued = spawnWithCaller(store, telemetry, "queued after stale", "queued");
+    service.submit(queued.task);
+
+    const beforeLifecycle = { ...root.record.lifecycle };
+    const beforeUsage = { ...root.record.stats.lifetimeUsage };
+    const beforeCacheRead = root.record.stats.cacheRead;
+    const beforeCompactionCount = root.record.stats.compactionCount;
+    const beforeReasons = root.record.stats.compactionReasons;
+    const beforeResult = root.record.result;
+    const beforeError = root.record.error;
+    const current = live.task.execution;
+    const currentPromise = live.caller.promise;
+    const retainedSession = root.session;
+
+    staleCallbacks.onAssistantUsage({ input: 1_000, output: 1_000, cacheWrite: 1_000, cacheRead: 1_000, cost: 1_000 });
+    staleCallbacks.onCompaction({ reason: "overflow", tokensBefore: 999 });
+    expect(() => (service as any).finishTurnExecution(
+      stale!.task,
+      { responseText: "stale result", aborted: false, error: "stale error" },
+      stale!.task.request.baseline,
+    )).not.toThrow();
+
+    expect(root.record.lifecycle).toEqual(beforeLifecycle);
+    expect(root.record.stats.currentExecution).toBe(current);
+    expect(root.record.stats.lifetimeUsage).toEqual(beforeUsage);
+    expect(root.record.stats.cacheRead).toBe(beforeCacheRead);
+    expect(root.record.stats.compactionCount).toBe(beforeCompactionCount);
+    expect(root.record.stats.compactionReasons).toBe(beforeReasons);
+    expect(root.record.result).toBe(beforeResult);
+    expect(root.record.error).toBe(beforeError);
+    expect(root.record.execution.promise).toBe(currentPromise);
+    expect(root.record.execution.session).toBe(retainedSession);
+    expect(retainedSession.dispose).not.toHaveBeenCalled();
+    expect(service.pendingCount).toBe(1);
+    expect(state.runAgent).not.toHaveBeenCalled();
+
+    state.runAgent.mockResolvedValue(runResult("queued after stale"));
+    liveTurn.resolve({ responseText: "generation-101", aborted: false });
+    await expect(live.caller.promise).resolves.toBe("generation-101");
+    await expect(queued.caller.promise).resolves.toBe("queued after stale");
   });
 
   it("settles an asynchronously failed continuation without losing its retained session", async () => {
@@ -137,7 +260,7 @@ describe("AgentExecutionService", () => {
 
     await expect(continuation.caller.promise).resolves.toBe("");
     expect(root.record.lifecycle).toMatchObject({ status: "error", settled: true });
-    expect(root.record.stats.executions?.at(-1)).toMatchObject({
+    expect(root.record.stats.currentExecution).toMatchObject({
       status: "error",
       error: "turn failed",
       responseText: "",
@@ -232,6 +355,44 @@ describe("AgentExecutionService", () => {
     expect(second.created.record.lifecycle.status).toBe("completed");
   });
 
+  it("retains callbacks from a cancelled continuation until settlement", async () => {
+    const turn = deferred<{ responseText: string; aborted: boolean }>();
+    let callbacks: any;
+    state.executeAgentTurn.mockImplementation((_session: unknown, _prompt: string, options: any) => {
+      callbacks = options;
+      return turn.promise;
+    });
+    const { service, store, telemetry } = createService(1);
+    const root = completedRecord(store, telemetry, "cancelled continuation root");
+    const parent = new AbortController();
+    const continuation = continuationTask(store, telemetry, root, "cancelled follow-up", "running", parent.signal);
+    service.submit(continuation.task);
+    const next = spawnWithCaller(store, telemetry, "after cancelled continuation", "queued");
+    service.submit(next.task);
+
+    parent.abort();
+    expect(root.record.lifecycle).toMatchObject({ status: "stopped", stoppedBy: "parent" });
+    callbacks.onAssistantUsage({ input: 7, output: 3, cacheWrite: 2, cacheRead: 5, cost: 0.25 });
+    callbacks.onCompaction({ reason: "threshold", tokensBefore: 321 });
+    expect(root.record.stats.lifetimeUsage).toMatchObject({ input: 7, output: 3, cacheWrite: 2, cost: 0.25 });
+    expect(root.record.stats.cacheRead).toBe(5);
+    expect(root.record.stats.compactionCount).toBe(1);
+
+    state.runAgent.mockResolvedValue(runResult("after cancelled continuation"));
+    turn.resolve({ responseText: "partial", aborted: true });
+    await expect(continuation.caller.promise).resolves.toBe("partial");
+    await expect(next.caller.promise).resolves.toBe("after cancelled continuation");
+
+    expect(root.record.lifecycle).toMatchObject({ status: "stopped", settled: true });
+    expect(root.record.stats.currentExecution).toMatchObject({
+      status: "stopped",
+      usage: { input: 7, output: 3, cacheWrite: 2, cacheRead: 5, cost: 0.25 },
+      compactionCount: 1,
+    });
+    expect(service.pendingCount).toBe(0);
+    expect(state.runAgent).toHaveBeenCalledOnce();
+  });
+
   it("drops stale queued records without consuming the released slot", async () => {
     const blockerRun = deferred<ReturnType<typeof runResult>>();
     const liveRun = deferred<ReturnType<typeof runResult>>();
@@ -243,12 +404,12 @@ describe("AgentExecutionService", () => {
     initialize(telemetry, staleCreated.record, staleCreated.execution);
     const live = spawnWithCaller(store, telemetry, "live", "queued");
     service.submit(blocker.task);
-    service.submit(spawnTask(staleCreated, staleAccepted));
+    const staleTask = spawnTask(staleCreated, staleAccepted);
+    service.submit(staleTask);
     service.submit(live.task);
 
     expect(service.finishUnstartedExecution(
-      staleCreated.record,
-      staleCreated.execution,
+      staleTask,
       "stopped",
       "stale queue entry",
     )).toBe(true);
@@ -297,7 +458,7 @@ describe("AgentExecutionService", () => {
     await expect(continuation.caller.promise).rejects.toThrow("Agent session shut down");
     await expect(queuedContinuation.caller.promise).rejects.toThrow("Agent session shut down");
     expect(queuedRoot.record.lifecycle).toMatchObject({ status: "stopped", settled: true });
-    expect(queuedRoot.record.stats.executions?.at(-1)).toMatchObject({
+    expect(queuedRoot.record.stats.currentExecution).toMatchObject({
       kind: "continued",
       status: "stopped",
     });
@@ -415,7 +576,7 @@ function completedRecord(
   created.record.execution.session = retainedSession;
   store.completeTurn(created.record, created.execution, { responseText: "initial response", aborted: false });
   store.markSettled(created.record);
-  telemetry.forgetExecution(created.execution.id);
+  telemetry.forgetExecution(created.execution);
   return { ...created, session: retainedSession };
 }
 
@@ -451,9 +612,9 @@ function continuationTask(
   signal?: AbortSignal,
 ): { task: ContinueExecutionTask; caller: ReturnType<typeof deferred<string>> } {
   const executionId = store.createExecutionId();
-  const baseline = telemetry.beginExecution(executionId, root.record);
   const caller = deferred<string>();
   const execution = store.createContinuation(root.record, executionId, prompt, status);
+  const baseline = telemetry.beginExecution(execution, root.record);
   root.record.execution.promise = caller.promise;
   return {
     task: {
@@ -479,7 +640,7 @@ function continuationTask(
 
 function initialize(telemetry: ExecutionTelemetry, record: any, execution: any): void {
   telemetry.initializeRecord(record);
-  telemetry.beginExecution(execution.id, record);
+  telemetry.beginExecution(execution, record);
 }
 
 function spawnTask(

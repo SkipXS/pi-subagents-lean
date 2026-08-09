@@ -109,18 +109,23 @@ export class AgentExecutionService {
   /** Submit a record whose lifecycle already reflects its slot decision. */
   submit(task: ExecutionTask): void {
     if (this.disposed) {
-      if (task.kind === "continue") task.request.reject(new Error("Agent session shut down"));
-      else task.resolve?.("");
+      this.settleTaskForShutdown(task);
       return;
     }
-    this.activeTasks.set(task.id, task);
-    if (task.record.lifecycle.status === "queued") {
-      this.scheduler.enqueue(task);
-      this.resources.bindParentAbortSignal(task.id, this.signalFor(task), () => this.cancel(task.id));
+    if (!this.hasCurrentRecordExecution(task)
+      || (this.activeTasks.has(task.id) && this.activeTasks.get(task.id) !== task)) {
+      this.settleTaskAsStale(task);
       return;
     }
 
-    this.resources.bindParentAbortSignal(task.id, this.signalFor(task), () => this.cancel(task.id));
+    this.activeTasks.set(task.id, task);
+    if (task.record.lifecycle.status === "queued") {
+      this.scheduler.enqueue(task);
+      this.resources.bindParentAbortSignal(task.id, this.signalFor(task), () => this.cancel(task));
+      return;
+    }
+
+    this.resources.bindParentAbortSignal(task.id, this.signalFor(task), () => this.cancel(task));
     if (task.record.lifecycle.status !== "running") {
       this.finishStoppedBeforeStart(task);
       return;
@@ -139,7 +144,7 @@ export class AgentExecutionService {
       }
 
       const failure = errorMessage(error);
-      this.finishUnstartedExecution(task.record, task.execution, "error", failure);
+      this.finishUnstartedExecution(task, "error", failure);
       task.request.reject(error instanceof Error ? error : new Error(failure));
       this.startQueuedEntries(this.scheduler.takeNext((entry) => this.canStartQueuedEntry(entry)));
     }
@@ -147,17 +152,17 @@ export class AgentExecutionService {
 
   /** Finish work that never reached a runner; no scheduler slot is owned. */
   finishUnstartedExecution(
-    record: AgentRecord,
-    execution: AgentExecutionSummary,
+    task: ExecutionTask,
     status: "stopped" | "error",
     error?: string,
   ): boolean {
-    const finished = this.store.finishUnstarted(record, execution, status, error);
+    if (!this.ownsTask(task)) return false;
+    const finished = this.store.finishUnstarted(task.record, task.execution, status, error);
     if (!finished) return false;
-    this.activeTasks.delete(record.id);
-    this.telemetry.finalizeUnstartedExecution(execution);
-    this.telemetry.forgetExecution(execution.id);
-    this.resources.clearParentAbortSignal(record.id);
+    if (this.activeTasks.get(task.id) === task) this.activeTasks.delete(task.id);
+    this.telemetry.finalizeUnstartedExecution(task.execution);
+    this.telemetry.forgetExecution(task.execution);
+    this.resources.clearParentAbortSignal(task.id);
     this.safeNotifySettled();
     return true;
   }
@@ -169,25 +174,48 @@ export class AgentExecutionService {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    for (const entry of this.scheduler.clear()) {
-      if (entry.kind === "continue") entry.request.reject(new Error("Agent session shut down"));
-      else entry.resolve?.("");
-    }
+    const clearedQueue = this.scheduler.clear();
     this.resources.clearParentAbortSignals();
+
+    // A stale queue entry may no longer be the task owned by its record. It
+    // still owns its caller's settlement, but it must not touch the record or
+    // scheduler state belonging to a newer generation.
+    for (const entry of clearedQueue) {
+      if (this.activeTasks.get(entry.id) !== entry) {
+        this.settleTaskForShutdown(entry);
+      }
+    }
+
     const retainedRecords = this.store.list();
     for (const record of retainedRecords) {
       const active = this.activeTasks.get(record.id);
-      if (record.lifecycle.status === "queued") {
+      if (active && active.record === record && this.hasCurrentRecordExecution(active)) {
+        if (record.lifecycle.status === "queued") {
+          this.finishUnstartedExecution(active, "stopped", "Agent session shut down");
+        } else if (record.lifecycle.status === "running") {
+          record.execution.abortController?.abort();
+          this.store.stopRunning(record, active.execution);
+          this.store.markSettled(record);
+        }
+        this.settleTaskForShutdown(active);
+        if (this.activeTasks.get(record.id) === active) this.activeTasks.delete(record.id);
+      } else {
+        // A stale task may still own a caller settlement, but shutdown must
+        // terminalize only the current projection before releasing resources.
+        if (active && active.record === record) {
+          this.settleTaskForShutdown(active);
+          if (this.activeTasks.get(record.id) === active) this.activeTasks.delete(record.id);
+        }
         const execution = this.store.activeExecution(record);
-        if (execution) this.finishUnstartedExecution(record, execution, "stopped", "Agent session shut down");
-      } else if (record.lifecycle.status === "running") {
-        record.execution.abortController?.abort();
-        this.store.stopRunning(record);
-        this.store.markSettled(record);
+        if (record.lifecycle.status === "running" && execution) {
+          record.execution.abortController?.abort();
+          this.store.stopRunning(record, execution);
+          this.store.markSettled(record);
+        } else if (record.lifecycle.status === "queued" && execution) {
+          this.store.finishUnstarted(record, execution, "stopped", "Agent session shut down");
+          this.telemetry.finalizeUnstartedExecution(execution);
+        }
       }
-      if (active?.kind === "continue") active.request.reject(new Error("Agent session shut down"));
-      else active?.resolve?.("");
-      this.activeTasks.delete(record.id);
       this.telemetry.forgetRecord(record);
       this.releaseExecution(record);
       this.store.remove(record.id);
@@ -215,9 +243,13 @@ export class AgentExecutionService {
       agentId: id,
       acceptedSpawn,
       signal: record.execution.abortController!.signal,
-      ...this.telemetry.createCallbacks(record, {}, execution.id),
+      ...this.telemetry.createCallbacks(
+        record,
+        { isCurrentExecution: () => this.isLiveTask(task) },
+        execution,
+      ),
       onSessionCreated: (session) => {
-        if (!this.telemetry.isCurrentRecord(record)) {
+        if (!this.isLiveTask(task)) {
           try { session.dispose(); } catch { /* stale setup cleanup is best effort */ }
           return;
         }
@@ -226,15 +258,14 @@ export class AgentExecutionService {
       },
     })
       .then(({ responseText, session, aborted }) => {
-        if (this.telemetry.isCurrentRecord(record)) record.execution.session = session;
-        this.finishTurnExecution(record, execution, { responseText, aborted });
+        if (this.isLiveTask(task)) record.execution.session = session;
+        this.finishTurnExecution(task, { responseText, aborted });
         acceptedSpawn = undefined;
         return responseText;
       })
       .catch((error) => {
         this.finishTurnExecution(
-          record,
-          execution,
+          task,
           { responseText: "", aborted: false, error: errorMessage(error) },
         );
         acceptedSpawn = undefined;
@@ -265,27 +296,30 @@ export class AgentExecutionService {
     this.store.beginContinuation(record, execution);
     record.execution.abortController = new AbortController();
     this.resources.clearParentAbortSignal(id);
-    this.resources.bindParentAbortSignal(id, signal, () => this.cancel(id));
+    this.resources.bindParentAbortSignal(id, signal, () => this.cancel(task));
 
     this.onStart?.(record);
     const promise = executeAgentTurn(session, promptForExecution, {
       signal: record.execution.abortController.signal,
-      ...this.telemetry.createCallbacks(record, { onToolActivity }, execution.id),
+      ...this.telemetry.createCallbacks(
+        record,
+        { onToolActivity, isCurrentExecution: () => this.isLiveTask(task) },
+        execution,
+      ),
       onTextDelta: (delta, fullText) => {
-        if (!this.telemetry.isActiveExecution(record, execution.id)) return;
+        if (!this.isLiveTask(task)) return;
         onTextDelta?.(delta, fullText);
       },
     })
       .then(({ responseText, aborted }) => {
-        this.finishTurnExecution(record, execution, { responseText, aborted }, baseline);
+        this.finishTurnExecution(task, { responseText, aborted }, baseline);
         promptForExecution = undefined;
         resolve(responseText);
         return responseText;
       })
       .catch((error) => {
         this.finishTurnExecution(
-          record,
-          execution,
+          task,
           { responseText: "", aborted: false, error: errorMessage(error) },
           baseline,
         );
@@ -301,46 +335,51 @@ export class AgentExecutionService {
   }
 
   private finishTurnExecution(
-    record: AgentRecord,
-    execution: AgentExecutionSummary,
+    task: ExecutionTask,
     outcome: { responseText: string; aborted: boolean; error?: string },
     baseline?: ExecutionBaseline,
   ): void {
-    if (this.disposed || this.store.get(record.id) !== record || record.stats.executions?.at(-1) !== execution) {
-      this.telemetry.forgetExecution(execution.id);
+    if (!this.isLiveTask(task)) {
+      this.telemetry.forgetExecution(task.execution);
       return;
     }
 
+    const { record, execution } = task;
     this.telemetry.observeContext(record, true);
     const completedAt = Date.now();
-    const delta = this.telemetry.delta(record, execution.id, baseline);
+    const delta = this.telemetry.delta(record, execution, baseline);
     execution.usage = delta?.usage;
     execution.compactionCount = delta?.compactionCount;
-    this.telemetry.forgetExecution(execution.id);
+    this.telemetry.forgetExecution(execution);
     this.onCost?.(execution.usage?.cost ?? 0);
     this.store.completeTurn(record, execution, outcome, completedAt);
-    this.activeTasks.delete(record.id);
 
-    this.finalizeCompletedExecution(record);
+    this.finalizeCompletedExecution(task);
     this.safeNotifySettled();
   }
 
-  private finalizeCompletedExecution(record: AgentRecord): void {
-    this.store.markSettled(record);
-    this.resources.clearParentAbortSignal(record.id);
+  private finalizeCompletedExecution(task: ExecutionTask): void {
+    if (!this.isLiveTask(task)) return;
+    this.store.markSettled(task.record);
+    this.resources.clearParentAbortSignal(task.id);
+    if (this.activeTasks.get(task.id) === task) this.activeTasks.delete(task.id);
     this.scheduler.releaseSlot();
     this.startQueuedEntries(this.scheduler.takeNext((entry) => this.canStartQueuedEntry(entry)));
   }
 
   private finishStoppedBeforeStart(task: ExecutionTask): void {
     const error = new Error(`Agent ${task.id.slice(0, 8)} was stopped`);
-    this.finishUnstartedExecution(task.record, task.execution, "stopped");
+    this.finishUnstartedExecution(task, "stopped");
     if (task.kind === "continue") task.request.reject(error);
     else task.resolve?.("");
   }
 
   private canStartQueuedEntry(entry: ExecutionTask): boolean {
-    return this.store.get(entry.id)?.lifecycle.status === "queued";
+    const record = this.store.get(entry.id);
+    return record === entry.record
+      && record.stats.currentExecution === entry.execution
+      && this.activeTasks.get(entry.id) === entry
+      && record.lifecycle.status === "queued";
   }
 
   /** Start scheduler-reserved entries while retaining FIFO and slot ownership. */
@@ -348,9 +387,9 @@ export class AgentExecutionService {
     const pending = [...entries];
     while (pending.length > 0) {
       const entry = pending.shift()!;
-      const record = this.store.get(entry.id);
-      if (!record || record.lifecycle.status !== "queued") {
+      if (!this.canStartQueuedEntry(entry)) {
         this.scheduler.releaseSlot();
+        this.settleTaskAsStale(entry);
         pending.push(...this.scheduler.takeNext((candidate) => this.canStartQueuedEntry(candidate)));
         continue;
       }
@@ -362,7 +401,7 @@ export class AgentExecutionService {
       } catch (error) {
         this.scheduler.releaseSlot();
         const failure = errorMessage(error);
-        this.finishUnstartedExecution(record, entry.execution, "error", failure);
+        this.finishUnstartedExecution(entry, "error", failure);
         if (entry.kind === "continue") entry.request.reject(new Error(failure));
         else entry.resolve?.("");
         pending.push(...this.scheduler.takeNext((candidate) => this.canStartQueuedEntry(candidate)));
@@ -370,32 +409,23 @@ export class AgentExecutionService {
     }
   }
 
-  private cancel(id: string): boolean {
-    const record = this.store.get(id);
-    if (!record) return false;
-    return this.cancelRecord(record);
-  }
-
-  private cancelRecord(record: AgentRecord): boolean {
+  private cancel(task: ExecutionTask): boolean {
+    if (!this.isLiveTask(task)) return false;
+    const { record } = task;
     const wasQueued = record.lifecycle.status === "queued";
     if (!wasQueued && record.lifecycle.status !== "running") return false;
 
-    const removed = wasQueued
-      ? this.scheduler.removeWhere((entry) => entry.id === record.id)
-      : [];
     if (wasQueued) {
+      const removed = this.scheduler.removeWhere((entry) => entry === task);
+      if (removed.length === 0) return false;
       record.lifecycle.stoppedBy = "parent";
-      const activeExecution = this.store.activeExecution(record);
-      if (!activeExecution) return false;
-      this.finishUnstartedExecution(record, activeExecution, "stopped");
-      const entry = removed[0];
-      if (entry?.kind === "continue") entry.request.reject(new Error(`Agent ${record.id.slice(0, 8)} was stopped`));
-      else entry?.resolve?.("");
+      if (!this.finishUnstartedExecution(task, "stopped")) return false;
+      this.settleTaskAsStopped(task);
       return true;
     }
 
     record.execution.abortController?.abort();
-    this.store.stopRunning(record);
+    if (!this.store.stopRunning(record, task.execution)) return false;
     this.resources.clearParentAbortSignal(record.id);
     return true;
   }
@@ -405,9 +435,43 @@ export class AgentExecutionService {
   }
 
   private discardFailedSpawn(task: SpawnExecutionTask): void {
-    this.resources.clearParentAbortSignal(task.id);
+    if (!this.ownsTask(task)) {
+      this.telemetry.forgetExecution(task.execution);
+      return;
+    }
+    this.resources.releaseExecution(task.record);
     this.telemetry.forgetRecord(task.record);
+    if (this.activeTasks.get(task.id) === task) this.activeTasks.delete(task.id);
     this.store.remove(task.id);
+  }
+
+  private hasCurrentRecordExecution(task: ExecutionTask): boolean {
+    return this.store.get(task.id) === task.record
+      && task.record.stats.currentExecution === task.execution;
+  }
+
+  /** Exact record, current projection, and active task ownership predicate. */
+  private ownsTask(task: ExecutionTask): boolean {
+    return this.hasCurrentRecordExecution(task) && this.activeTasks.get(task.id) === task;
+  }
+
+  private isLiveTask(task: ExecutionTask): boolean {
+    return !this.disposed && this.ownsTask(task);
+  }
+
+  private settleTaskForShutdown(task: ExecutionTask): void {
+    if (task.kind === "continue") task.request.reject(new Error("Agent session shut down"));
+    else task.resolve?.("");
+  }
+
+  private settleTaskAsStale(task: ExecutionTask): void {
+    if (task.kind === "continue") task.request.reject(new Error("Agent execution is no longer current"));
+    else task.resolve?.("");
+  }
+
+  private settleTaskAsStopped(task: ExecutionTask): void {
+    if (task.kind === "continue") task.request.reject(new Error(`Agent ${task.id.slice(0, 8)} was stopped`));
+    else task.resolve?.("");
   }
 
   private safeNotifySettled(): void {

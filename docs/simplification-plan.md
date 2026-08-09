@@ -54,9 +54,11 @@ Parent resumes after both settle
 - `AgentContinue` reuses only a successful settled retained root session. Exact
   IDs and unique prefixes are supported; ambiguous, missing, active, failed, or
   unavailable records are rejected.
-- Retained history keeps bounded prompt/response/error projections, usage,
-  compaction, kind, and status. The full caller response remains on the
-  foreground promise, separate from bounded record text.
+- Each record keeps one bounded current/latest execution projection with
+  explicit kind, status, prompt, response, usage, compaction, and terminal
+  error. A continuation replaces that projection while reusing the exact live
+  child session; the full caller response remains on the foreground promise,
+  separate from bounded record text.
 - Interactive rows retain escaped static content, metadata hydration, and
   coalesced invalidation while Pi owns the pending, success, and error visual
   lifecycle. All renderer paths remain timer-free.
@@ -69,17 +71,18 @@ The complete deferred delivery subsystem and its payload/diagnostic types are
 removed. Delivery state, claims, retries, timers, host message sending, and
 completion notifications are not represented in records or details. Static
 activity-footer and activity-observer code is removed because it has no active
-consumer. Execution summaries no longer duplicate caller text or carry mode
-labels. Root status/control execution is removed; parent cancellation and
-shutdown remain service-owned lifecycle paths.
+consumer. The current execution projection retains only bounded diagnostic text and an
+explicit `new`/`continued` kind. Root status/control execution is removed;
+parent cancellation and shutdown remain service-owned lifecycle paths.
 
 ## Validation expectations
 
 Focused tests cover exact schemas, unknown-property rejection, child exclusion,
 foreground promise identity and terminal races, concurrent calls, FIFO excess,
 parent cancellation, shutdown settlement, continuation validity and retention,
-full caller responses, deterministic history bounds, renderer New/Continued
-headers, Pi-owned lifecycle, escaping, metadata restoration, invalidation
-safety, live catalog/trust, worktree behavior, and package/Pi loading. Active
+full caller responses, current-projection bounds and generation ownership,
+renderer New/Continued headers, Pi-owned lifecycle, escaping, metadata
+restoration, invalidation safety, live catalog/trust, worktree behavior, and
+package/Pi loading. Active
 documentation and smoke contracts describe only the two foreground tools;
 released changelog history remains archival.

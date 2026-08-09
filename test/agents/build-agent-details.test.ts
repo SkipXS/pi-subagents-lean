@@ -233,23 +233,16 @@ describe("buildAgentDetails", () => {
 
   // --- per-execution continuation deltas ---
 
-  it("reports the exact continuation execution summary instead of cumulative totals", () => {
+  it("reports the exact current continuation projection instead of cumulative totals", () => {
     const record = makeRecord({
       stats: {
         ...makeRecord().stats,
-        executions: [
-          {
-            id: "exec-0", prompt: "initial", status: "completed",
-            startedAt: 1000, completedAt: 3000, responseText: "initial",
-            usage: { input: 100, output: 200, cacheWrite: 50, cacheRead: 75, cost: 0.01 },
-          },
-          {
-            id: "exec-1", prompt: "follow-up", status: "completed",
-            startedAt: 3000, completedAt: 4000, responseText: "follow-up",
-            usage: { input: 40, output: 15, cacheWrite: 5, cacheRead: 20, cost: 0.02 },
-            compactionCount: 2,
-          },
-        ],
+        currentExecution: {
+          id: "exec-1", prompt: "follow-up", kind: "continued", status: "completed",
+          startedAt: 3000, completedAt: 4000, responseText: "follow-up",
+          usage: { input: 40, output: 15, cacheWrite: 5, cacheRead: 20, cost: 0.02 },
+          compactionCount: 2,
+        },
       },
     });
     const details = buildAgentDetails(record, { includeStats: true });
@@ -281,12 +274,12 @@ describe("buildAgentDetails", () => {
     const record = makeRecord({
       stats: {
         ...makeRecord().stats,
-        executions: [{
-          id: "exec-0", prompt: "initial", status: "completed",
+        currentExecution: {
+          id: "exec-0", prompt: "initial", kind: "new", status: "completed",
           startedAt: 1000, completedAt: 5000, responseText: "initial",
           usage: { input: 100, output: 200, cacheWrite: 50, cacheRead: 75, cost: 0.01 },
           compactionCount: 1,
-        }],
+        },
       },
     });
     const details = buildAgentDetails(record, { includeStats: true });
@@ -307,14 +300,10 @@ describe("buildAgentDetails", () => {
     const record = makeRecord({
       stats: {
         ...makeRecord().stats,
-        executions: [{
-          id: "exec-0", prompt: "initial", status: "completed",
-          startedAt: 1000, completedAt: 3000, responseText: "initial",
-          compactionCount: 1,
-        }, {
-          id: "exec-1", prompt: "follow-up", status: "running",
+        currentExecution: {
+          id: "exec-1", prompt: "follow-up", kind: "continued", status: "running",
           startedAt: 3000,
-        }],
+        },
       },
     });
     const details = buildAgentDetails(record, { includeStats: true });
