@@ -17,6 +17,8 @@ export interface AgentRendererContext {
   state: Record<string, unknown>;
   lastComponent: PlaintextComponent | undefined;
   invalidate: () => void;
+  /** Whether the current result is an error. */
+  isError?: boolean;
 }
 
 export interface AgentRendererState {

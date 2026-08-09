@@ -48,6 +48,24 @@ export type { PlaintextComponent, AgentRendererContext };
 interface AgentResultLike {
   content?: unknown;
   details?: unknown;
+  isError?: boolean;
+}
+
+/**
+ * Project the successful foreground envelope for the interactive row only.
+ *
+ * The execute result deliberately keeps its canonical ID and Response label
+ * for the parent model. Only an exact, single text block with the ID held by
+ * the row metadata is safe to unwrap here; arrays containing other blocks and
+ * all non-matching text remain untouched.
+ */
+function stripInteractiveAgentResultEnvelope(content: unknown, agentId: string): unknown {
+  if (!Array.isArray(content) || content.length !== 1) return content;
+  const prefix = `Agent ID: ${agentId}\n\nResponse:\n`;
+  const [part] = content;
+  if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") return content;
+  if (!part.text.startsWith(prefix)) return content;
+  return [{ ...part, text: part.text.slice(prefix.length) }];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -128,8 +146,18 @@ export function renderAgentResult(
   const component = context.lastComponent instanceof AgentCallDetailsComponent
     ? context.lastComponent
     : new AgentCallDetailsComponent();
+  // Keep the raw envelope until the call renderer has observed this metadata
+  // generation. HTML export invalidates with a no-op, so its stale header must
+  // retain the canonical ID from the result body.
+  const resultContent = !partial
+    && context.isError !== true
+    && safeResult.isError !== true
+    && state.callVersion === state.version
+    && state.metadata?.agentId !== undefined
+    ? stripInteractiveAgentResultEnvelope(safeResult.content, state.metadata.agentId)
+    : safeResult.content;
   component.setText(formatAgentResultText(
-    safeResult.content,
+    resultContent,
     safeResult.details,
     !partial,
   ));

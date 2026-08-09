@@ -83,6 +83,95 @@ describe("Agent and AgentContinue row renderer", () => {
     ]);
   });
 
+  it("unwraps matching successful envelopes for Agent and AgentContinue rows", () => {
+    const agentId = "canonical-full-id";
+    const response = "response body\nwith a second line";
+    const raw = `Agent ID: ${agentId}\n\nResponse:\n${response}`;
+    const metadata = (kind: "new" | "continued", prompt: string) => ({
+      role: "reviewer",
+      agentId,
+      model: "provider/model",
+      thinking: "high",
+      prompt,
+      kind,
+    });
+
+    const agentContext = context({ agent: "reviewer", prompt: "inspect" });
+    const agentMetadata = metadata("new", "inspect");
+    agentContext.state[AGENT_RENDER_DETAILS_KEY] = agentMetadata;
+    renderAgentCall(agentContext.args, theme, agentContext);
+    const agentResult = renderAgentResult(
+      {
+        content: [{ type: "text", text: raw }],
+        details: { [AGENT_RENDER_DETAILS_KEY]: agentMetadata },
+      },
+      { isPartial: false },
+      theme,
+      { ...agentContext, lastComponent: undefined },
+    );
+    expect(lines(agentResult)).toEqual(["response body", "with a second line"]);
+    expect(lines(renderAgentCall(agentContext.args, theme, agentContext))[0]).toContain(
+      `Agent ID: ${agentId}`,
+    );
+
+    const continueContext = context({ agent_id: "agent-prefix", prompt: "continue" });
+    const continueMetadata = metadata("continued", "continue");
+    continueContext.state[AGENT_RENDER_DETAILS_KEY] = continueMetadata;
+    renderAgentContinueCall(continueContext.args, theme, continueContext);
+    const continueResult = renderAgentResult(
+      {
+        content: [{ type: "text", text: raw }],
+        details: { [AGENT_RENDER_DETAILS_KEY]: continueMetadata },
+      },
+      { isPartial: false },
+      theme,
+      { ...continueContext, lastComponent: undefined },
+    );
+    expect(lines(continueResult)).toEqual(["response body", "with a second line"]);
+    expect(lines(renderAgentContinueCall(continueContext.args, theme, continueContext))[0]).toContain(
+      `Agent ID: ${agentId}`,
+    );
+  });
+
+  it("does not unwrap partial, error, mismatched, or nonstandard content", () => {
+    const agentId = "canonical-full-id";
+    const raw = `Agent ID: ${agentId}\n\nResponse:\nresponse body`;
+    const details = {
+      [AGENT_RENDER_DETAILS_KEY]: {
+        role: "reviewer",
+        agentId,
+        prompt: "inspect",
+        kind: "new",
+      },
+    };
+    const base = context({ agent: "reviewer", prompt: "inspect" });
+    base.state[AGENT_RENDER_DETAILS_KEY] = details[AGENT_RENDER_DETAILS_KEY];
+    renderAgentCall(base.args, theme, base);
+    const render = (
+      content: unknown,
+      options: { isPartial?: boolean },
+      rowContext = base,
+    ) => lines(renderAgentResult(
+      { content, details },
+      options,
+      theme,
+      { ...rowContext, lastComponent: undefined },
+    )).join("\n");
+
+    expect(render(raw, { isPartial: false })).toBe(raw);
+    expect(render([{ type: "text", text: raw }], { isPartial: true })).toBe(raw);
+    expect(render([{ type: "text", text: raw }], { isPartial: false }, {
+      ...base,
+      isError: true,
+    })).toBe(raw);
+    expect(render([{ type: "text", text: raw.replace(agentId, "different-id") }], { isPartial: false }))
+      .toBe(raw.replace(agentId, "different-id"));
+    expect(render([
+      { type: "text", text: raw },
+      { type: "text", text: "additional block" },
+    ], { isPartial: false })).toBe(`${raw}\nadditional block`);
+  });
+
   it("leaves queued waits host-pending and preserves generic result text", () => {
     const ctx = context({ agent: "scout", prompt: "queued" });
     const call = renderAgentCall(ctx.args, theme, ctx);
