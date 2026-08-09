@@ -138,9 +138,9 @@ export function buildAgentPrompt(
   // Every agent gets the same replacement base; no parent system prompt is
   // loaded into the child session.
   const activeAgentTag = `<active_agent name="${config.name}"/>`;
-  const basePrompt = `You are a Pi, an expert coding sub-agent.\nYou have been invoked to handle a specific task autonomously.\n\n${envBlock}`;
+  const basePrompt = `You are a Pi, an expert coding sub-agent.\nYou have been invoked to handle a specific task autonomously.\n\n${SHARED_CHILD_CONTEXT_GUIDANCE}`;
   append(basePrompt);
-  append(`\n\n${SHARED_CHILD_CONTEXT_GUIDANCE}`);
+  append(`\n\n${envBlock}`);
 
   // Project context files (AGENTS.md) — placed after the shared prefix and
   // before the role instructions.
@@ -154,7 +154,9 @@ export function buildAgentPrompt(
     append("</project_context>");
   }
 
-  // active_agent goes AFTER the shared prefix (header + env + guidance + context) for KV cache.
+  // Identity + shared guidance are globally stable. Environment + project
+  // context are project/session-dependent but remain a shared prefix before
+  // role divergence for KV cache.
   append(`\n${activeAgentTag}\n\n<agent_instructions>\n${config.systemPrompt}\n</agent_instructions>`);
   if (skillMetadataPrompt !== undefined) append(skillMetadataPrompt);
 

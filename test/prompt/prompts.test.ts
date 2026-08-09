@@ -42,6 +42,23 @@ const EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE = `You do not have the parent's ful
 Ask only for information you cannot reasonably obtain from your delegated prompt, existing session context, repository, or available tools. State clearly what you need and why.
 
 The parent may resume this same session with AgentContinue. When resumed, continue from your existing work instead of restarting or repeating completed investigation.`;
+const IDENTITY = "You are a Pi, an expert coding sub-agent.\nYou have been invoked to handle a specific task autonomously.";
+
+function expectPromptSectionsInOrder(prompt: string, sections: readonly string[]): void {
+  const positions = sections.map((section) => prompt.indexOf(section));
+  expect(positions.every((position) => position >= 0)).toBe(true);
+  for (let index = 1; index < positions.length; index += 1) {
+    expect(positions[index]).toBeGreaterThan(positions[index - 1]!);
+  }
+}
+
+function firstDifference(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  for (let index = 0; index < limit; index += 1) {
+    if (left[index] !== right[index]) return index;
+  }
+  return left.length === right.length ? -1 : limit;
+}
 
 describe("buildAgentPrompt", () => {
   it("injects one exact shared context block at the same stable position for every role", () => {
@@ -60,7 +77,7 @@ describe("buildAgentPrompt", () => {
       expect(prompt.slice(start, start + EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE.length))
         .toBe(EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE);
       expect(prompt.indexOf(EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE, start + 1)).toBe(-1);
-      expect(start).toBeGreaterThan(prompt.indexOf("Platform: linux"));
+      expect(start).toBeLessThan(prompt.indexOf("# Environment"));
       expect(start).toBeLessThan(prompt.indexOf(`<active_agent name="${configs[index]!.name}"/>`));
       expect(prompt.indexOf("<active_agent")).toBeLessThan(prompt.indexOf("<agent_instructions>"));
       for (const marker of ["BLOCKED", "QUESTION", "NEEDS_CONTEXT", "WAITING_FOR_PARENT"]) {
@@ -68,20 +85,34 @@ describe("buildAgentPrompt", () => {
       }
     }
   });
-  it("always uses the replacement base and includes role instructions", () => {
+  it("orders the no-context prompt and ends after role instructions without skills", () => {
     const result = buildAgentPrompt(baseConfig, "/test/cwd", env);
 
-    expect(result).toContain("You are a Pi, an expert coding sub-agent.");
-    expect(result).toContain("You have been invoked to handle a specific task autonomously.");
-    expect(result).toContain(`<active_agent name="${baseConfig.name}"/>`);
-    expect(result).toContain("# Environment");
+    expectPromptSectionsInOrder(result, [
+      IDENTITY,
+      EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE,
+      "# Environment",
+      `<active_agent name="${baseConfig.name}"/>`,
+      "<agent_instructions>",
+    ]);
     expect(result).toContain("Working directory: /test/cwd");
     expect(result).toContain("Git repository: yes");
     expect(result).toContain("Branch: main");
     expect(result).toContain("Platform: linux");
-    expect(result).toContain("<agent_instructions>");
     expect(result).toContain(baseConfig.systemPrompt);
-    expect(result).toContain("</agent_instructions>");
+    expect(result.endsWith("</agent_instructions>")).toBe(true);
+  });
+
+  it("keeps the prefix through guidance stable while environment values differ", () => {
+    const first = buildAgentPrompt(baseConfig, "/test/cwd-one", env);
+    const second = buildAgentPrompt(baseConfig, "/test/cwd-two", { ...env, branch: "feature" });
+    const guidanceEnd = first.indexOf(EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE) + EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE.length;
+    const environmentStart = first.indexOf("# Environment");
+    const divergence = firstDifference(first, second);
+
+    expect(first.slice(0, guidanceEnd)).toBe(second.slice(0, guidanceEnd));
+    expect(divergence).toBeGreaterThanOrEqual(environmentStart);
+    expect(divergence).toBeLessThan(first.indexOf(`<active_agent name="${baseConfig.name}"/>`));
   });
 
   it("renders skill metadata in the available_skills block", () => {
@@ -176,14 +207,36 @@ describe("buildAgentPrompt — project context", () => {
     expect(result).toContain("</project_context>");
   });
 
-  it("places context before role instructions and skills after them", () => {
+  it("orders context and skills after the shared prefix and role sections", () => {
     const result = buildAgentPrompt(baseConfig, "/test/cwd", env, {
       contextFiles: [{ path: "/test/cwd/AGENTS.md", content: "Context" }],
       skillMetas: [{ name: "tdd", description: "TDD", location: "/skills/tdd", disableModelInvocation: false }],
     });
-    expect(result.indexOf(EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE)).toBeLessThan(result.indexOf("<project_context>"));
-    expect(result.indexOf("<project_context>")).toBeLessThan(result.indexOf("<agent_instructions>"));
-    expect(result.indexOf("<available_skills>")).toBeGreaterThan(result.indexOf("<agent_instructions>"));
+
+    expectPromptSectionsInOrder(result, [
+      IDENTITY,
+      EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE,
+      "# Environment",
+      "<project_context>",
+      `<active_agent name="${baseConfig.name}"/>`,
+      "<agent_instructions>",
+      "</agent_instructions>",
+      "<available_skills>",
+    ]);
+  });
+
+  it("keeps the complete project context prefix stable across roles", () => {
+    const contextFiles = [{ path: "/test/cwd/AGENTS.md", content: "Context" }];
+    const first = buildAgentPrompt({ ...baseConfig, name: "role-one" }, "/test/cwd", env, { contextFiles });
+    const second = buildAgentPrompt({ ...baseConfig, name: "role-two" }, "/test/cwd", env, { contextFiles });
+    const projectContextEndMarker = "</project_context>";
+    const projectContextEnd = first.indexOf(projectContextEndMarker) + projectContextEndMarker.length;
+    const activeAgentStart = first.indexOf("<active_agent");
+
+    expect(first.slice(0, projectContextEnd)).toBe(second.slice(0, projectContextEnd));
+    expect(first.slice(0, activeAgentStart)).toBe(second.slice(0, activeAgentStart));
+    expect(firstDifference(first, second)).toBeGreaterThanOrEqual(activeAgentStart);
+    expect(firstDifference(first, second)).toBeLessThan(first.indexOf("<agent_instructions>"));
   });
 
   it("omits empty context and escapes paths but not file content", () => {
