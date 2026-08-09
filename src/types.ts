@@ -85,19 +85,17 @@ export type AgentLifecycleStatus = "queued" | "running" | "completed" | "aborted
 export type AgentExecutionKind = "new" | "continued";
 
 /**
- * Per-execution summary retained on the record for each prompt execution on
- * an agent session (the initial spawn plus each AgentContinue execution). Each
- * entry carries its own prompt, response projection, usage delta, and
- * compaction data so continuation history stays inspectable after the session
- * is gone.
+ * Bounded projection of the current/latest prompt execution on an agent
+ * session. A continuation replaces the previous projection; the live session
+ * remains the source of the conversation transcript.
  */
 export interface AgentExecutionSummary {
-  /** Manager-assigned execution id; unique within the record. */
+  /** Manager-assigned execution id. */
   id: string;
   /** Retained prompt projection, capped at 64 KiB UTF-8; active tasks may hold the full accepted input separately. */
   prompt: string;
-  /** Optional so records persisted before this field was introduced remain valid. */
-  kind?: AgentExecutionKind;
+  /** Whether this projection describes the initial spawn or a continuation. */
+  kind: AgentExecutionKind;
   /** "queued" | "running" while active; terminal status after completion. */
   status: AgentLifecycleStatus;
   startedAt: number;
@@ -184,8 +182,8 @@ export interface AgentAccumulatedStats {
   contextStats?: ContextStats;
   /** Newest bounded compaction reasons; retained string fields are UTF-8-capped. */
   compactionReasons?: CompactionReasonMetadata[];
-  /** Per-execution summaries: the initial run plus every AgentContinue execution. */
-  executions?: AgentExecutionSummary[];
+  /** Bounded projection for the current/latest prompt execution. */
+  currentExecution?: AgentExecutionSummary;
 }
 
 

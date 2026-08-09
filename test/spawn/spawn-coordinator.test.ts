@@ -20,7 +20,7 @@ function recordWithPromise(promise: Promise<string>): AgentRecord {
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
       compactionCount: 0,
       cacheRead: 0,
-      executions: [{ id: "execution", prompt: "prompt", kind: "new", status: "running", startedAt: Date.now() }],
+      currentExecution: { id: "execution", prompt: "prompt", kind: "new", status: "running", startedAt: Date.now() },
     },
   };
 }

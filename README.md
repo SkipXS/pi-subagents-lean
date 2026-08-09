@@ -47,7 +47,7 @@ Description:
 
 | Parameter | Required | Meaning |
 |---|:---:|---|
-| `prompt` | yes | Self-contained task, constraints, and acceptance criteria. Maximum 256 KiB UTF-8; oversized input is rejected before queue/history allocation. |
+| `prompt` | yes | Self-contained task, constraints, and acceptance criteria. Maximum 256 KiB UTF-8; oversized input is rejected before queue/record allocation. |
 | `agent` | yes | Canonical catalog role name. Matching is case-insensitive. |
 | `description` | no | Short retained label; defaults from the first prompt line and is capped at 8 KiB UTF-8. |
 | `worktree_path` | no | Optional path validated against the parent repository. A trusted selected worktree may provide an invocation-local `.pi/agents/` overlay. |
@@ -116,12 +116,16 @@ work tools and never receives either root delegation tool, so children cannot
 start another child or access the parent conversation. Prompt handoffs are
 explicit and self-contained.
 
-Child sessions are kept in memory. `AgentContinue` reuses a retained in-memory
-child session during the parent session. The parent Pi session retains each
-`Agent`/`AgentContinue` call and its final result; the extension does not persist
-internal child calls, thinking, or intermediate transcript, and creates no child
-transcript files in system temp. The parent does not receive the child's full
-internal conversation.
+Child sessions are kept in memory. `AgentContinue` reuses the exact retained
+live child session during the parent session: continuation never replaces or
+disposes that session. The record retains one bounded current/latest execution
+projection, replaced for each prompt turn; it is not a child transcript or
+execution history. The projection keeps its explicit `kind`, status, timestamps,
+prompt, response, usage, compaction, and terminal-error fields with individual
+UTF-8 bounds. The parent Pi session retains each `Agent`/`AgentContinue` tool
+call and its final result; the extension does not persist internal child calls,
+thinking, or intermediate transcript, and creates no child transcript files in
+system temp. The parent does not receive the child's full internal conversation.
 
 ## Concurrency, batching, and FIFO queueing
 
@@ -130,7 +134,7 @@ for invalid values. It limits simultaneous root executions, including calls
 submitted in one parent turn. Independent calls in the same turn therefore
 start together until the limit is reached; excess accepted calls wait in one
 FIFO queue. The queue admits at most 128 waiting root executions. A full queue
-rejects the new call before it allocates retained history.
+rejects the new call before it allocates a retained record.
 
 Dependent stages must be issued sequentially: await the earlier result, then
 send the next prompt. Independent read-only stages should be issued as one
@@ -146,12 +150,14 @@ Parent session
 ## Retention, cancellation, and shutdown
 
 Up to 64 settled terminal root records are retained deterministically. Running,
-queued, and unsettled records are protected. Each record keeps at most 128
-completed execution summaries and a 1 MiB UTF-8 text budget for bounded prompts,
-responses, and errors; each retained prompt is capped at 64 KiB. Active work
-keeps its full accepted prompt only as long as execution requires it. Retained
-usage, compaction data, status, prompt, response, and error projections remain
-usable for continuation and diagnostics.
+queued, and unsettled records are protected. Each record keeps one bounded
+current/latest execution projection. A spawn creates a `new` projection and a
+continuation replaces it with a `continued` projection; old completed summaries
+are not retained. Prompt projections are capped at 64 KiB UTF-8, response
+projections at 64 KiB, and terminal errors at 8 KiB independently. Active work
+keeps its full accepted prompt only as long as execution requires it. Lifetime
+usage/context telemetry and compaction reasons remain cumulative record data,
+while the current projection supplies the latest turn's bounded diagnostics.
 
 The parent tool AbortSignal cancels queued work before it consumes a slot and
 aborts running child sessions. A cancelled tool returns an error rather than a

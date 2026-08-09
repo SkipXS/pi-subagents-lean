@@ -91,7 +91,7 @@ export class AgentManager {
       spawnPromise,
     );
     this.telemetry.initializeRecord(created.record);
-    this.telemetry.beginExecution(created.execution.id, created.record);
+    this.telemetry.beginExecution(created.execution, created.record);
 
     const task: SpawnExecutionTask = {
       kind: "spawn",
@@ -134,7 +134,6 @@ export class AgentManager {
     this.ensureQueueCapacity(queued);
 
     const executionId = this.records.createExecutionId();
-    const baseline = this.telemetry.beginExecution(executionId, record);
     let resolveRequest: ((result: string) => void) | undefined;
     let rejectRequest: ((error: Error) => void) | undefined;
     const promise = new Promise<string>((resolve, reject) => {
@@ -149,6 +148,7 @@ export class AgentManager {
       queued ? "queued" : "running",
       startedAt,
     );
+    const baseline = this.telemetry.beginExecution(execution, record);
     // Install this caller's promise before the queue/runner boundary. A later
     // continuation can safely replace it because the coordinator releases by
     // promise identity.

@@ -95,13 +95,16 @@ file/total limits, deep ancestor bounds, lstat identity races, and trust.
 Config tests cover the read-only 1 MiB pre-parse rejection, bounded override
 count, multibyte name/model strings, valid/missing/invalid/unreadable primary
 selection, non-destructive backup fallback, session reload, and frozen
-accepted snapshots. Record tests cover the 64 KiB prompt/response
-projections, full multi-MiB foreground response return, identity-safe promise
-release, shutdown cleanup, and deterministic 1 MiB summary-text pruning.
-Foreground execution lifecycle tests cover parent-signal binding and cleanup,
-exceptional runner setup, shutdown settlement, retained sessions, FIFO slot
-release, and late completion. The suite does not pretend to validate paid
-provider calls; headless extension lifecycle and package loading are covered.
+accepted snapshots. Record tests cover the one current execution projection, explicit `new`/
+`continued` kind, independent 64 KiB prompt/response and 8 KiB error bounds, full
+multi-MiB foreground response return, identity-safe promise release, shutdown
+cleanup, and 64-record eviction/session disposal. Telemetry tests cover
+execution-object identity and reused-ID stale callback rejection. Foreground
+execution lifecycle tests cover parent-signal binding and cleanup, exceptional
+runner setup, shutdown settlement, retained sessions, FIFO slot release,
+current-task/generation ownership, and late completion. The suite does not
+pretend to validate paid provider calls; headless extension lifecycle and
+package loading are covered.
 
 ## Required checks for `main`
 

@@ -9,6 +9,7 @@ vi.mock("../../src/agents/agent-runner.js", () => ({ runAgent: state.runAgent })
 vi.mock("../../src/agents/agent-session-runtime.js", () => ({ executeAgentTurn: state.executeAgentTurn }));
 
 import { AgentManager, MAX_QUEUED_ROOT_EXECUTIONS, QUEUE_QUOTA_ERROR } from "../../src/agents/agent-manager.js";
+import { buildAgentDetails } from "../../src/agents/agent-details.js";
 import { SpawnCoordinator } from "../../src/spawn/spawn-coordinator.js";
 
 function deferred<T>() {
@@ -84,12 +85,54 @@ describe("AgentContinue root control", () => {
     expect(() => manager.continueAgent(secondResult.agentId, "prompt")).toThrow("session is no longer available");
   });
 
-  it("rejects invalid prompts before allocating continuation history", async () => {
+  it("reuses one live session across 100 bounded current projections", async () => {
     const root = await completedRoot();
-    const before = root.record.stats.executions?.length;
+    const retainedSession = root.record.execution.session;
+    const initialExecution = root.record.stats.currentExecution;
+    let generation = 0;
+    state.executeAgentTurn.mockImplementation(async (_session: unknown, _prompt: string, options: any) => {
+      generation++;
+      options.onAssistantUsage?.({ input: 1, output: 2, cacheWrite: 3, cacheRead: 4, cost: 0.5 });
+      options.onCompaction?.({ reason: "threshold", tokensBefore: generation });
+      return { responseText: `response-${generation}`, aborted: false };
+    });
+
+    let previous = initialExecution;
+    for (let index = 1; index <= 100; index++) {
+      const continuation = manager.continueAgent(root.agentId, `follow-up-${index}`);
+      const current = continuation.record.stats.currentExecution;
+      expect(current).toBeDefined();
+      expect(current).not.toBe(previous);
+      expect(current?.kind).toBe("continued");
+      expect(continuation.record.execution.session).toBe(retainedSession);
+      await expect(continuation.promise).resolves.toBe(`response-${index}`);
+      expect(continuation.record.stats.currentExecution).toBe(current);
+      previous = current;
+    }
+
+    expect(root.record.stats).not.toHaveProperty("executions");
+    expect(root.record.stats.currentExecution).toBe(previous);
+    expect(root.record.stats.currentExecution?.status).toBe("completed");
+    expect(root.record.stats.currentExecution?.kind).toBe("continued");
+    expect(root.record.stats.compactionCount).toBe(100);
+    expect(root.record.stats.currentExecution?.compactionCount).toBe(1);
+    const details = buildAgentDetails(root.record, { includeStats: true });
+    expect(details.currentExecution).toMatchObject({ kind: "continued", status: "completed", compactionCount: 1 });
+    expect(details.compactions).toBe(1);
+    expect(details.compactionCount).toBe(1);
+    expect(details.input).toBe(1);
+    expect(details.output).toBe(2);
+    expect(root.record.stats.lifetimeUsage).toMatchObject({ input: 100, output: 200, cacheWrite: 300 });
+    expect(root.record.stats.cacheRead).toBe(400);
+    expect(root.record.stats.lifetimeUsage.cost).toBeCloseTo(50);
+  });
+
+  it("rejects invalid prompts before allocating a continuation projection", async () => {
+    const root = await completedRoot();
+    const before = root.record.stats.currentExecution;
     expect(() => manager.continueAgent(root.agentId, "   ")).toThrow("prompt is required");
     expect(() => manager.continueAgent(root.agentId, "x".repeat(256 * 1024 + 1))).toThrow("256 KiB");
-    expect(root.record.stats.executions?.length).toBe(before);
+    expect(root.record.stats.currentExecution).toBe(before);
   });
 
   it("enforces the bounded FIFO root queue for continuations and spawns", async () => {

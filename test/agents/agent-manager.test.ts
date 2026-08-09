@@ -170,6 +170,7 @@ describe("AgentManager foreground scheduling", () => {
     const spawned = coordinator.spawn(fakePi(), fakeCtx(), resolvedSpawnFixture({ prompt: "initial" }));
     initial.resolve(result("initial response"));
     const initialResult = await spawned;
+    const initialExecution = initialResult.record.stats.currentExecution;
     const continued = coordinator.continueAgent({
       agentId: initialResult.agentId.slice(0, 8),
       prompt: "follow up",
@@ -179,8 +180,9 @@ describe("AgentManager foreground scheduling", () => {
     const continuedResult = await continued;
 
     expect(continuedResult.responseText).toBe("complete follow-up");
-    expect(continuedResult.executionId).not.toBe(initialResult.record.stats.executions?.[0]?.id);
-    expect(continuedResult.record.stats.executions?.at(-1)?.kind).toBe("continued");
+    expect(continuedResult.executionId).not.toBe(initialExecution?.id);
+    expect(continuedResult.record.stats.currentExecution).not.toBe(initialExecution);
+    expect(continuedResult.record.stats.currentExecution?.kind).toBe("continued");
     expect(continuedResult.record.execution.promise).toBeUndefined();
   });
 });

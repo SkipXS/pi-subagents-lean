@@ -39,6 +39,8 @@ export interface ExecutionTelemetryCallbackOptions {
   onToolActivity?: (activity: ToolActivity) => void;
   onAssistantUsage?: (usage: AgentUsage) => void;
   onCompaction?: (info: CompactionInfo) => void;
+  /** Optional service-owned task predicate in addition to execution identity. */
+  isCurrentExecution?: () => boolean;
 }
 
 export interface ExecutionTelemetryCallbacks {
@@ -51,7 +53,7 @@ export interface ExecutionTelemetryCallbacks {
 export type RecordOwnershipGuard = (record: AgentRecord) => boolean;
 
 export class ExecutionTelemetry {
-  private readonly executionBases = new Map<string, ExecutionBaseline>();
+  private readonly executionBases = new WeakMap<AgentExecutionSummary, ExecutionBaseline>();
   private readonly deferredContextSamples = new WeakMap<AgentRecord, AgentSession>();
 
   constructor(private readonly ownsRecord: RecordOwnershipGuard) {}
@@ -63,9 +65,9 @@ export class ExecutionTelemetry {
   }
 
   /** Capture and retain the cumulative baseline for one accepted execution. */
-  beginExecution(executionId: string, record: AgentRecord): ExecutionBaseline {
+  beginExecution(execution: AgentExecutionSummary, record: AgentRecord): ExecutionBaseline {
     const baseline = this.snapshotBaseline(record);
-    this.executionBases.set(executionId, baseline);
+    this.executionBases.set(execution, baseline);
     return baseline;
   }
 
@@ -85,10 +87,10 @@ export class ExecutionTelemetry {
   /** Compute a non-negative per-execution delta from the retained baseline. */
   delta(
     record: AgentRecord,
-    executionId: string,
+    execution: AgentExecutionSummary,
     baseline?: ExecutionBaseline,
   ): ExecutionBaseline | undefined {
-    const base = baseline ?? this.executionBases.get(executionId);
+    const base = baseline ?? this.executionBases.get(execution);
     if (!base) return undefined;
     return {
       usage: {
@@ -102,13 +104,13 @@ export class ExecutionTelemetry {
     };
   }
 
-  forgetExecution(executionId: string): void {
-    this.executionBases.delete(executionId);
+  forgetExecution(execution: AgentExecutionSummary): void {
+    this.executionBases.delete(execution);
   }
 
   forgetRecord(record: AgentRecord): void {
     this.deferredContextSamples.delete(record);
-    for (const execution of record.stats.executions ?? []) this.forgetExecution(execution.id);
+    if (record.stats.currentExecution) this.forgetExecution(record.stats.currentExecution);
   }
 
   finalizeUnstartedExecution(execution: AgentExecutionSummary): void {
@@ -122,16 +124,18 @@ export class ExecutionTelemetry {
   }
 
   /** Reject callbacks from an old execution after a continuation is accepted. */
-  isActiveExecution(record: AgentRecord, executionId: string): boolean {
-    return this.ownsRecord(record) && record.stats.executions?.at(-1)?.id === executionId;
+  isActiveExecution(record: AgentRecord, execution: AgentExecutionSummary): boolean {
+    return this.ownsRecord(record) && record.stats.currentExecution === execution;
   }
 
   createCallbacks(
     record: AgentRecord,
     options: ExecutionTelemetryCallbackOptions = {},
-    executionId?: string,
+    execution?: AgentExecutionSummary,
   ): ExecutionTelemetryCallbacks {
-    const isActive = (): boolean => executionId === undefined || this.isActiveExecution(record, executionId);
+    const isActive = (): boolean =>
+      (execution === undefined || this.isActiveExecution(record, execution))
+      && (options.isCurrentExecution?.() ?? true);
     return {
       onToolActivity: (activity) => {
         if (!isActive()) return;
@@ -141,7 +145,7 @@ export class ExecutionTelemetry {
         if (!isActive()) return;
         this.addUsage(record, usage);
         options.onAssistantUsage?.(usage);
-        this.deferContextSample(record, executionId);
+        this.deferContextSample(record, execution, options.isCurrentExecution);
       },
       onSupplementalUsage: (usage) => {
         if (!isActive()) return;
@@ -211,7 +215,11 @@ export class ExecutionTelemetry {
     if (typeof snapshot.usingSubscription === "boolean") record.stats.usingSubscription = snapshot.usingSubscription;
   }
 
-  private deferContextSample(record: AgentRecord, executionId?: string): void {
+  private deferContextSample(
+    record: AgentRecord,
+    execution?: AgentExecutionSummary,
+    isCurrentExecution?: () => boolean,
+  ): void {
     const session = record.execution.session;
     if (!session) return;
     const pending = this.deferredContextSamples.get(record);
@@ -223,7 +231,8 @@ export class ExecutionTelemetry {
       this.deferredContextSamples.delete(record);
       if (!this.isCurrentRecord(record) || record.lifecycle.settled || record.lifecycle.status !== "running") return;
       if (record.execution.session !== session) return;
-      if (executionId !== undefined && !this.isActiveExecution(record, executionId)) return;
+      if (execution !== undefined && !this.isActiveExecution(record, execution)) return;
+      if (isCurrentExecution && !isCurrentExecution()) return;
       this.observeContext(record);
     });
   }

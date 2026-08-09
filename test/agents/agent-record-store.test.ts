@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  AgentRecordStore,
-  MAX_RETAINED_EXECUTION_SUMMARY_TEXT_BYTES,
-} from "../../src/agents/agent-record-store.js";
+import { AgentRecordStore } from "../../src/agents/agent-record-store.js";
 import {
   MAX_RETAINED_EXECUTION_PROMPT_BYTES,
   utf8ByteLength,
@@ -14,7 +11,7 @@ function makeStore() {
   return new AgentRecordStore({ createId: () => `id-${++id}` });
 }
 
-describe("AgentRecordStore foreground history", () => {
+describe("AgentRecordStore current execution projection", () => {
   it("retains bounded response projections while the caller may keep the full promise result", () => {
     const store = makeStore();
     const accepted = acceptedSpawnFixture({ prompt: "initial" });
@@ -30,23 +27,29 @@ describe("AgentRecordStore foreground history", () => {
     expect(created.record.result).not.toBe(full);
     expect(Buffer.byteLength(created.record.result!, "utf8")).toBeLessThanOrEqual(64 * 1024);
     expect(created.execution.responseText).toBe(created.record.result);
+    expect(created.record.stats.currentExecution).toBe(created.execution);
     expect(["delivered", "Text"].join("") in created.execution).toBe(false);
   });
 
-  it("keeps continuation history usable and records kind, prompt, status, usage, and compaction", () => {
+  it("keeps the spawn projection through settlement and replaces it for continuation", () => {
     const store = makeStore();
     const created = store.createSpawnRecord(acceptedSpawnFixture(), "running", new AbortController());
-    store.completeTurn(created.record, created.execution, { responseText: "initial", aborted: false });
+    const initial = created.execution;
+
+    store.completeTurn(created.record, initial, { responseText: "initial", aborted: false });
     store.markSettled(created.record);
+    expect(created.record.stats.currentExecution).toBe(initial);
+    expect(initial.kind).toBe("new");
 
     const continuation = store.createContinuation(created.record, "continuation", "follow up", "running");
+    expect(created.record.stats.currentExecution).toBe(continuation);
+    expect(created.record.stats.currentExecution).not.toBe(initial);
     continuation.usage = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 5 };
     continuation.compactionCount = 1;
     store.completeTurn(created.record, continuation, { responseText: "continued", aborted: false });
     store.markSettled(created.record);
 
-    expect(created.record.stats.executions).toHaveLength(2);
-    expect(created.record.stats.executions?.[1]).toMatchObject({
+    expect(created.record.stats.currentExecution).toMatchObject({
       id: "continuation",
       prompt: "follow up",
       kind: "continued",
@@ -55,72 +58,37 @@ describe("AgentRecordStore foreground history", () => {
       usage: continuation.usage,
       compactionCount: 1,
     });
+    expect("executions" in created.record.stats).toBe(false);
   });
 
-  it("prunes oldest completed summaries deterministically while protecting active entries", () => {
+  it("keeps prompt, response, and error bounds independently", () => {
     const store = makeStore();
-    const created = store.createSpawnRecord(acceptedSpawnFixture(), "running", new AbortController());
-    store.completeTurn(created.record, created.execution, { responseText: "initial", aborted: false });
-    store.markSettled(created.record);
-
-    for (let i = 0; i < 130; i++) {
-      const execution = store.createContinuation(created.record, `execution-${i}`, `prompt-${i}`, "running");
-      store.completeTurn(created.record, execution, { responseText: "response".repeat(2_000), aborted: false });
-      store.markSettled(created.record);
-    }
-
-    expect(created.record.stats.executions!.length).toBeLessThanOrEqual(128);
-    expect(created.record.stats.executions!.at(-1)?.id).toBe("execution-129");
-    expect(created.record.stats.executions!.every((execution) => execution.status !== "queued" && execution.status !== "running")).toBe(true);
-  });
-
-  it("enforces the exact aggregate UTF-8 execution-history budget", () => {
-    const store = makeStore();
-    const created = store.createSpawnRecord(acceptedSpawnFixture(), "running", new AbortController());
-    store.completeTurn(created.record, created.execution, { responseText: "initial", aborted: false });
-    store.markSettled(created.record);
-
-    const largePrompt = "😀".repeat(16 * 1024);
-    const largeResponse = "界".repeat(32 * 1024);
-    for (let i = 0; i < 24; i++) {
-      const execution = store.createContinuation(created.record, `execution-${i}`, `${largePrompt}tail`, "running", i + 2);
-      store.completeTurn(created.record, execution, { responseText: largeResponse, aborted: false }, i + 100);
-      store.markSettled(created.record);
-    }
-
-    const active = store.createContinuation(
-      created.record,
-      "execution-active",
-      "x".repeat(256 * 1024),
-      "queued",
-      1_000,
+    const created = store.createSpawnRecord(
+      acceptedSpawnFixture({ prompt: "😀".repeat(20_000) }),
+      "running",
+      new AbortController(),
     );
-    const executions = created.record.stats.executions ?? [];
-    const textBytes = executions.reduce((total, execution) => total
-      + utf8ByteLength(execution.prompt)
-      + (execution.responseText ? utf8ByteLength(execution.responseText) : 0)
-      + (execution.error ? utf8ByteLength(execution.error) : 0), 0);
 
-    expect(textBytes).toBeLessThanOrEqual(MAX_RETAINED_EXECUTION_SUMMARY_TEXT_BYTES);
-    expect(utf8ByteLength(active.prompt)).toBeLessThanOrEqual(MAX_RETAINED_EXECUTION_PROMPT_BYTES);
-    expect(executions).toContain(active);
-    expect(executions.some((execution) => execution.id === "execution-0")).toBe(false);
-    expect(executions.at(-1)).toBe(active);
+    expect(utf8ByteLength(created.execution.prompt)).toBeLessThanOrEqual(MAX_RETAINED_EXECUTION_PROMPT_BYTES);
+    const response = "界".repeat(80_000);
+    const error = "🚀".repeat(8_000);
+    store.completeTurn(created.record, created.execution, { responseText: response, aborted: false, error });
+    store.markSettled(created.record);
+
+    const current = created.record.stats.currentExecution!;
+    expect(utf8ByteLength(current.prompt)).toBeLessThanOrEqual(64 * 1024);
+    expect(utf8ByteLength(current.responseText!)).toBeLessThanOrEqual(64 * 1024);
+    expect(utf8ByteLength(current.error!)).toBeLessThanOrEqual(8 * 1024);
+    expect(current.responseText).toContain("[TRUNCATED]");
+    expect(current.error).toContain("[TRUNCATED]");
   });
 
-  it("does not evict a queued or running summary when capping history", () => {
+  it("only reports the current execution as active", () => {
     const store = makeStore();
     const created = store.createSpawnRecord(acceptedSpawnFixture(), "running", new AbortController());
-    store.completeTurn(created.record, created.execution, { responseText: "initial", aborted: false });
+    expect(store.activeExecution(created.record, "running")).toBe(created.execution);
+    store.completeTurn(created.record, created.execution, { responseText: "done", aborted: false });
     store.markSettled(created.record);
-    const active = store.createContinuation(created.record, "active", "active prompt", "running");
-
-    for (let i = 0; i < 130; i++) {
-      const execution = store.createContinuation(created.record, `done-${i}`, `done prompt ${i}`, "running");
-      store.completeTurn(created.record, execution, { responseText: "done", aborted: false });
-      store.markSettled(created.record);
-    }
-
-    expect(created.record.stats.executions).toContain(active);
+    expect(store.activeExecution(created.record)).toBeUndefined();
   });
 });

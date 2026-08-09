@@ -39,7 +39,7 @@ function record(status = "completed"): any {
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
       cacheRead: 0,
       compactionCount: 0,
-      executions: [{ id: "execution", prompt: "initial", kind: "new", status, startedAt: 1 }],
+      currentExecution: { id: "execution", prompt: "initial", kind: "new", status, startedAt: 1 },
     },
   };
 }

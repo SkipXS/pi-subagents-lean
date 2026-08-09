@@ -17,7 +17,7 @@ relevant state, constraints, scope, and acceptance criteria.
 
 Resumes one successfully completed and settled retained root session. It accepts
 an exact canonical ID or a unique prefix, validates the ID and prompt before
-lookup/history allocation, publishes canonical metadata, and awaits the new
+lookup/record allocation, publishes canonical metadata, and awaits the new
 turn. It reuses the retained in-memory session, model, and working directory.
 
 **ResolvedSpawn / AcceptedSpawn**
@@ -44,19 +44,23 @@ selected work tools and always excludes `Agent` and `AgentContinue`.
 
 **Agent record**
 
-The parent-owned flat record retains lifecycle state, display metadata, session
-handles, cumulative usage/context telemetry, and bounded execution history. Each
-history entry retains `kind`, `status`, timestamps, prompt, response projection,
-usage, compaction count, and terminal error. There
-is no execution delivery projection or execution-mode metadata.
+The parent-owned flat record retains lifecycle state, display metadata, the
+exact live child-session handle, cumulative usage/context telemetry, and one
+bounded current/latest execution projection. A spawn creates a `new` projection;
+each continuation replaces it with a `continued` projection. The projection
+retains its kind, status, timestamps, prompt, response, usage, compaction count,
+and terminal error, with prompt/response/error bounds applied independently; old
+execution summaries are not retained. Continuation never replaces or disposes
+the live child session. The parent Pi session persists each tool call and final
+result, while the extension does not persist the child's internal transcript.
+There is no execution delivery projection or execution-mode metadata.
 
 At most 64 settled terminal records are retained. Queued, running, and
 unsettled records are protected. Safe eviction is deterministic and disposes
-session resources, so an old continuation ID may later become unavailable. A
-record keeps at most 128 completed execution summaries and a 1 MiB UTF-8 text
-budget; retained prompts are capped at 64 KiB and responses/errors retain their
-existing UTF-8 bounds. The full caller response travels through the exact
-foreground promise and is released by identity after consumption.
+session resources, so an old continuation ID may later become unavailable. The
+full caller response travels through the exact foreground promise and is
+released by identity after consumption; lifetime totals remain cumulative on the
+record while details read the current projection for the latest turn.
 
 **Foreground coordinator**
 
