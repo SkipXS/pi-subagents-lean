@@ -13,30 +13,38 @@ registered. Root lifecycle state is composed through the process-local shell;
 Before every parent turn:
 
 ```text
-before_agent_start
+before_agent_start (before every parent turn)
   -> refresh configured discovery sources
   -> trust-scoped live agent catalog
-  -> extension-owned parent-only orchestration prompt
+  -> non-empty visible catalog: inject extension-owned parent-only block
+  -> empty visible catalog: remove the old owned block
 ```
 
-The orchestration block advertises visible role names and descriptions and
-explains delegation and handoff rules. It is regenerated from the live catalog
-for the parent and is not copied into child prompts.
+The orchestration handler and policy run before every parent turn. The
+extension-owned parent-only block advertises visible role names and descriptions
+only when the visible trust-scoped catalog is non-empty; an empty catalog
+removes the prior owned block. It is not copied into child prompts.
 
 A new `Agent` follows this boundary:
 
 ```text
-role / trust / cwd / model / context / tools / skills / extensions preflight
+role / trust / effective cwd/worktree / model/thinking / prompt/caller contract /
+resource-selection policy preflight
   -> immutable ResolvedSpawn
   -> manager creates immutable AcceptedSpawn
   -> FIFO root scheduler
+  -> runner setup after slot acquisition under frozen policy/trust
+  -> bounded context + Skills + Extensions + tool mapping
   -> isolated child AgentSession
   -> complete foreground result
 ```
 
-Preflight validates the repository-bound worktree, resolves the role against a
-trust-appropriate catalog, captures project trust, loads tunables, and selects
-resources. The accepted contract is not reinterpreted while queued.
+Preflight/acceptance freezes the resolved role, project trust, effective cwd and
+worktree selection, resolved model/thinking, prompt/caller contract, and
+resource-selection policy. After a scheduler slot is acquired, runner setup uses
+that frozen policy/trust to materialize bounded context, Skills, Extensions, and
+the effective tool mapping. The accepted contract is not reinterpreted while
+queued.
 `AgentContinue` resolves one exact or unique-prefix retained root, requires a
 successful settled record with a live session, and sends its new prompt to that
 same `AgentSession` through normal FIFO capacity.
@@ -52,18 +60,20 @@ These inputs are intentionally separate:
   criteria; parent and sibling history is not injected.
 - **Automatically loaded context files** are bounded `AGENTS.md`, `AGENTS.MD`,
   `CLAUDE.md`, and `CLAUDE.MD` candidates for a new child. The global AgentDir
-  candidate is first, followed by trusted project ancestors in root-to-cwd
-  order. Within each directory, candidates are tried in that priority and the
-  first acceptable one is selected; unsafe, oversized, changing, or otherwise
-  rejected candidates fall through to later names. Untrusted calls do not
-  inspect project ancestors.
+  candidate is first, followed by bounded filesystem ancestors of the effective
+  cwd in root-to-cwd order for trusted calls. Within each directory, candidates
+  are tried in that priority and the first acceptable one is selected; unsafe,
+  oversized, changing, or otherwise rejected candidates fall through to later
+  names. Untrusted calls do not inspect project ancestors.
 - **Retained child conversation** is the live in-memory Pi `AgentSession`.
   `AgentContinue` reuses it and does not reload context files or create a new
   session. Pi may compact older conversation semantically.
-- **Provider/Pi cache telemetry** is usage data such as `cacheRead`,
-  `cacheWrite`, and the derived cache rate. It describes prompt-cache
-  accounting, not session continuity and never means that continuation is a
-  cache hit.
+- **Provider/Pi cache telemetry** is usage data such as `cacheRead` and
+  `cacheWrite`; in continuation details they may be current-execution deltas.
+  `latestCacheHitRate` is cumulative and derived as cumulative `cacheRead` /
+  (cumulative prompt-accounting `input` + `cacheRead` + `cacheWrite`). This is
+  prompt-cache telemetry, not session continuity, and never means that
+  continuation is a cache hit.
 - **Internal caches** are bounded process-local discovery caches for agent
   catalogs, skills, extension/package lookup, and resource fingerprints. They
   are optimizations, not child history or user-visible session storage.
@@ -81,16 +91,17 @@ races.
 ## Resource and lifecycle ownership
 
 Bundled defaults plus user definitions form the parent catalog; trusted shared,
-project, and explicitly selected trusted-worktree `.pi/agents/` resources are
-overlays. A selected worktree overlay is invocation-local and never mutates the
-parent catalog. `agent.disableDefaultAgents` controls bundled-role discovery.
+project, and explicitly selected trusted invocation `<selected effective cwd>/.pi/agents/`
+resources are overlays. A selected effective-cwd overlay is invocation-local and
+never mutates the parent catalog. `agent.disableDefaultAgents` controls bundled-role
+discovery.
 
 Role Markdown controls tools, extensions, skills, exclusions, model, thinking,
 and the role system prompt. Persistent per-agent model/thinking settings are
 resolved above effective Markdown and the parent session, then frozen in the
-accepted contract. Skills use the bounded asynchronous catalog; extensions are
-filtered by positive selection followed by exclusions. Root delegation tools
-are always excluded from children.
+accepted contract. Runner setup applies the Skills policy through the bounded
+asynchronous catalog and filters Extensions/tool mapping under the frozen trust
+snapshot. Root delegation tools are always excluded from children.
 
 `AgentManager` owns records, retention, continuation lookup, and total counts.
 `AgentExecutionService` owns runner tasks, parent cancellation, shutdown, and

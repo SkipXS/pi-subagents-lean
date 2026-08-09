@@ -12,7 +12,7 @@ Use Pi `>=0.82.0 <0.83.0` (Pi `0.82.x`). Install the pinned first release with P
 pi install npm:pi-subagents-lean@0.4.0
 ```
 
-For a project-local installation, use `pi install -l` with the same pinned package. To try it without installing, pass `npm:pi-subagents-lean@0.4.0` to Pi's extension option. There is no daemon or background worker; Pi owns the parent session, tool calls, and result presentation.
+For a project-local installation, use `pi install -l` with the same pinned package. To try it without installing, pass `npm:pi-subagents-lean@0.4.0` to Pi's extension option. There is no background Agent execution or long-lived Agent daemon; short-lived Skills discovery Workers may still run. Pi owns the parent session, tool calls, and result presentation.
 
 ## Why use it?
 
@@ -61,7 +61,7 @@ Starts a new isolated root child and waits for its complete foreground result.
 
 | Parameter | Required | Meaning |
 |---|:---:|---|
-| `prompt` | yes | Non-empty task and handoff; at most 256 KiB of UTF-8 text. |
+| `prompt` | yes | Prompt text; at most 256 KiB of UTF-8 text. |
 | `agent` | yes | Catalog role name; matching is case-insensitive. |
 | `description` | no | Short retained label; omitted values derive from the first prompt line. |
 | `worktree_path` | no | Path in the parent's Git repository, validated before the child starts. |
@@ -89,7 +89,7 @@ The bundled Markdown definitions are the catalog's default roles; their role fil
 | `reviewer` | Independent correctness, regression, security, and contract review | None; read-only |
 | `verifier` | Reproduction, validation, and reporting of a bounded check | None; read-only |
 
-Parent orchestration is always on: before each parent turn it refreshes a live, trust-scoped catalog and adds role descriptions to the **parent-only** system prompt. It is not copied into children. The parent owns decomposition, sequencing, reconciliation, integration, validation, and the final answer.
+Parent orchestration policy is always active: before each parent turn, its handler refreshes a live, trust-scoped catalog. It injects the extension-owned **parent-only** block only when that visible catalog is non-empty; an empty catalog removes the old owned block. The block is not copied into children. The parent owns decomposition, sequencing, reconciliation, integration, validation, and the final answer.
 
 ## Scheduling and parallel work
 
@@ -116,15 +116,15 @@ A realistic workflow is: submit `scout` and `architect` together; reconcile thei
 
 ## Isolation, context, trust, and worktrees
 
-A child is an AsyncLocalStorage-isolated Pi session. It receives only its accepted role configuration, selected work tools, model, thinking level, skills, extensions, and prompt. It does not receive the parent transcript, parent tool history, sibling output, or parent-only orchestration.
+A child is an AsyncLocalStorage-isolated Pi session. It does not receive the parent transcript, parent tool history, sibling output, or parent-only orchestration. Preflight/acceptance freezes the resolved role, trust, effective cwd and worktree selection, resolved model/thinking, prompt/caller contract, and resource-selection policy. After a scheduler slot is acquired, runner setup materializes bounded context, selected Skills/Extensions, and the effective tool mapping under that frozen policy and trust.
 
-Every new `Agent` loads supported context files through the bounded trust-aware loader. It checks the global AgentDir candidate first, then trusted project ancestors from root to the effective working directory. In each directory it tries `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` in priority order and selects the first acceptable candidate; an unsafe, oversized, changing, or otherwise rejected candidate falls through to the next name. File, total, and ancestor limits apply, and rejected files are never silently trusted.
+Every new `Agent` loads supported context files through the bounded trust-aware loader. It checks the global AgentDir candidate first, then the bounded filesystem ancestors of the effective cwd in root-to-cwd order for trusted calls. In each directory it tries `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` in priority order and selects the first acceptable candidate; an unsafe, oversized, changing, or otherwise rejected candidate falls through to the next name. File, total, and ancestor limits apply, and rejected files are never silently trusted.
 
 An untrusted invocation receives the global candidate only and does not inspect project ancestors or project-controlled catalogs/skills. A trusted invocation may use project/shared resources. `AgentContinue` does not reload context files; it keeps the retained child session and existing conversation. Pi may compact that conversation semantically, so continuation promises neither infinite context nor verbatim retention of every old turn.
 
-`worktree_path` must resolve inside the parent's repository (primary checkout, linked worktree, or subdirectory). In a trusted invocation, an explicitly selected worktree may contribute an invocation-local `<worktree>/.pi/agents/` overlay. Other worktrees are not crawled automatically, and selection does not grant trust independently. This is a repository/discovery boundary, not an OS sandbox: normal child Pi tools still determine what can be read or written.
+`worktree_path` must resolve inside the parent's repository (primary checkout, linked worktree, or subdirectory). In a trusted invocation, the selected effective cwd may contribute an invocation-local `<selected effective cwd>/.pi/agents/` overlay; for a selected subdirectory, this is not necessarily the worktree root. Other worktrees are not crawled automatically, and selection does not grant trust independently. This is a repository/discovery boundary, not an OS sandbox: normal child Pi tools still determine what can be read or written.
 
-The live role catalog combines bundled defaults with user-global definitions and, only under project trust, shared/project definitions. A selected trusted worktree overlay is resolved for that invocation and never becomes a session-global catalog entry.
+The live role catalog combines bundled defaults with user-global definitions and, only under project trust, shared/project definitions. A selected trusted effective-cwd overlay is resolved for that invocation and never becomes a session-global catalog entry.
 
 ## Configuration
 
@@ -142,7 +142,7 @@ The extension reads the manually maintained `~/.pi/agent/subagents-lean.json` fi
 - `concurrency.default` controls simultaneous root executions and accepts only `1..64`; invalid values use `4`.
 - `agents.<name>.model` and `.thinking` are per-role overrides. For each field, persisted settings win over effective Agent Markdown, which wins over the parent session. An unavailable model falls through to the lower-precedence model, and the selected model normalizes unsupported thinking.
 
-Configuration is read-only to the extension and reloads for a new Pi session. Each accepted spawn freezes its resolved model/thinking and resource contract, so later edits affect later calls only. Model and thinking are not public `Agent` parameters.
+Configuration is read-only to the extension and reloads for a new Pi session. Each accepted spawn freezes its resolved role, trust, effective cwd/worktree selection, model/thinking, prompt/caller contract, and resource-selection policy, so later edits affect later calls only. After a scheduler slot is acquired, runner setup materializes bounded context, Skills, Extensions, and tool mapping under that frozen policy/trust. Model and thinking are not public `Agent` parameters.
 
 ### Skills and Extensions
 
@@ -154,7 +154,7 @@ Agent Markdown controls selection: `skills: false` omits metadata, `skills: true
 
 Pi owns pending, success, and error presentation. The extension supplies static row metadata, complete prompts/responses, canonical ID, role, model, thinking, `Run: New`/`Run: Continued`, and useful details. Interactive rows may display provider/Pi usage fields `input`, `output`, `cacheRead`, `cacheWrite`, `latestCacheHitRate`, `cost`, context utilization, and compaction counts; headless paths use the normal Pi result path.
 
-`cacheRead`, `cacheWrite`, and the derived cache-rate field describe provider/Pi prompt-cache accounting when reported. They are telemetry, not a promise of cost or speed, and are separate from the retained `AgentSession`: session continuity is never a cache hit. Bounded process-local catalog, skill, and resource caches are internal discovery optimizations, not child history.
+`cacheRead`/`cacheWrite` in continuation details may be current-execution deltas; `latestCacheHitRate` is cumulative and derived as cumulative `cacheRead` / (cumulative prompt-accounting `input` + `cacheRead` + `cacheWrite`). These are provider/Pi prompt-cache telemetry, not session continuity: a continuation is never a cache hit. Bounded process-local catalog, skill, and resource caches are internal discovery optimizations, not child history.
 
 Pi compaction keeps a usable semantic summary when a child context is reduced. The retained session is the conversation source; the record's current/latest execution projection is only the latest bounded result/diagnostic view. A continuation replaces that projection while cumulative usage and compaction telemetry remain. It does not create child transcript history in the extension.
 
@@ -174,7 +174,7 @@ follow-up.
 
 - Provider credentials, model availability, pricing, and actual cache behavior belong to Pi and the selected provider.
 - Children do not automatically see parent or sibling information; include evidence in the initial prompt or a later `AgentContinue`.
-- There is no background execution or separate delivery/status surface.
+- There is no background Agent execution or separate delivery/status surface; short-lived Skills discovery Workers may still run.
 - Worktree validation is not a security sandbox; the parent must review delegated writes and final results.
 - Retention is bounded and in-memory; an evicted or shut-down child cannot be continued.
 

@@ -13,11 +13,13 @@ Dynamic catalogs, model choices, thinking levels, scheduling, trust, and
 resource selections are resolved internally. They are not runtime-generated
 enums or public tool parameters. The schemas reject unknown properties.
 
-Parent orchestration is mandatory. Before every parent turn, the extension
-refreshes the trust-scoped live catalog and replaces its owned orchestration
-block in the parent system prompt. This parent-only block is the automatic
-catalog of available roles; it is not injected into child sessions. The fixed
-tool schema and the live catalog therefore have separate responsibilities.
+Parent orchestration policy and its handler are mandatory. Before every parent
+turn, the extension refreshes the trust-scoped live catalog and updates the
+parent system prompt: it injects the extension-owned parent-only block only
+when the visible catalog is non-empty, and removes the prior owned block when
+it is empty. This parent-only block is the automatic catalog of available roles;
+it is not injected into child sessions. The fixed tool schema and the live
+catalog therefore have separate responsibilities.
 
 ## Why
 
