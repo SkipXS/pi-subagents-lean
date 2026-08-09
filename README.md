@@ -5,17 +5,31 @@
 
 Lightweight, isolated foreground delegation for [Pi](https://pi.dev). Give a specialist a bounded task, let it work in its own Pi session, and receive its complete result in the current turn. The parent remains responsible for planning, decisions, integration, and the final answer.
 
-This is the first public npm package release, `0.4.0`; the publicly visible `v0.1`–`v0.3` Git tags were internal checkpoints. The extension deliberately exposes exactly two tools: `Agent` and `AgentContinue`.
+The current package version is `0.4.0`; the `v0.1`–`v0.3` Git tags were internal checkpoints. Until the first public release is tagged and published, install directly from GitHub. The extension deliberately exposes exactly two tools: `Agent` and `AgentContinue`.
 
 ## Requirements and installation
 
-Use Pi `>=0.82.0 <0.83.0` (Pi `0.82.x`). Install the pinned first release with Pi's package manager:
+Use Pi `>=0.82.0 <0.83.0` (Pi `0.82.x`). GitHub is currently the installation source:
+
+Global installation:
 
 ```bash
-pi install npm:pi-subagents-lean@0.4.0
+pi install git:github.com/SkipXS/pi-subagents-lean
 ```
 
-For a project-local installation, use `pi install -l` with the same pinned package. To try it without installing, pass `npm:pi-subagents-lean@0.4.0` to Pi's extension option. There is no background Agent execution or long-lived Agent daemon; short-lived Skills discovery Workers may still run. Pi owns the parent session, tool calls, and result presentation.
+Project-local installation:
+
+```bash
+pi install -l git:github.com/SkipXS/pi-subagents-lean
+```
+
+Temporary use without installing:
+
+```bash
+pi -e git:github.com/SkipXS/pi-subagents-lean
+```
+
+There is no background Agent execution or long-lived Agent daemon; short-lived Skills discovery Workers may still run. Pi owns the parent session, tool calls, and result presentation.
 
 ## Why use it?
 
@@ -112,18 +126,22 @@ For example, save this as `~/.pi/agent/agents/api-reviewer.md` for a global role
 ---
 name: api-reviewer
 description: Read-only API compatibility and regression review.
-tools: [read, grep, bash]
-extensions: false
-skills: false
+tools: [read, grep, bash, tavily/*]
+exclude_tools: [tavily/web_crawl]
+extensions: [tavily, telemetry]
+exclude_extensions: [telemetry]
+skills: [api-contracts, security-review, legacy-api]
+exclude_skills: [legacy-api]
 model: provider/model-id
 thinking: high
+hidden: false
 ---
 
 Review only the delegated API change. Compare public contracts, compatibility,
 tests, and migration impact. Report evidence-backed findings; do not edit files.
 ```
 
-`name` and `description` identify the role in the parent catalog; the body is its system prompt. `tools`, `extensions`, `skills`, `model`, and `thinking` are optional. The new or edited definition is considered on the next parent-turn catalog refresh.
+The `tavily`, `telemetry`, `tavily/*`, and skill names above are illustrative selectors, not bundled resources; replace them with names available in your Pi installation. `name` and `description` identify the role in the parent catalog; the body is its system prompt. Supported optional fields are `tools`, `exclude_tools`, `extensions`, `exclude_extensions`, `skills`, `exclude_skills`, `model`, `thinking`, and `hidden`. The new or edited definition is considered on the next parent-turn catalog refresh.
 
 Model and thinking resolve independently for each accepted `Agent` call:
 
@@ -225,9 +243,18 @@ The extension reads the manually maintained `~/.pi/agent/subagents-lean.json` fi
 
 ```json
 {
-  "agent": { "disableDefaultAgents": false },
-  "concurrency": { "default": 4 },
-  "agents": { "reviewer": { "model": "provider/model-id", "thinking": "high" } }
+  "agent": {
+    "disableDefaultAgents": false
+  },
+  "concurrency": {
+    "default": 4
+  },
+  "agents": {
+    "reviewer": {
+      "model": "provider/model-id",
+      "thinking": "high"
+    }
+  }
 }
 ```
 
@@ -237,11 +264,18 @@ The extension reads the manually maintained `~/.pi/agent/subagents-lean.json` fi
 
 Configuration is read-only to the extension and reloads for a new Pi session. Each accepted spawn freezes its resolved role, trust, effective cwd/worktree selection, model/thinking, prompt/caller contract, and resource-selection policy, so later edits affect later calls only. After a scheduler slot is acquired, runner setup materializes bounded context, Skills, Extensions, and tool mapping under that frozen policy/trust. Model and thinking are not public `Agent` parameters.
 
-### Skills and Extensions
+### Resource selection
 
-Agent Markdown controls selection: `skills: false` omits metadata, `skills: true` advertises the bounded discovered catalog, and an explicit list advertises those names in order. `exclude_skills` subtracts after selection. Metadata is discovered asynchronously and bounded; a child does not perform a second unbounded skill scan.
+Positive selection fields (`tools`, `extensions`, and `skills`) accept `true` or `all`, `false` or `none`, or name lists written as arrays (for example, `[read, grep]`) or comma-separated lists (for example, `read, grep`). In a minimal new definition, omitted `extensions` and `skills` resolve to `false`; omitted fields in an override inherit from lower layers. Exclusion fields accept lists and are applied after the corresponding positive selection.
 
-`extensions: false` loads none, `true` loads discovered extensions, and an explicit list selects extension/package names. `exclude_extensions` subtracts from that selection. Extension tools can then be selected by role tool policy; root `Agent` and `AgentContinue` are always excluded from children. Missing resources do not broaden access.
+| Fields | Behavior |
+|---|---|
+| `tools`, `extensions`, `skills` | Select all, none, or the named candidates. `extensions` filters which discovered extensions are retained and bound to the child; `skills` controls which bounded skill metadata is advertised. |
+| `exclude_tools`, `exclude_extensions`, `exclude_skills` | Subtract the listed resources after selection. Lists may be arrays or comma-separated values. |
+
+Builtin tool names are exactly `read`, `bash`, `edit`, `write`, `grep`, and `find`; omitting `tools` in a minimal new definition or setting it to `true`/`all` exposes all available registered builtins. Extension tool selectors may be bare registered names (`web_search`) or `extension/*` globs such as `tavily/*`. `exclude_tools: [tavily/*]` hides matching tools while leaving the extension available for hooks and other behavior. `exclude_extensions: [tavily]` removes it from the set bound to the child, including its tools and hooks, but discovery may already have imported its code; use `extensions: false` to skip normal extension discovery entirely.
+
+`skills: false`/`none` omits skill metadata, `true`/`all` advertises the bounded discovered catalog, and a list advertises those names in order; `exclude_skills` subtracts after selection. Missing resources do not broaden access, and `Agent` and `AgentContinue` are always unavailable to children.
 
 ## Results, usage, compaction, and retention
 
@@ -284,4 +318,4 @@ bun run typecheck:test
 bun run test
 ```
 
-CI enforces minimum coverage of 79% statements, 74% branches, 75% functions, and 81% lines, plus stricter per-file gates for critical modules. The package entry is `./src/index.ts`; the five bundled Markdown role files are part of the package. Repository coverage, package, and release checks are documented in [the coverage policy](https://github.com/SkipXS/pi-subagents-lean/blob/v0.4.0/docs/coverage.md) and [the release checklist](https://github.com/SkipXS/pi-subagents-lean/blob/v0.4.0/docs/releasing.md).
+CI enforces minimum coverage of 79% statements, 74% branches, 75% functions, and 81% lines, plus stricter per-file gates for critical modules. The package entry is `./src/index.ts`; the five bundled Markdown role files are part of the package. Repository coverage, package, and release checks are documented in [the coverage policy](https://github.com/SkipXS/pi-subagents-lean/blob/main/docs/coverage.md) and [the release checklist](https://github.com/SkipXS/pi-subagents-lean/blob/main/docs/releasing.md).
