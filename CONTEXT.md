@@ -10,8 +10,11 @@ skills, extensions, and optional trusted worktree.
 **Agent**
 
 Starts one context-isolated root session. Its prompt cannot rely on parent
-conversation, parent tool results, or peer output. The prompt must carry all
-relevant state, constraints, scope, and acceptance criteria.
+conversation, parent tool results, or peer output. The prompt is self-contained
+by default and must carry all relevant state, constraints, scope, and acceptance
+criteria; a child may selectively ask for missing parent context when it would
+materially help and cannot reasonably obtain it from its prompt, session,
+repository, or tools.
 
 **AgentContinue**
 
@@ -106,10 +109,16 @@ frontmatter descriptions remain bounded; malformed or oversized inputs fail
 closed. An immutable trust snapshot controls project catalogs, context files,
 skills, and worktree overlays for the whole accepted execution.
 
-Agent prompts are explicit handoffs. The parent owns planning, decomposition,
-sequencing, reconciliation, integration, validation, and the final answer.
-Independent read-only stages should be submitted as one foreground batch when
-useful; dependent stages must wait for their prerequisite result.
+Agent prompts are explicit, self-contained handoffs by default. The extension
+does not automatically inject a complete parent transcript, tool history, or
+peer context. A child may request only materially useful missing context,
+clarification, evidence, or a decision and should state why; when possible, the
+parent resolves it from available evidence and uses `AgentContinue` to resume
+the same retained session instead of replacing the child merely for asking.
+The parent owns planning, decomposition, sequencing, reconciliation,
+integration, validation, and the final answer. Independent read-only stages
+should be submitted as one foreground batch when useful; dependent stages must
+wait for their prerequisite result.
 
 ## Public contract
 

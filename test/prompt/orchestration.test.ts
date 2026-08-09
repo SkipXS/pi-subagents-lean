@@ -14,6 +14,14 @@ import {
 import type { AgentConfig } from "../../src/agents/types.ts";
 import { DEFAULT_AGENTS } from "../../src/agents/default-agents.ts";
 
+const EXPECTED_PARENT_CONTEXT_GUIDANCE = `Agents may ask for additional context, clarification, evidence, or decisions that are not available in their session.
+
+Resolve the request from your conversation context, tools, repository evidence, or peer-agent results when possible. Ask the user only when their input is genuinely needed.
+
+Then resume the same agent with AgentContinue, providing the requested information and any newly relevant evidence. Do not replace an agent merely because it asked for information.`;
+
+const EXPECTED_AGENT_CONTINUE_GUIDANCE = `AgentContinue resumes the same retained session. Provide the requested answer or new instructions plus any relevant parent or peer evidence the agent has not seen. Do not repeat context already available in that session unless needed.`;
+
 function agent(name: string, description: string, hidden = false): AgentConfig {
   return { name, description, hidden, systemPrompt: "" };
 }
@@ -30,29 +38,48 @@ describe("parent orchestration prompt", () => {
     expect(prompt).toContain("`reviewer` — Review changes carefully.");
     expect(prompt).toContain("`shipper` — Prepare release notes");
     expect(prompt).not.toContain("internal");
-    expect(prompt).toBe(`${ORCHESTRATION_PROMPT_MARKER}
-Delegate substantive work; handle small, obvious, low-risk tasks directly when scope is known and a few focused tool calls suffice. Direct work may include targeted reads, simple fact checks, minor single-location edits, synthesis, and bounded follow-ups.
-
-Delegate broad discovery, root-cause investigation, cross-component design, uncertain or multiple changes, independent review, or substantial verification. If scope or risk is unclear, use the matching role. Use only roles that add value; never force a full pipeline.
-
-Own planning, decomposition, sequencing, decisions, result reconciliation, integration, validation, and the final response. For large tasks, investigate first, then split work into bounded, non-overlapping stages instead of handing one agent the whole request.
-
-New agents lack parent history/tool results and peer output. For substantive spawns, use concise, decision-relevant sections: Goal; State/evidence/decisions; Scope/files/symbols; Constraints/non-goals; Acceptance criteria; Expected result.
-
-Do not duplicate delegated work. Re-enter the same area only for incomplete or conflicting results or a bounded follow-up. Never run concurrent writers or overlapping changes. Give the same writer at most one focused correction per subsystem; then take over or re-plan with a new owner.
-
-Run dependent stages sequentially. Parallelize independent read-only work by issuing multiple foreground Agent calls in the same turn; Pi submits the batch concurrently and the configured root limit controls execution.
-
-AgentContinue reuses a finished session; send new instructions plus unseen parent/peer evidence. Running, queued, stopped, aborted, or failed agents cannot be continued.
-
-For external APIs, lifecycle/concurrency ordering, and integrations, require installed or upstream evidence and a representative real sequence; synthetic mocks alone are insufficient for critical paths.
-
-Do not repeat broad review by default. If repeated review is justified, set acceptance criteria and a blocker bar, and validate findings without scope expansion. After two independent no-blocker reviews and no material change, stop unless checks fail or new evidence appears.
-Agents: \`reviewer\` — Review changes carefully.; \`shipper\` — Prepare release notes
-${ORCHESTRATION_PROMPT_END_MARKER}`);
+    expect(prompt).toContain(EXPECTED_PARENT_CONTEXT_GUIDANCE);
+    expect(prompt).toContain(EXPECTED_AGENT_CONTINUE_GUIDANCE);
+    expect(prompt).toContain("Fresh agents lack parent history/tool results/peer output.");
+    expect(prompt).toContain("Self-contained handoffs: Goal; Current state/evidence/decisions; Scope; Constraints/non-goals; Acceptance criteria; Expected result.");
+    expect(prompt).toContain("direct known-scope, low-risk work: targeted reads/simple checks, minor focused edits, synthesis/bounded follow-ups.");
+    expect(prompt).toContain("unclear scope/risk calls for matching roles");
+    expect(prompt).toContain("Own planning/decomposition/sequencing, decisions/result reconciliation");
+    expect(prompt).toContain("never hand an agent the whole task");
+    expect(prompt).toContain("Batch independent read-only foreground Agent calls in one turn; Pi submits under configured root concurrency limit.");
+    expect(prompt).toContain("Same writer: one focused correction/subsystem");
+    expect(prompt).toContain("two independent no-blocker reviews with no material change");
+    expect(prompt).toContain("Agents: `reviewer` — Review changes carefully.; `shipper` — Prepare release notes");
+    expect(prompt.indexOf(EXPECTED_PARENT_CONTEXT_GUIDANCE)).toBeLessThan(prompt.indexOf("Agents: "));
+    expect(prompt.indexOf(EXPECTED_AGENT_CONTINUE_GUIDANCE)).toBeLessThan(prompt.indexOf("Agents: "));
+    expect(prompt).not.toContain("AgentContinue reuses a finished session;");
 
     registerAgents(new Map([["reviewer", agent("reviewer", "Review changes carefully.")]]), { disableDefaultAgents: true });
     expect(buildOrchestrationPrompt(getAvailableAgents())).not.toContain("shipper");
+  });
+
+  it("keeps stable guidance before dynamic catalogs without introducing state markers", () => {
+    const prompts = [
+      buildOrchestrationPrompt(DEFAULT_AGENTS.values())!,
+      buildOrchestrationPrompt([
+        ...DEFAULT_AGENTS.values(),
+        agent("custom", "A custom role"),
+      ])!,
+    ];
+    const parentStart = prompts.map((prompt) => prompt.indexOf(EXPECTED_PARENT_CONTEXT_GUIDANCE));
+
+    expect(new Set(parentStart).size).toBe(1);
+    for (const prompt of prompts) {
+      const continueStart = prompt.indexOf(EXPECTED_AGENT_CONTINUE_GUIDANCE);
+      const catalogStart = prompt.indexOf("Agents: ");
+      const start = prompt.indexOf(EXPECTED_PARENT_CONTEXT_GUIDANCE);
+      expect(prompt.slice(start, start + EXPECTED_PARENT_CONTEXT_GUIDANCE.length))
+        .toBe(EXPECTED_PARENT_CONTEXT_GUIDANCE);
+      expect(prompt.indexOf(ORCHESTRATION_PROMPT_MARKER)).toBeLessThan(start);
+      expect(start).toBeLessThan(continueStart);
+      expect(continueStart).toBeLessThan(catalogStart);
+      expect(prompt).not.toMatch(/\b(BLOCKED|QUESTION|NEEDS_CONTEXT|WAITING_FOR_PARENT)\b/);
+    }
   });
 
   it("keeps every bundled role visible within the parent prompt budget", () => {
@@ -64,7 +91,7 @@ ${ORCHESTRATION_PROMPT_END_MARKER}`);
   });
 
   it("keeps bundled and custom roles visible within the expanded catalog capacity", () => {
-    const customAgents = Array.from({ length: 10 }, (_, i) =>
+    const customAgents = Array.from({ length: 17 }, (_, i) =>
       agent(`custom-${i.toString().padStart(2, "0")}`, `Specialized role ${i} for bounded project work.`),
     );
     const agents = [...DEFAULT_AGENTS.values(), ...customAgents];
@@ -73,6 +100,11 @@ ${ORCHESTRATION_PROMPT_END_MARKER}`);
     for (const { name } of agents) expect(prompt).toContain(`\`${name}\` —`);
     expect(prompt).not.toContain("omitted");
     expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(MAX_ORCHESTRATION_PROMPT_LENGTH);
+    expect(buildOrchestrationPrompt([
+      ...agents,
+      agent("custom-17", "Specialized role 17 for bounded project work."),
+    ])).toContain("omitted");
+    expect(MAX_ORCHESTRATION_CATALOG_LENGTH).toBeGreaterThanOrEqual(1824);
   });
 
   it("bounds names, descriptions, catalog, agents, and total prompt with deterministic overflow", () => {

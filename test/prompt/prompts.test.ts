@@ -3,7 +3,9 @@ import {
   buildAgentPrompt,
   MAX_CHILD_SYSTEM_PROMPT_BYTES,
   MAX_SKILL_METADATA_PROMPT_BYTES,
+  SHARED_CHILD_CONTEXT_GUIDANCE,
 } from "../../src/prompt/prompts.ts";
+import { DEFAULT_AGENTS } from "../../src/agents/default-agents.ts";
 import type { AgentConfig, EnvInfo } from "../../src/types.ts";
 
 vi.mock("@earendil-works/pi-coding-agent", async () => {
@@ -35,7 +37,37 @@ const env: EnvInfo = {
   platform: "linux",
 };
 
+const EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE = `You do not have the parent's full conversation context. If additional context, clarification, evidence, or a decision from the parent would materially help you continue correctly, you may stop and ask for it instead of guessing.
+
+Ask only for information you cannot reasonably obtain from your delegated prompt, existing session context, repository, or available tools. State clearly what you need and why.
+
+The parent may resume this same session with AgentContinue. When resumed, continue from your existing work instead of restarting or repeating completed investigation.`;
+
 describe("buildAgentPrompt", () => {
+  it("injects one exact shared context block at the same stable position for every role", () => {
+    expect(SHARED_CHILD_CONTEXT_GUIDANCE).toBe(EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE);
+    const configs = [
+      ...DEFAULT_AGENTS.values(),
+      { ...baseConfig, name: "custom-agent" },
+    ];
+    const prompts = configs.map((config) => buildAgentPrompt(config, "/test/cwd", env));
+    const positions = prompts.map((prompt) => prompt.indexOf(EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE));
+
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(new Set(positions).size).toBe(1);
+    for (const [index, prompt] of prompts.entries()) {
+      const start = positions[index]!;
+      expect(prompt.slice(start, start + EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE.length))
+        .toBe(EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE);
+      expect(prompt.indexOf(EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE, start + 1)).toBe(-1);
+      expect(start).toBeGreaterThan(prompt.indexOf("Platform: linux"));
+      expect(start).toBeLessThan(prompt.indexOf(`<active_agent name="${configs[index]!.name}"/>`));
+      expect(prompt.indexOf("<active_agent")).toBeLessThan(prompt.indexOf("<agent_instructions>"));
+      for (const marker of ["BLOCKED", "QUESTION", "NEEDS_CONTEXT", "WAITING_FOR_PARENT"]) {
+        expect(prompt).not.toContain(marker);
+      }
+    }
+  });
   it("always uses the replacement base and includes role instructions", () => {
     const result = buildAgentPrompt(baseConfig, "/test/cwd", env);
 
@@ -149,6 +181,7 @@ describe("buildAgentPrompt — project context", () => {
       contextFiles: [{ path: "/test/cwd/AGENTS.md", content: "Context" }],
       skillMetas: [{ name: "tdd", description: "TDD", location: "/skills/tdd", disableModelInvocation: false }],
     });
+    expect(result.indexOf(EXPECTED_SHARED_CHILD_CONTEXT_GUIDANCE)).toBeLessThan(result.indexOf("<project_context>"));
     expect(result.indexOf("<project_context>")).toBeLessThan(result.indexOf("<agent_instructions>"));
     expect(result.indexOf("<available_skills>")).toBeGreaterThan(result.indexOf("<agent_instructions>"));
   });

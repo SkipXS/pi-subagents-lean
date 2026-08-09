@@ -17,6 +17,13 @@ import type { SkillMeta } from "./skill-loader.js";
 export { MAX_CHILD_SYSTEM_PROMPT_BYTES } from "../agents/agent-string-limits.js";
 export { MAX_SKILL_METADATA_PROMPT_BYTES } from "./skill-limits.js";
 
+/** Shared guidance for context-isolated child sessions. */
+export const SHARED_CHILD_CONTEXT_GUIDANCE = `You do not have the parent's full conversation context. If additional context, clarification, evidence, or a decision from the parent would materially help you continue correctly, you may stop and ask for it instead of guessing.
+
+Ask only for information you cannot reasonably obtain from your delegated prompt, existing session context, repository, or available tools. State clearly what you need and why.
+
+The parent may resume this same session with AgentContinue. When resumed, continue from your existing work instead of restarting or repeating completed investigation.`;
+
 /** Extra sections to inject into the system prompt (skills). */
 export interface PromptExtras {
   /** Skill metadata for display (name, description, location only). */
@@ -133,6 +140,7 @@ export function buildAgentPrompt(
   const activeAgentTag = `<active_agent name="${config.name}"/>`;
   const basePrompt = `You are a Pi, an expert coding sub-agent.\nYou have been invoked to handle a specific task autonomously.\n\n${envBlock}`;
   append(basePrompt);
+  append(`\n\n${SHARED_CHILD_CONTEXT_GUIDANCE}`);
 
   // Project context files (AGENTS.md) — placed after the shared prefix and
   // before the role instructions.
@@ -146,7 +154,7 @@ export function buildAgentPrompt(
     append("</project_context>");
   }
 
-  // active_agent goes AFTER shared prefix (header + env + context) for KV cache.
+  // active_agent goes AFTER the shared prefix (header + env + guidance + context) for KV cache.
   append(`\n${activeAgentTag}\n\n<agent_instructions>\n${config.systemPrompt}\n</agent_instructions>`);
   if (skillMetadataPrompt !== undefined) append(skillMetadataPrompt);
 

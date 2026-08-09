@@ -114,7 +114,16 @@ catalog and excludes project context.
 Every child session is AsyncLocalStorage-isolated. It sees only its configured
 work tools and never receives either root delegation tool, so children cannot
 start another child or access the parent conversation. Prompt handoffs are
-explicit and self-contained.
+self-contained by default: the extension does not automatically inject a
+complete parent transcript, parent tool history, or peer context.
+
+If missing context, clarification, evidence, or a decision from the parent
+would materially help and cannot reasonably be obtained from the delegated
+prompt, existing session context, repository, or available tools, a child may
+ask for the specific information and state why. The parent should resolve the
+request from available evidence when possible, then use `AgentContinue` to
+resume the same retained session with the answer or new evidence rather than
+replacing the child merely because it asked.
 
 Child sessions are kept in memory. `AgentContinue` reuses the exact retained
 live child session during the parent session: continuation never replaces or
