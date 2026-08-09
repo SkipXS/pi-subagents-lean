@@ -31,9 +31,8 @@ Thumbs.db
 *.swo
 *~
 
-# Tasks (keep only lessons.md)
+# Tasks
 tasks/*
-!tasks/lessons.md
 
 # Review and result files
 arch-review-*.md

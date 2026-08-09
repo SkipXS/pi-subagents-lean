@@ -64,13 +64,13 @@ try {
         }
       }
       const packagedFiles = [
-        "src/", "docs/coverage.md", "docs/releasing.md", "CHANGELOG.md", "README.md", "LICENSE",
+        "src/", "README.md", "CHANGELOG.md", "LICENSE",
       ];
       if (JSON.stringify(installedPackage.files) !== JSON.stringify(packagedFiles)) {
         throw new Error("Unexpected package files metadata");
       }
       for (const file of [
-        "README.md", "LICENSE", "CHANGELOG.md", "docs/coverage.md", "docs/releasing.md", "src/index.ts",
+        "README.md", "LICENSE", "CHANGELOG.md", "src/index.ts",
         "src/agents/defaults/architect.md", "src/agents/defaults/scout.md", "src/agents/defaults/implementer.md",
         "src/agents/defaults/reviewer.md", "src/agents/defaults/verifier.md",
       ]) {

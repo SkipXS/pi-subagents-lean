@@ -24,7 +24,7 @@ same await/release boundary.
 - Full caller responses are not replaced by bounded record projections.
 - Running and queued work use one FIFO scheduler and one configured root limit.
 - Parent cancellation and session shutdown remain service-owned cleanup paths.
-- Delivery maps, host message hooks, observer subscriptions, and execution-mode
-  projections are unnecessary and removed.
+- Delivery maps, host message hooks, observer subscriptions, and background/delivery
+  projections are absent from the active contract.
 - Legacy scalar manager/coordinator inputs and manual control adapters are not
   maintained as parallel contracts.

@@ -40,10 +40,8 @@ describe("productionManifest", () => {
     expect(manifest).not.toHaveProperty("exports");
     expect(manifest.files).toEqual([
       "src/",
-      "docs/coverage.md",
-      "docs/releasing.md",
-      "CHANGELOG.md",
       "README.md",
+      "CHANGELOG.md",
       "LICENSE",
     ]);
     expect({
