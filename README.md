@@ -1,5 +1,8 @@
 # pi-subagents-lean
 
+[![CI and coverage](https://github.com/SkipXS/pi-subagents-lean/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SkipXS/pi-subagents-lean/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Lightweight, isolated foreground delegation for [Pi](https://pi.dev). Give a specialist a bounded task, let it work in its own Pi session, and receive its complete result in the current turn. The parent remains responsible for planning, decisions, integration, and the final answer.
 
 This is the first public npm package release, `0.4.0`; the publicly visible `v0.1`–`v0.3` Git tags were internal checkpoints. The extension deliberately exposes exactly two tools: `Agent` and `AgentContinue`.
@@ -89,7 +92,97 @@ The bundled Markdown definitions are the catalog's default roles; their role fil
 | `reviewer` | Independent correctness, regression, security, and contract review | None; read-only |
 | `verifier` | Reproduction, validation, and reporting of a bounded check | None; read-only |
 
+### Custom Agents and precedence
+
+Custom roles are Markdown files. The parent refreshes these catalog locations before each turn:
+
+| Priority | Location | Scope |
+|---:|---|---|
+| 1 (highest) | `<selected effective cwd>/.pi/agents/*.md` | Invocation-local overlay when a trusted `worktree_path` is supplied |
+| 2 | `<project cwd>/.pi/agents/*.md` | Current trusted project |
+| 3 | `<project cwd>/.agents/agents/*.md` | Current trusted shared workspace |
+| 4 | `~/.pi/agent/agents/*.md` | User-global |
+| 5 | bundled roles | Built-in fallback |
+
+Project, shared-workspace, and selected-worktree definitions are excluded when the project is untrusted. Names match case-insensitively. Overrides merge **per field**: a higher-priority definition replaces only fields it explicitly sets, while omitted fields fall through to the next lower layer.
+
+For example, save this as `~/.pi/agent/agents/api-reviewer.md` for a global role, or as `.pi/agents/api-reviewer.md` in a trusted project:
+
+```markdown
+---
+name: api-reviewer
+description: Read-only API compatibility and regression review.
+tools: [read, grep, bash]
+extensions: false
+skills: false
+model: provider/model-id
+thinking: high
+---
+
+Review only the delegated API change. Compare public contracts, compatibility,
+tests, and migration impact. Report evidence-backed findings; do not edit files.
+```
+
+`name` and `description` identify the role in the parent catalog; the body is its system prompt. `tools`, `extensions`, `skills`, `model`, and `thinking` are optional. The new or edited definition is considered on the next parent-turn catalog refresh.
+
+Model and thinking resolve independently for each accepted `Agent` call:
+
+| Priority | Model source | Thinking source |
+|---:|---|---|
+| 1 (highest) | `agents.<name>.model` in `~/.pi/agent/subagents-lean.json` | `agents.<name>.thinking` in that config |
+| 2 | `model` in the effective Agent Markdown | `thinking` in the effective Agent Markdown |
+| 3 | Parent Pi session model | Parent Pi session thinking level |
+
+To **inherit both** from the parent, omit `model` and `thinking` from both the Markdown and the per-agent config. To set them in the Agent definition, keep lines such as `model: provider/model-id` and `thinking: high` in the Markdown. To override either field without editing the Agent file, use the read-only extension config:
+
+```json
+{
+  "agents": {
+    "api-reviewer": {
+      "model": "provider/model-id",
+      "thinking": "high"
+    }
+  }
+}
+```
+
+The two fields do not have to come from the same layer: for example, a config `model` can combine with Markdown `thinking`. Agent names in config match case-insensitively. If a configured model is unavailable, resolution falls through to the Markdown model and then the parent model; an unavailable Markdown model falls through to the parent. After the final model is selected, the requested or inherited thinking level is normalized to levels that model supports. The resolved values are frozen when the call is accepted, and the Agent row/result metadata shows the effective model and thinking.
+
 Parent orchestration policy is always active: before each parent turn, its handler refreshes a live, trust-scoped catalog. It injects the extension-owned **parent-only** block only when that visible catalog is non-empty; an empty catalog removes the old owned block. The block is not copied into children. The parent owns decomposition, sequencing, reconciliation, integration, validation, and the final answer.
+
+### Orchestration and prompt layout
+
+The parent block is generated from fixed guidance plus the sorted live Agent catalog; it is not a verbatim copy of every Agent file:
+
+```text
+parent system prompt
+└─ subagents-lean orchestration block
+   ├─ when to delegate versus work directly
+   ├─ independent parallel work versus dependent sequential work
+   ├─ self-contained handoff structure
+   ├─ AgentContinue and parent↔child clarification guidance
+   ├─ parent ownership of reconciliation and final validation
+   └─ visible Agent names + descriptions from the current catalog
+```
+
+A new child receives a separate prompt assembled in cache-friendly order:
+
+```text
+child system prompt
+├─ shared child identity + clarification/AgentContinue guidance
+├─ environment (effective cwd, Git state, platform)
+├─ applicable bounded AGENTS.md / CLAUDE.md context
+├─ active Agent name
+├─ <agent_instructions> from the effective Agent Markdown body
+└─ selected Skill metadata
+
+child user turn
+└─ the explicit Agent.prompt handoff
+```
+
+Selected tools and Extensions are registered on the child session; they are not pasted into the Agent Markdown body. The role body changes only the `<agent_instructions>` section.
+
+The ordering deliberately keeps the generic child identity and guidance stable across roles. For children with the same environment and applicable context, those sections also remain before the role-specific divergence. The parent catalog is sorted deterministically and its owned block is replaced at the end of the parent prompt, while the two public tool schemas stay fixed. These choices preserve the longest practical reusable prompt prefix, but an actual provider cache hit is never guaranteed: it depends on the selected model/provider and whether the preceding content is identical. When reported, `cacheRead`, `cacheWrite`, and `latestCacheHitRate` show the observed provider/Pi prompt-cache telemetry; they are unrelated to retained-session continuity.
 
 ## Scheduling and parallel work
 
@@ -178,6 +271,10 @@ follow-up.
 - Worktree validation is not a security sandbox; the parent must review delegated writes and final results.
 - Retention is bounded and in-memory; an evicted or shut-down child cannot be continued.
 
+## Origin and license
+
+This project is a fork and renamed successor of [`AlexParamonov/pi-subagents-lite`](https://github.com/AlexParamonov/pi-subagents-lite), which was originally derived from [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents). It is distributed under the MIT License; the upstream and current copyright notices are preserved in [LICENSE](LICENSE).
+
 ## Development
 
 ```bash
@@ -187,4 +284,4 @@ bun run typecheck:test
 bun run test
 ```
 
-The package entry is `./src/index.ts`; the five bundled Markdown role files are part of the package. Repository coverage, package, and release checks are documented in [the coverage policy](https://github.com/SkipXS/pi-subagents-lean/blob/v0.4.0/docs/coverage.md) and [the release checklist](https://github.com/SkipXS/pi-subagents-lean/blob/v0.4.0/docs/releasing.md).
+CI enforces minimum coverage of 79% statements, 74% branches, 75% functions, and 81% lines, plus stricter per-file gates for critical modules. The package entry is `./src/index.ts`; the five bundled Markdown role files are part of the package. Repository coverage, package, and release checks are documented in [the coverage policy](https://github.com/SkipXS/pi-subagents-lean/blob/v0.4.0/docs/coverage.md) and [the release checklist](https://github.com/SkipXS/pi-subagents-lean/blob/v0.4.0/docs/releasing.md).

@@ -88,6 +88,41 @@ and does not perform a second context or skill scan. Source tests cover
 candidate order, trust exclusion, byte/ancestor bounds, and file identity
 races.
 
+## Prompt assembly and cache boundaries
+
+The parent and child prompts are separate. `before_agent_start` strips the
+previous extension-owned orchestration block and appends a newly generated one
+only when a visible catalog exists. Its rules are fixed, while the bounded
+catalog is sorted by canonical Agent name. Updating the tail instead of the
+fixed public tool schemas avoids unnecessary parent-prefix churn; a catalog
+change still changes that tail.
+
+`buildAgentPrompt()` assembles a new child system prompt in this order:
+
+```text
+1. generic Pi child identity
+2. shared isolation, clarification, and AgentContinue guidance
+3. environment: effective cwd, repository/branch, platform
+4. bounded applicable context files
+5. <active_agent name="..."/>
+6. <agent_instructions>effective Agent Markdown body</agent_instructions>
+7. selected <available_skills> metadata
+```
+
+The explicit `Agent.prompt` is then sent as the child user turn. Selected tools
+and Extensions are session resources and registry policy, not text copied into
+`<agent_instructions>`.
+
+The stable identity/guidance prefix is identical across roles. Environment and
+context precede role-specific identity/instructions, so calls sharing those
+inputs can retain a longer common prefix. Role identity, instructions, and
+Skills intentionally diverge later. This layout is an optimization for
+provider prompt-prefix reuse, not a cache guarantee. Provider/Pi usage events
+are the only authority for `cacheRead`/`cacheWrite`; the extension derives the
+cumulative hit rate from that telemetry. Skill/catalog caches are separate
+resource-discovery caches, and `AgentContinue` reuses a live session rather
+than reconstructing one from any cache.
+
 ## Resource and lifecycle ownership
 
 Bundled defaults plus user definitions form the parent catalog; trusted shared,
