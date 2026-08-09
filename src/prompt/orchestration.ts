@@ -34,7 +34,7 @@ ${AGENT_CONTINUE_GUIDANCE}
 
 External APIs/lifecycle/concurrency/integration require installed/upstream evidence plus a representative real sequence; synthetic mocks alone are insufficient.
 
-Avoid review loops. When independent review is justified, set criteria/blocker bar, validate without scope expansion; stop after two no-blocker reviews with no material change unless checks fail or new evidence appears.`;
+Avoid review loops. When independent review is justified, set criteria/blocker bar, validate without scope expansion; stop after two independent no-blocker reviews with no material change unless checks fail or new evidence appears.`;
 
 /** All limits are UTF-8 bytes, not JavaScript UTF-16 code units. */
 export const MAX_ORCHESTRATION_NAME_LENGTH = 64;
