@@ -45,7 +45,7 @@ describe("parent orchestration prompt", () => {
     expect(prompt).toContain("never hand one agent the whole task");
     expect(prompt).toContain("Dependent stages sequential. Batch independent read-only foreground Agent calls in one parent turn; Pi submits them under the configured root concurrency limit. Never run overlapping writers concurrently.");
     expect(prompt).toContain("Use the same writer for a focused correction within its subsystem");
-    expect(prompt).toContain("two no-blocker reviews with no material change");
+    expect(prompt).toContain("stop after two independent no-blocker reviews with no material change unless checks fail or new evidence appears.");
     expect(prompt).toContain("Agents: `reviewer` — Review changes carefully.; `shipper` — Prepare release notes");
     expect(prompt.indexOf(EXPECTED_PARENT_CONTEXT_GUIDANCE)).toBeLessThan(prompt.indexOf("Agents: "));
     expect(prompt.indexOf(EXPECTED_AGENT_CONTINUE_GUIDANCE)).toBeLessThan(prompt.indexOf("Agents: "));
@@ -123,7 +123,7 @@ ${EXPECTED_PARENT_CONTEXT_GUIDANCE}`;
       ...agents,
       agent("custom-16", "Specialized role 16 for bounded project work."),
     ])).toContain("omitted");
-    expect(MAX_ORCHESTRATION_CATALOG_LENGTH).toBe(1800);
+    expect(MAX_ORCHESTRATION_CATALOG_LENGTH).toBe(1788);
   });
 
   it("bounds names, descriptions, catalog, agents, and total prompt with deterministic overflow", () => {
